@@ -8,6 +8,8 @@ extern tagGame tagUsrGame;
 extern ins UsrIns;
 /*##########DO NOT MODIFY THE CODE ABOVE##########*/
 
+std::string GetUsrAIStrategyDiagnostic();
+
 class UsrAI:public AI
 {
 public:

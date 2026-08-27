@@ -236,6 +236,7 @@ private:
     bool everHavePriest = false;
     bool everHaveCenter = false;
     int priestLossDelayFrames = 0;
+    string gameOverReason;
 //*****************************************
 
 //****************Music*********************

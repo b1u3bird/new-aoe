@@ -1,6 +1,6 @@
 *.orig
 *.user*
-
+.*
 # Qt相关临时文件
 Makefile*
 *.o
