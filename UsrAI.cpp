@@ -114,6 +114,7 @@ static int armyCampOrderId = -1;
 static int buildOrderId = -1;
 // 当前普通建造指令对应的建筑类型。
 static int buildOrderType = -1;
+static int buildFarmerSN = -1;
 // 棍棒兵生产指令的异步指令 ID，-1 表示没有等待中的指令。
 static int clubmanOrderId = -1;
 // 农民生产指令的异步指令 ID，-1 表示没有等待中的指令。
@@ -798,6 +799,150 @@ static int ResourcePriority(int resourceType)
     return 100;
 }
 
+static int ResourceBucket(int resourceType)
+{
+    if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE ||
+        resourceType == RESOURCE_ELEPHANT)
+        return 0;
+    if (resourceType == RESOURCE_TREE)
+        return 1;
+    if (resourceType == RESOURCE_STONE)
+        return 2;
+    if (resourceType == RESOURCE_GOLD)
+        return 3;
+    return -1;
+}
+
+static bool IsGatherableResource(const tagResource &resource)
+{
+    return resource.Cnt > 0 || resource.Blood > 0;
+}
+
+static bool HasGatherableResourceType(int bucket)
+{
+    for (const tagResource &resource : info.resources)
+    {
+        if (ResourceBucket(resource.Type) == bucket &&
+            IsGatherableResource(resource))
+            return true;
+    }
+    return false;
+}
+
+static bool IsFarmerBuilding(const tagFarmer &farmer)
+{
+    if (farmer.WorkObjectSN < 0)
+        return false;
+    for (const tagBuilding &building : info.buildings)
+    {
+        if (building.SN == farmer.WorkObjectSN && building.Blood > 0 &&
+            building.Percent < 100)
+            return true;
+    }
+    return false;
+}
+
+static void CalculateFarmerTargets(int targets[4], int current[4])
+{
+    for (int bucket = 0; bucket < 4; bucket++)
+    {
+        targets[bucket] = 0;
+        current[bucket] = 0;
+    }
+
+    int farmerCount = 0;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0)
+            continue;
+        farmerCount++;
+
+        for (const tagResource &resource : info.resources)
+        {
+            // WorkObjectSN 比 ResourceSort 更可靠：后者可能表示农民手里携带的资源。
+            if (farmer.WorkObjectSN == resource.SN &&
+                IsGatherableResource(resource))
+            {
+                const int bucket = ResourceBucket(resource.Type);
+                if (bucket >= 0)
+                    current[bucket]++;
+                break;
+            }
+        }
+    }
+
+    if (farmerCount == 0)
+        return;
+
+    // 食物维持生产，木材保障建筑；石头和黄金只在确有需求时扩大配额。
+    int weight[4] = {5, 2, 0, 0};
+    if (info.Meat < 450)
+        weight[0] += 4;
+    else if (info.Meat < 800)
+        weight[0] += 2;
+
+    const bool needWoodBuilding =
+        HasIncompleteBuilding(BUILDING_HOME) ||
+        HasIncompleteBuilding(BUILDING_ARMYCAMP) ||
+        HasIncompleteBuilding(BUILDING_RANGE) ||
+        HasIncompleteBuilding(BUILDING_STABLE);
+    if (info.Wood < 250)
+        weight[1] += 4;
+    else if (info.Wood < 500)
+        weight[1] += 2;
+    if (needWoodBuilding)
+        weight[1] += 4;
+
+    const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
+    if (needStone && info.Stone < 300)
+        weight[2] += 5;
+
+    // 工具时代升级、兵种升级和高级兵生产由黄金需求拉动；没有需求时保持零配额。
+    const bool needGold = info.civilizationStage == CIVILIZATION_TOOLAGE &&
+                          (info.Gold < 250 || HasBuilding(BUILDING_MARKET));
+    if (needGold)
+        weight[3] += 3;
+
+    const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
+    if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
+        weight[1] += 3;
+
+    int totalWeight = 0;
+    for (int bucket = 0; bucket < 4; bucket++)
+    {
+        if (weight[bucket] > 0 && HasGatherableResourceType(bucket))
+            totalWeight += weight[bucket];
+        else
+            weight[bucket] = 0;
+    }
+    if (totalWeight == 0)
+        return;
+
+    int allocated = 0;
+    for (int bucket = 0; bucket < 4; bucket++)
+    {
+        targets[bucket] = farmerCount * weight[bucket] / totalWeight;
+        allocated += targets[bucket];
+    }
+
+    // 最大余数不足以保留时，优先补给最高权重资源。
+    while (allocated < farmerCount)
+    {
+        int bestBucket = -1;
+        for (int bucket = 0; bucket < 4; bucket++)
+        {
+            if (weight[bucket] <= 0 || !HasGatherableResourceType(bucket))
+                continue;
+            if (bestBucket < 0 || weight[bucket] > weight[bestBucket])
+                bestBucket = bucket;
+        }
+        if (bestBucket < 0)
+            break;
+        targets[bestBucket]++;
+        allocated++;
+    }
+}
+
 static int ResourceRole(const tagFarmer &farmer)
 {
     map<int, int>::iterator role = farmerResourceRole.find(farmer.SN);
@@ -808,46 +953,41 @@ static int ResourceRole(const tagFarmer &farmer)
     return assignedRole;
 }
 
-static int FindBestResourceSN(const tagFarmer &farmer)
+static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
+                              const int current[4])
 {
-    int preferredType = RESOURCE_BUSH;
-    const int slot = ResourceRole(farmer);
-    if (slot < 5)
-        preferredType = RESOURCE_BUSH;
-    else if (slot < 8)
-        preferredType = RESOURCE_TREE;
-    else if (slot == 8)
-        preferredType = RESOURCE_STONE;
-    else
-        preferredType = RESOURCE_GOLD;
-
     int bestSN = -1;
-    int bestPriority = 1000000000;
-    int bestDis2 = 1000000000;
+    int bestScore = 1000000000;
+    map<int, int> resourceWorkers;
+
+    for (const tagFarmer &other : info.farmers)
+    {
+        if (other.Blood <= 0 || other.WorkObjectSN < 0)
+            continue;
+        resourceWorkers[other.WorkObjectSN]++;
+    }
+
     for (const tagResource &resource : info.resources)
     {
-        if (resource.Cnt <= 0 && resource.Blood <= 0)
-            continue;
-        if (resource.Type == RESOURCE_LION || resource.Type == RESOURCE_FISH)
+        const int bucket = ResourceBucket(resource.Type);
+        if (bucket != desiredBucket || !IsGatherableResource(resource))
             continue;
 
-        int priority = resource.Type == preferredType ? 0 : 10;
-        if (resource.Type == RESOURCE_GAZELLE || resource.Type == RESOURCE_ELEPHANT)
-            priority += preferredType == RESOURCE_BUSH ? 0 : 3;
-        if (resource.Type == RESOURCE_TREE)
-            priority += preferredType == RESOURCE_TREE ? 0 : 2;
-        if (resource.Type == RESOURCE_STONE)
-            priority += preferredType == RESOURCE_STONE ? 0 : 4;
-        if (resource.Type == RESOURCE_GOLD)
-            priority += preferredType == RESOURCE_GOLD ? 0 : 5;
-
-        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                                   resource.BlockDR, resource.BlockUR);
-        if (priority < bestPriority ||
-            (priority == bestPriority && dis2 < bestDis2))
+        const int workers = resourceWorkers[resource.SN];
+        const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                       resource.BlockDR, resource.BlockUR);
+        const int softCapacity = bucket == 0 ? 4 : 3;
+        const int crowdPenalty = workers >= softCapacity
+                                     ? (workers - softCapacity + 1) * 80
+                                     : workers * 12;
+        const int remainingPenalty = resource.Cnt > 0 && resource.Cnt < 100
+                                         ? 100
+                                         : 0;
+        const int score = distance + crowdPenalty + remainingPenalty -
+                          (current[bucket] > 0 ? 0 : 2);
+        if (score < bestScore)
         {
-            bestPriority = priority;
-            bestDis2 = dis2;
+            bestScore = score;
             bestSN = resource.SN;
         }
     }
@@ -860,7 +1000,7 @@ static int FindBuilderFarmerSN()
     int bestDis2 = 1000000000;
     const tagBuilding *center = FindBuildingByType(BUILDING_CENTER, true);
 
-    // 优先使用空闲农民，避免打断正在采集的工作。
+    // 优先使用空闲农民，避免打断正在采集或建造的工作。
     for (const tagFarmer &farmer : info.farmers)
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER ||
@@ -879,13 +1019,26 @@ static int FindBuilderFarmerSN()
     if (bestSN != -1)
         return bestSN;
 
-    // 人口达到上限时不能等待所有农民自然空闲，否则永远无法补房。
-    // 采集关系可被 HumanBuild 中止，因此在没有空闲农民时抢占最近的采集者。
+    // 人口达到上限时不能等待所有农民自然空闲，否则无法补房。
+    // 但建造中的农民不能被新的 HumanBuild 或采集命令抢占。
     bestDis2 = 1000000000;
     for (const tagFarmer &farmer : info.farmers)
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER ||
             farmer.Blood <= 0 || farmer.NowState != HUMAN_STATE_WORKING)
+            continue;
+
+        bool building = false;
+        for (const tagBuilding &candidate : info.buildings)
+        {
+            if (candidate.SN == farmer.WorkObjectSN && candidate.Blood > 0 &&
+                candidate.Percent < 100)
+            {
+                building = true;
+                break;
+            }
+        }
+        if (building)
             continue;
 
         int dis2 = center ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
@@ -957,13 +1110,22 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
     if (g_frame - lastEconomyOrderFrame < USR_ECONOMY_ORDER_INTERVAL)
         return false;
 
+    static int target[4] = {0, 0, 0, 0};
+    static int assigned[4] = {0, 0, 0, 0};
+    static int quotaFrame = -1000000;
+    if (g_frame - quotaFrame >= 240)
+    {
+        CalculateFarmerTargets(target, assigned);
+        quotaFrame = g_frame;
+    }
+
     for (const tagFarmer &farmer : info.farmers)
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0 ||
             farmer.NowState != HUMAN_STATE_IDLE)
-        {
             continue;
-        }
+        if (IsFarmerBuilding(farmer) || farmer.SN == buildFarmerSN)
+            continue;
 
         // 被威胁的农民必须先经过安全滞后，避免敌人刚离开就反复撤退/采集。
         map<int, int>::const_iterator threatIt = farmerThreatLastFrame.find(farmer.SN);
@@ -972,24 +1134,46 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
             map<int, int>::const_iterator safeIt = farmerSafeSinceFrame.find(farmer.SN);
             if (safeIt == farmerSafeSinceFrame.end() ||
                 g_frame - safeIt->second < 120)
-            {
                 continue;
-            }
         }
 
         map<int, int>::const_iterator orderIt = farmerLastOrderFrame.find(farmer.SN);
         if (orderIt != farmerLastOrderFrame.end() &&
             g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
-        {
-            continue;
-        }
-        int targetSN = FindBestResourceSN(farmer);
-        if (targetSN == -1)
             continue;
 
-        int orderId = ai->HumanAction(farmer.SN, targetSN);
+        int desiredBucket = 0;
+        int largestDeficit = 0;
+        for (int bucket = 0; bucket < 4; bucket++)
+        {
+            const int deficit = target[bucket] - assigned[bucket];
+            if (deficit > largestDeficit)
+            {
+                largestDeficit = deficit;
+                desiredBucket = bucket;
+            }
+        }
+
+        // 没有配额缺口时，空闲农民才补到食物，避免无意义地改派农民。
+        int targetSN = FindBestResourceSN(farmer, desiredBucket, assigned);
+        if (targetSN < 0)
+        {
+            for (int bucket = 0; bucket < 4 && targetSN < 0; bucket++)
+            {
+                if (bucket == desiredBucket || target[bucket] <= assigned[bucket])
+                    continue;
+                targetSN = FindBestResourceSN(farmer, bucket, assigned);
+                if (targetSN >= 0)
+                    desiredBucket = bucket;
+            }
+        }
+        if (targetSN < 0)
+            continue;
+
+        const int orderId = ai->HumanAction(farmer.SN, targetSN);
         farmerLastOrderFrame[farmer.SN] = g_frame;
         lastEconomyOrderFrame = g_frame;
+        assigned[desiredBucket]++;
         farmerThreatLastFrame.erase(farmer.SN);
         farmerSafeSinceFrame.erase(farmer.SN);
         return true;
@@ -1092,6 +1276,7 @@ static bool TryBuild(UsrAI *ai, int buildingType)
             buildCandidateIndex++;
         buildOrderId = -1;
         buildOrderType = -1;
+        buildFarmerSN = -1;
     }
     if (g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL)
         return false;
@@ -1103,6 +1288,7 @@ static bool TryBuild(UsrAI *ai, int buildingType)
         return false;
     buildOrderId = ai->HumanBuild(farmerSN, buildingType, position.first, position.second);
     buildOrderType = buildingType;
+    buildFarmerSN = farmerSN;
     if (buildingType == BUILDING_ARMYCAMP)
         armyCampOrderId = buildOrderId;
     lastBuildOrderFrame = g_frame;
@@ -1280,6 +1466,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
                 buildCandidateIndex++;
             buildOrderId = -1;
             buildOrderType = -1;
+            buildFarmerSN = -1;
         }
     }
 
