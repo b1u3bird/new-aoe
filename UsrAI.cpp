@@ -825,11 +825,35 @@ static int FindBuilderFarmerSN(const tagInfo &info)
     int bestSN = -1;
     int bestDis2 = 1000000000;
     const tagBuilding *center = FindBuildingByType(info, BUILDING_CENTER, true);
+
+    // 优先使用空闲农民，避免打断正在采集的工作。
     for (const tagFarmer &farmer : info.farmers)
     {
-        if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0 ||
-            farmer.NowState != HUMAN_STATE_IDLE)
+        if (farmer.FarmerSort != FARMERTYPE_FARMER ||
+            farmer.Blood <= 0 || farmer.NowState != HUMAN_STATE_IDLE)
             continue;
+
+        int dis2 = center ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                      center->BlockDR, center->BlockUR)
+                          : 0;
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = farmer.SN;
+        }
+    }
+    if (bestSN != -1)
+        return bestSN;
+
+    // 人口达到上限时不能等待所有农民自然空闲，否则永远无法补房。
+    // 采集关系可被 HumanBuild 中止，因此在没有空闲农民时抢占最近的采集者。
+    bestDis2 = 1000000000;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.FarmerSort != FARMERTYPE_FARMER ||
+            farmer.Blood <= 0 || farmer.NowState != HUMAN_STATE_WORKING)
+            continue;
+
         int dis2 = center ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
                                       center->BlockDR, center->BlockUR)
                           : 0;
@@ -1234,29 +1258,6 @@ static pair<double, double> GetPriestRetreatPoint(const tagInfo &info,
                      (blockUR + 0.5) * double(BLOCKSIDELENGTH));
 }
 
-static pair<double, double> GetPriestEmergencyPoint(const tagInfo &info,
-                                                     const tagArmy &priest,
-                                                     const tagArmy &threat)
-{
-    int dx = priest.BlockDR - threat.BlockDR;
-    int dy = priest.BlockUR - threat.BlockUR;
-    if (dx == 0 && dy == 0)
-        dx = 1;
-
-    // 危险时先沿远离攻击者的方向移动，避免中心方向把祭司带回敌人身边。
-    int blockDR = priest.BlockDR;
-    int blockUR = priest.BlockUR;
-    if (abs(dx) >= abs(dy))
-        blockDR += dx > 0 ? 12 : -12;
-    else
-        blockUR += dy > 0 ? 12 : -12;
-
-    blockDR = max(1, min(MAP_L - 2, blockDR));
-    blockUR = max(1, min(MAP_U - 2, blockUR));
-    return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                     (blockUR + 0.5) * double(BLOCKSIDELENGTH));
-}
-
 static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR)
 {
     if (blockDR < 1 || blockUR < 1 ||
@@ -1274,8 +1275,46 @@ static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR)
     return true;
 }
 
+// 祭司撤退点选择依赖该合法性检查，提前声明以保持函数定义顺序清晰。
+static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR);
+
+static pair<double, double> GetPriestEmergencyPoint(const tagInfo &info,
+                                                    const tagArmy &priest,
+                                                    const tagArmy &threat)
+{
+    const int dx = priest.BlockDR - threat.BlockDR;
+    const int dy = priest.BlockUR - threat.BlockUR;
+    const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
+    const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+
+    // 沿祭司与威胁的反方向选点；优先走主轴，避免斜向移动重新贴近敌人。
+    const bool useDR = abs(dx) >= abs(dy);
+    const int offsets[][2] = {
+        {12, 0}, {10, 0}, {8, 0}, {6, 0}, {0, 12}, {0, 10}, {0, 8}, {0, 6}};
+    const int offsetCount = sizeof(offsets) / sizeof(offsets[0]);
+    for (int i = 0; i < offsetCount; ++i)
+    {
+        int blockDR = priest.BlockDR;
+        int blockUR = priest.BlockUR;
+        if (useDR)
+            blockDR += stepDR * offsets[i][0];
+        else
+            blockUR += stepUR * offsets[i][1];
+
+        blockDR = max(1, min(MAP_L - 2, blockDR));
+        blockUR = max(1, min(MAP_U - 2, blockUR));
+        if (IsPriestPointUsable(info, blockDR, blockUR))
+            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+    }
+
+    // 地图边界或地形没有合法反方向格时，保持当前位置，避免向敌人方向乱走。
+    return make_pair((priest.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                     (priest.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+}
+
 static pair<double, double> GetPriestDefensePoint(const tagInfo &info,
-                                                   const tagArmy &priest)
+                                                  const tagArmy &priest)
 {
     const tagBuilding *tower = FindBuildingByType(info, BUILDING_ARROWTOWER, true);
     const tagBuilding *center = FindCenter(info);
@@ -1285,9 +1324,7 @@ static pair<double, double> GetPriestDefensePoint(const tagInfo &info,
     {
         // 祭司站在箭塔相邻格，避免把移动目标设为建筑占用格。
         static const int OFFSETS[][2] = {
-            {1, 0}, {-1, 0}, {0, 1}, {0, -1},
-            {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
-        };
+            {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
         int bestDR = -1;
         int bestUR = -1;
         int bestScore = 1000000000;
@@ -1329,67 +1366,46 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
     if (priestMoveOrderId != -1)
     {
         map<int, int>::const_iterator result = info.ins_ret.find(priestMoveOrderId);
-        if (result != info.ins_ret.end())
-        {
+        if (result != info.ins_ret.end() ||
+            g_frame - priestEmergencyTargetFrame >=
+                USR_PRODUCTION_ORDER_TIMEOUT)
             priestMoveOrderId = -1;
-        }
     }
 
-    const tagArmy *threat = nullptr;
-    const int directThreatSN = FindThreatToPriestSN(info, priest->SN);
-    if (directThreatSN != -1)
+    // 只把严格小于两格的敌方单位视为祭司当前危险。
+    const tagArmy *closeThreat = nullptr;
+    int closestDis2 = 1000000000;
+    for (const tagArmy &enemy : info.enemy_armies)
     {
-        for (const tagArmy &enemy : info.enemy_armies)
+        if (enemy.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
+                                   enemy.BlockDR, enemy.BlockUR);
+        if (dis2 < 2 * 2 && dis2 < closestDis2)
         {
-            if (enemy.SN == directThreatSN)
-            {
-                threat = &enemy;
-                break;
-            }
+            closeThreat = &enemy;
+            closestDis2 = dis2;
         }
     }
-    if (!threat)
-        threat = FindNearestEnemyArmy(info, priest->BlockDR, priest->BlockUR);
 
-    const int threatDis2 = threat
-                               ? BlockDis2(priest->BlockDR, priest->BlockUR,
-                                           threat->BlockDR, threat->BlockUR)
-                               : 1000000000;
-    const bool underDirectAttack = threat && threat->WorkObjectSN == priest->SN;
-    const bool dangerNow = threat &&
-                           (underDirectAttack ||
-                            threatDis2 <= USR_PRIEST_DANGER_RADIUS *
-                                          USR_PRIEST_DANGER_RADIUS);
-    if (dangerNow)
+    if (closeThreat)
     {
         priestSafeSinceFrame = USR_INVALID_FRAME;
         priestDangerLastFrame = g_frame;
-        priestDangerTargetSN = threat->SN;
-    }
+        priestDangerTargetSN = closeThreat->SN;
 
-    // 危险解除后继续留在箭塔附近，给移动关系和防线留出稳定时间。
-    const bool keepEmergencyPosition =
-        priestDangerLastFrame != USR_INVALID_FRAME &&
-        g_frame - priestDangerLastFrame < 240;
-    if (dangerNow || keepEmergencyPosition)
-    {
-        pair<double, double> emergencyPoint;
-        if (dangerNow)
-            emergencyPoint = GetPriestEmergencyPoint(info, *priest, *threat);
-        else
-            emergencyPoint = GetPriestDefensePoint(info, *priest);
-        int blockDR = static_cast<int>(emergencyPoint.first /
-                                       double(BLOCKSIDELENGTH));
-        int blockUR = static_cast<int>(emergencyPoint.second /
-                                       double(BLOCKSIDELENGTH));
-        pair<int, int> target = make_pair(blockDR, blockUR);
-        if (priestMoveOrderId == -1 ||
-            (target != priestEmergencyTarget &&
-             g_frame - priestEmergencyTargetFrame >= 60))
+        const pair<double, double> retreatPoint =
+            GetPriestEmergencyPoint(info, *priest, *closeThreat);
+        const pair<int, int> target = make_pair(
+            static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
+            static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
+        if (priestMoveOrderId == -1 &&
+            (target != priestEmergencyTarget ||
+             g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL))
         {
             priestMoveOrderId = ai->HumanMove(priest->SN,
-                                               emergencyPoint.first,
-                                               emergencyPoint.second);
+                                              retreatPoint.first,
+                                              retreatPoint.second);
             priestEmergencyTarget = target;
             priestEmergencyTargetFrame = g_frame;
             lastPriestOrderFrame = g_frame;
@@ -1397,55 +1413,21 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
         return;
     }
 
+    // 所有敌人都超过两格后，不再追加移动，让下一条作战指令接管祭司。
     priestDangerTargetSN = -1;
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
-
-    // 进攻窗口内一直保持撤离，直到中心周围不再有可见敌军。
-    const bool firstWaveWindow = g_frame >= USR_PRIEST_PREPARE_FRAME && g_frame < 11000;
-    const bool secondWaveWindow = g_frame >= 12500 && g_frame < 19000;
-    const bool thirdWaveWindow = g_frame >= 20000 && g_frame < USR_PRIEST_ADVANCE_FRAME;
-    if ((firstWaveWindow || secondWaveWindow || thirdWaveWindow) &&
-        (HasVisibleWaveThreat(info) ||
-         g_frame < 6500 ||
-         (g_frame >= 12500 && g_frame < 14500) ||
-         (g_frame >= 20000 && g_frame < USR_PRIEST_ADVANCE_FRAME)))
-    {
-        pair<double, double> defensePoint = GetPriestDefensePoint(info, *priest);
-        int defenseBlockDR = static_cast<int>(defensePoint.first / double(BLOCKSIDELENGTH));
-        int defenseBlockUR = static_cast<int>(defensePoint.second / double(BLOCKSIDELENGTH));
-        if (priestMoveOrderId == -1 ||
-            g_frame - priestEmergencyTargetFrame >= 120 ||
-            priestEmergencyTarget != make_pair(defenseBlockDR, defenseBlockUR))
-        {
-            priestMoveOrderId = ai->HumanMove(priest->SN, defensePoint.first, defensePoint.second);
-            priestEmergencyTarget = make_pair(defenseBlockDR, defenseBlockUR);
-            priestEmergencyTargetFrame = g_frame;
-            lastPriestOrderFrame = g_frame;
-        }
-        return;
-    }
-
-    if (g_frame - priestSafeSinceFrame < USR_PRIEST_SAFE_FRAMES ||
-        priest->ConvertCooldown > 0)
-    {
-        return;
-    }
-
-    // 只有确认祭司已经远离敌人后，才允许开始转换。
-    const tagArmy *nearestEnemy =
-        FindNearestEnemyArmy(info, priest->BlockDR, priest->BlockUR);
-    if (nearestEnemy &&
-        BlockDis2(priest->BlockDR, priest->BlockUR,
-                  nearestEnemy->BlockDR, nearestEnemy->BlockUR) <=
-            USR_PRIEST_SAFE_RADIUS * USR_PRIEST_SAFE_RADIUS)
+    if (priest->ConvertCooldown > 0 || priestMoveOrderId != -1 ||
+        g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
         return;
 
     const tagBuilding *siege = FindEnemySiege(info);
-    if (!siege || g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
+    if (!siege)
         return;
 
-    ai->HumanAction(priest->SN, siege->SN);
+    // HumanAction 会中止祭司尚未完成的移动关系，并开始转换攻城武器。
+    priestMoveOrderId = ai->HumanAction(priest->SN, siege->SN);
+    priestEmergencyTargetFrame = g_frame;
     lastPriestOrderFrame = g_frame;
 }
 
