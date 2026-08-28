@@ -9,6 +9,7 @@ using namespace std;
 tagGame tagUsrGame;
 ins UsrIns;
 /*##########DO NOT MODIFY THE CODE ABOVE##########*/
+tagInfo info;
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -72,8 +73,15 @@ static map<int, int> towerLastOrderFrame;
 static map<int, pair<double, double>> harassHome;
 // 农民 SN 到上次采集或撤离指令帧的映射。
 static map<int, int> farmerLastOrderFrame;
+// 当前处于敌袭撤离状态的农民 SN 到最近一次发现威胁的帧。
+static map<int, int> farmerThreatLastFrame;
+// 农民确认脱离威胁后的起始帧，用于安全滞后。
+static map<int, int> farmerSafeSinceFrame;
 // 农民 SN 到固定资源角色的映射，角色值决定默认采集资源类型。
 static map<int, int> farmerResourceRole;
+// 第三波结束后侦察骑兵的移动节流和巡逻点状态。
+static map<int, int> scoutLastOrderFrame;
+static map<int, int> scoutWaypointIndex;
 // 下一个新农民使用的资源角色序号。
 static int nextFarmerResourceRole = 0;
 // 上次提交经济采集指令的游戏帧。
@@ -195,7 +203,7 @@ static void AddUnique(vector<int> &values, int value)
 
 // 接口：按 SN 查找我方军队对象。
 // 用途：目标锁清理、兵力调度、自动反击前确认单位仍然存在。
-static const tagArmy *FindMyArmyBySN(const tagInfo &info, int sn)
+static const tagArmy *FindMyArmyBySN(int sn)
 {
     for (const tagArmy &army : info.armies)
     {
@@ -207,7 +215,7 @@ static const tagArmy *FindMyArmyBySN(const tagInfo &info, int sn)
 
 // 接口：判断敌方任意目标是否仍然存在。
 // 用途：目标锁校验，目标死亡后允许重新选目标。
-static bool EnemyTargetAlive(const tagInfo &info, int sn)
+static bool EnemyTargetAlive(int sn)
 {
     if (sn == -1)
         return false;
@@ -235,13 +243,13 @@ static bool EnemyTargetAlive(const tagInfo &info, int sn)
 
 // 接口：读取某个我方军队单位当前锁定的敌方目标。
 // 用途：避免每帧重复下令；如果目标已不存在，会自动清锁。
-static int GetLockedArmyTarget(const tagInfo &info, int armySN)
+static int GetLockedArmyTarget(int armySN)
 {
     auto it = currentTarget.find(armySN);
     if (it == currentTarget.end())
         return -1;
 
-    if (EnemyTargetAlive(info, it->second))
+    if (EnemyTargetAlive(it->second))
         return it->second;
 
     currentTarget.erase(it);
@@ -261,11 +269,11 @@ static void ClearArmyTargetLock(int armySN)
 
 // 接口：清理已死亡或消失的我方单位目标锁。
 // 用途：建议每帧 AI 开头调用，防止静态 map 残留无效 SN。
-static void CleanDeadOwnerTargetLocks(const tagInfo &info)
+static void CleanDeadOwnerTargetLocks()
 {
     for (auto it = currentTarget.begin(); it != currentTarget.end();)
     {
-        if (FindMyArmyBySN(info, it->first) == nullptr)
+        if (FindMyArmyBySN(it->first) == nullptr)
         {
             int armySN = it->first;
             it = currentTarget.erase(it);
@@ -281,7 +289,7 @@ static void CleanDeadOwnerTargetLocks(const tagInfo &info)
 
 // 接口：按敌方 SN 查询敌方单位格子坐标。
 // 用途：箭塔判断当前目标是否还在射程内。
-static bool FindEnemyUnitBlockPosition(const tagInfo &info, int sn, int &blockDR, int &blockUR)
+static bool FindEnemyUnitBlockPosition(int sn, int &blockDR, int &blockUR)
 {
     for (const tagArmy &army : info.enemy_armies)
     {
@@ -308,9 +316,9 @@ static bool FindEnemyUnitBlockPosition(const tagInfo &info, int sn, int &blockDR
 
 // 接口：寻找正在直接攻击指定我方军队单位的最近敌人。
 // 用途：实现“受到攻击自动反击”。
-static int FindDirectThreatToArmySN(const tagInfo &info, int myArmySN)
+static int FindDirectThreatToArmySN(int myArmySN)
 {
-    const tagArmy *myArmy = FindMyArmyBySN(info, myArmySN);
+    const tagArmy *myArmy = FindMyArmyBySN(myArmySN);
     if (!myArmy)
         return -1;
 
@@ -371,7 +379,7 @@ static int FindDirectThreatToArmySN(const tagInfo &info, int myArmySN)
 
 // 接口：寻找进入我方军队警戒范围内的最近敌方农民。
 // 用途：让空闲兵力主动驱赶或击杀靠近的敌方农民。
-static int FindNearbyEnemyFarmerToAttack(const tagInfo &info, const tagArmy &myArmy)
+static int FindNearbyEnemyFarmerToAttack(const tagArmy &myArmy)
 {
     if (myArmy.Sort == AT_SHIP)
         return -1;
@@ -396,9 +404,35 @@ static int FindNearbyEnemyFarmerToAttack(const tagInfo &info, const tagArmy &myA
     return bestSN;
 }
 
+// 动物在状态快照中以资源形式出现；只把存活且靠近军队的狮子作为自卫目标。
+static int FindNearbyEnemyLionToAttack(const tagArmy &myArmy)
+{
+    if (myArmy.Sort == AT_SHIP)
+        return -1;
+
+    int bestSN = -1;
+    int bestDis2 = USR_FIELD_ARMY_AGGRO_RADIUS * USR_FIELD_ARMY_AGGRO_RADIUS;
+
+    for (const tagResource &resource : info.resources)
+    {
+        if (resource.Type != RESOURCE_LION || resource.Blood <= 0)
+            continue;
+
+        const int dis2 = BlockDis2(myArmy.BlockDR, myArmy.BlockUR,
+                                   resource.BlockDR, resource.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = resource.SN;
+        }
+    }
+
+    return bestSN;
+}
+
 // 接口：寻找附近友军正在承受的威胁。
 // 用途：实现小范围自动支援，附近队友被打时协助反击。
-static int FindAssistThreatNearArmy(const tagInfo &info, const tagArmy &myArmy)
+static int FindAssistThreatNearArmy(const tagArmy &myArmy)
 {
     int bestSN = -1;
     int bestDis = 1000000000;
@@ -468,7 +502,7 @@ static int FindAssistThreatNearArmy(const tagInfo &info, const tagArmy &myArmy)
 
 // 接口：选择当前主动进攻或骚扰的中心格。
 // 用途：给 SelectWaveUnitsBySort 提供“离哪里最近”的排序中心。
-static pair<int, int> GetHarassCenterBlock(const tagInfo &info)
+static pair<int, int> GetHarassCenterBlock()
 {
     for (const tagBuilding &building : info.enemy_buildings)
     {
@@ -495,13 +529,13 @@ static pair<int, int> GetHarassCenterBlock(const tagInfo &info)
 
 // 接口：按兵种选择离进攻中心最近的一批我方军队。
 // 用途：主动进攻时自动调度距离敌人最近的兵力。
-static void SelectWaveUnitsBySort(const tagInfo &info,
-                                  vector<int> &dst,
-                                  int unitSort,
-                                  int needCount,
-                                  const vector<int> &alreadyUsed)
+static void SelectWaveUnitsBySort(
+    vector<int> &dst,
+    int unitSort,
+    int needCount,
+    const vector<int> &alreadyUsed)
 {
-    pair<int, int> center = GetHarassCenterBlock(info);
+    pair<int, int> center = GetHarassCenterBlock();
     vector<pair<int, int>> candidates;
 
     for (const tagArmy &army : info.armies)
@@ -526,7 +560,7 @@ static void SelectWaveUnitsBySort(const tagInfo &info,
     for (int i = 0; i < static_cast<int>(candidates.size()) && needCount > 0; i++)
     {
         int sn = candidates[i].first;
-        const tagArmy *army = FindMyArmyBySN(info, sn);
+        const tagArmy *army = FindMyArmyBySN(sn);
         if (!army)
             continue;
 
@@ -538,7 +572,7 @@ static void SelectWaveUnitsBySort(const tagInfo &info,
 
 // 接口：按类型查找已完成且空闲的我方建筑。
 // 用途：统一调度时代、科技和生产命令，避免覆盖正在执行的项目。
-static const tagBuilding *FindReadyBuildingByType(const tagInfo &info, int type)
+static const tagBuilding *FindReadyBuildingByType(int type)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -551,9 +585,9 @@ static const tagBuilding *FindReadyBuildingByType(const tagInfo &info, int type)
     return nullptr;
 }
 
-static const tagBuilding *FindBuildingByType(const tagInfo &info,
-                                             int type,
-                                             bool requireCompleted)
+static const tagBuilding *FindBuildingByType(
+    int type,
+    bool requireCompleted)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -566,7 +600,7 @@ static const tagBuilding *FindBuildingByType(const tagInfo &info,
     return nullptr;
 }
 
-static bool HasCompletedBuilding(const tagInfo &info, int type)
+static bool HasCompletedBuilding(int type)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -578,7 +612,7 @@ static bool HasCompletedBuilding(const tagInfo &info, int type)
 
 // 接口：判断某类建筑是否已经存在（包括在建建筑）。
 // 用途：避免冷却重试期间重复创建同类地基。
-static bool HasBuilding(const tagInfo &info, int type)
+static bool HasBuilding(int type)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -588,7 +622,7 @@ static bool HasBuilding(const tagInfo &info, int type)
     return false;
 }
 
-static bool HasIncompleteBuilding(const tagInfo &info, int type)
+static bool HasIncompleteBuilding(int type)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -598,7 +632,7 @@ static bool HasIncompleteBuilding(const tagInfo &info, int type)
     return false;
 }
 
-static int CountArmyBySort(const tagInfo &info, int sort)
+static int CountArmyBySort(int sort)
 {
     int count = 0;
     for (const tagArmy &army : info.armies)
@@ -609,7 +643,7 @@ static int CountArmyBySort(const tagInfo &info, int sort)
     return count;
 }
 
-static const tagBuilding *FindCenter(const tagInfo &info)
+static const tagBuilding *FindCenter()
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -619,7 +653,7 @@ static const tagBuilding *FindCenter(const tagInfo &info)
     return nullptr;
 }
 
-static const tagArmy *FindPriest(const tagInfo &info)
+static const tagArmy *FindPriest()
 {
     for (const tagArmy &army : info.armies)
     {
@@ -629,9 +663,9 @@ static const tagArmy *FindPriest(const tagInfo &info)
     return nullptr;
 }
 
-static int FindThreatToPriestSN(const tagInfo &info, int priestSN)
+static int FindThreatToPriestSN(int priestSN)
 {
-    const tagArmy *priest = FindPriest(info);
+    const tagArmy *priest = FindPriest();
     if (!priest)
         return -1;
 
@@ -652,7 +686,7 @@ static int FindThreatToPriestSN(const tagInfo &info, int priestSN)
     return bestSN;
 }
 
-static const tagBuilding *FindEnemySiege(const tagInfo &info)
+static const tagBuilding *FindEnemySiege()
 {
     for (const tagBuilding &building : info.enemy_buildings)
     {
@@ -662,7 +696,7 @@ static const tagBuilding *FindEnemySiege(const tagInfo &info)
     return nullptr;
 }
 
-static const tagArmy *FindNearestEnemyArmy(const tagInfo &info, int blockDR, int blockUR)
+static const tagArmy *FindNearestEnemyArmy(int blockDR, int blockUR)
 {
     const tagArmy *best = nullptr;
     int bestDis2 = 1000000000;
@@ -680,10 +714,10 @@ static const tagArmy *FindNearestEnemyArmy(const tagInfo &info, int blockDR, int
     return best;
 }
 
-static bool HasVisibleWaveThreat(const tagInfo &info)
+static bool HasVisibleWaveThreat()
 {
-    const tagBuilding *center = FindCenter(info);
-    const tagArmy *priest = FindPriest(info);
+    const tagBuilding *center = FindCenter();
+    const tagArmy *priest = FindPriest();
     for (const tagArmy &enemy : info.enemy_armies)
     {
         if (enemy.Blood <= 0)
@@ -699,9 +733,9 @@ static bool HasVisibleWaveThreat(const tagInfo &info)
     return false;
 }
 
-static int ArmyTargetPriority(const tagInfo &info, const tagArmy &enemy)
+static int ArmyTargetPriority(const tagArmy &enemy)
 {
-    const tagArmy *priest = FindPriest(info);
+    const tagArmy *priest = FindPriest();
     if (priest && enemy.WorkObjectSN == priest->SN)
         return 0;
     if (enemy.Sort == AT_STONE_THROWER)
@@ -716,7 +750,7 @@ static int ArmyTargetPriority(const tagInfo &info, const tagArmy &enemy)
 
 // 接口：选择军队视野内的高优先级敌军。
 // 用途：优先保护祭司并集火投石车，而不是只攻击最近的单位。
-static int FindEnemyArmyInVision(const tagInfo &info, const tagArmy &army)
+static int FindEnemyArmyInVision(const tagArmy &army)
 {
     const int radius = army.Sort == AT_SCOUT ? 9 : USR_FIELD_ARMY_AGGRO_RADIUS;
     int bestSN = -1;
@@ -727,7 +761,7 @@ static int FindEnemyArmyInVision(const tagInfo &info, const tagArmy &army)
         int dis2 = BlockDis2(army.BlockDR, army.BlockUR, enemy.BlockDR, enemy.BlockUR);
         if (dis2 > radius * radius)
             continue;
-        int priority = ArmyTargetPriority(info, enemy);
+        int priority = ArmyTargetPriority(enemy);
         if (priority < bestPriority || (priority == bestPriority && dis2 < bestDis2))
         {
             bestPriority = priority;
@@ -738,7 +772,7 @@ static int FindEnemyArmyInVision(const tagInfo &info, const tagArmy &army)
     return bestSN;
 }
 
-static int ResourcePriority(const tagInfo &info, int resourceType)
+static int ResourcePriority(int resourceType)
 {
     if (info.Meat < 550)
     {
@@ -774,7 +808,7 @@ static int ResourceRole(const tagFarmer &farmer)
     return assignedRole;
 }
 
-static int FindBestResourceSN(const tagInfo &info, const tagFarmer &farmer)
+static int FindBestResourceSN(const tagFarmer &farmer)
 {
     int preferredType = RESOURCE_BUSH;
     const int slot = ResourceRole(farmer);
@@ -820,11 +854,11 @@ static int FindBestResourceSN(const tagInfo &info, const tagFarmer &farmer)
     return bestSN;
 }
 
-static int FindBuilderFarmerSN(const tagInfo &info)
+static int FindBuilderFarmerSN()
 {
     int bestSN = -1;
     int bestDis2 = 1000000000;
-    const tagBuilding *center = FindBuildingByType(info, BUILDING_CENTER, true);
+    const tagBuilding *center = FindBuildingByType(BUILDING_CENTER, true);
 
     // 优先使用空闲农民，避免打断正在采集的工作。
     for (const tagFarmer &farmer : info.farmers)
@@ -866,7 +900,7 @@ static int FindBuilderFarmerSN(const tagInfo &info)
     return bestSN;
 }
 
-static bool IsBuildCandidateUsable(const tagInfo &info, int blockDR, int blockUR)
+static bool IsBuildCandidateUsable(int blockDR, int blockUR)
 {
     if (!info.theMap)
         return true;
@@ -880,9 +914,9 @@ static bool IsBuildCandidateUsable(const tagInfo &info, int blockDR, int blockUR
     return (*info.theMap)[blockDR][blockUR].type != MAPPATTERN_OCEAN;
 }
 
-static pair<int, int> GetBuildCandidate(const tagInfo &info, int buildingType)
+static pair<int, int> GetBuildCandidate(int buildingType)
 {
-    const tagBuilding *center = FindCenter(info);
+    const tagBuilding *center = FindCenter();
     if (!center)
         return make_pair(-1, -1);
 
@@ -909,7 +943,7 @@ static pair<int, int> GetBuildCandidate(const tagInfo &info, int buildingType)
             ur += OFFSETS[index][1] > 0 ? radiusAddition :
                   (OFFSETS[index][1] < 0 ? -radiusAddition : 0);
         }
-        if (IsBuildCandidateUsable(info, dr, ur))
+        if (IsBuildCandidateUsable(dr, ur))
         {
             buildCandidateIndex = (index + 1) % count;
             return make_pair(dr, ur);
@@ -918,7 +952,7 @@ static pair<int, int> GetBuildCandidate(const tagInfo &info, int buildingType)
     return make_pair(-1, -1);
 }
 
-static bool TryAssignIdleFarmer(UsrAI *ai, const tagInfo &info)
+static bool TryAssignIdleFarmer(UsrAI *ai)
 {
     if (g_frame - lastEconomyOrderFrame < USR_ECONOMY_ORDER_INTERVAL)
         return false;
@@ -930,61 +964,120 @@ static bool TryAssignIdleFarmer(UsrAI *ai, const tagInfo &info)
         {
             continue;
         }
-        if (g_frame - farmerLastOrderFrame[farmer.SN] < USR_ECONOMY_ORDER_INTERVAL)
+
+        // 被威胁的农民必须先经过安全滞后，避免敌人刚离开就反复撤退/采集。
+        map<int, int>::const_iterator threatIt = farmerThreatLastFrame.find(farmer.SN);
+        if (threatIt != farmerThreatLastFrame.end())
+        {
+            map<int, int>::const_iterator safeIt = farmerSafeSinceFrame.find(farmer.SN);
+            if (safeIt == farmerSafeSinceFrame.end() ||
+                g_frame - safeIt->second < 120)
+            {
+                continue;
+            }
+        }
+
+        map<int, int>::const_iterator orderIt = farmerLastOrderFrame.find(farmer.SN);
+        if (orderIt != farmerLastOrderFrame.end() &&
+            g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
+        {
             continue;
-        int targetSN = FindBestResourceSN(info, farmer);
+        }
+        int targetSN = FindBestResourceSN(farmer);
         if (targetSN == -1)
             continue;
-        ai->HumanAction(farmer.SN, targetSN);
+
+        int orderId = ai->HumanAction(farmer.SN, targetSN);
         farmerLastOrderFrame[farmer.SN] = g_frame;
         lastEconomyOrderFrame = g_frame;
+        farmerThreatLastFrame.erase(farmer.SN);
+        farmerSafeSinceFrame.erase(farmer.SN);
         return true;
     }
     return false;
 }
 
-static void EvacuateFarmersDuringAttackWaves(UsrAI *ai, const tagInfo &info)
+static void EvacuateFarmersDuringAttackWaves(UsrAI *ai)
 {
-    const bool inFirstWave = g_frame >= 5600 && g_frame <= 11000;
-    const bool inSecondWave = g_frame >= 13000 && g_frame <= 19000;
-    const bool inThirdWave = g_frame >= 20500 && g_frame <= 26000;
-    if (!inFirstWave && !inSecondWave && !inThirdWave)
-        return;
+    const tagBuilding *center = FindCenter();
 
-    const tagBuilding *center = FindCenter(info);
-    if (!center)
-        return;
+    // 清理已经死亡或离开当前快照的农民，避免 SN 重用继承旧撤退状态。
+    set<int> liveFarmers;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER)
+            liveFarmers.insert(farmer.SN);
+    }
+    for (map<int, int>::iterator it = farmerThreatLastFrame.begin();
+         it != farmerThreatLastFrame.end();)
+    {
+        if (liveFarmers.find(it->first) == liveFarmers.end())
+        {
+            farmerSafeSinceFrame.erase(it->first);
+            farmerLastOrderFrame.erase(it->first);
+            it = farmerThreatLastFrame.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 
     for (const tagFarmer &farmer : info.farmers)
     {
         if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
             continue;
-        const tagArmy *threat = FindNearestEnemyArmy(info,
-                                                     farmer.BlockDR,
-                                                     farmer.BlockUR);
-        if (!threat)
+
+        const tagArmy *threat = FindNearestEnemyArmy(
+            farmer.BlockDR,
+            farmer.BlockUR);
+        const int dis2 = threat
+                             ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                         threat->BlockDR, threat->BlockUR)
+                             : 1000000000;
+        const bool threatened = threat &&
+                                (threat->WorkObjectSN == farmer.SN ||
+                                 dis2 <= USR_FIELD_FARMER_AGGRO_RADIUS *
+                                             USR_FIELD_FARMER_AGGRO_RADIUS);
+
+        if (!threatened)
+        {
+            if (farmerThreatLastFrame.find(farmer.SN) !=
+                    farmerThreatLastFrame.end() &&
+                farmerSafeSinceFrame.find(farmer.SN) == farmerSafeSinceFrame.end())
+            {
+                farmerSafeSinceFrame[farmer.SN] = g_frame;
+            }
             continue;
-        int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                             threat->BlockDR, threat->BlockUR);
-        if (threat->WorkObjectSN != farmer.SN && dis2 > 8 * 8)
-            continue;
-        if (g_frame - farmerLastOrderFrame[farmer.SN] < 30)
+        }
+
+        farmerThreatLastFrame[farmer.SN] = g_frame;
+        farmerSafeSinceFrame.erase(farmer.SN);
+        if (!center)
             continue;
 
+        map<int, int>::const_iterator orderIt = farmerLastOrderFrame.find(farmer.SN);
+        if (orderIt != farmerLastOrderFrame.end() &&
+            g_frame - orderIt->second < 30)
+        {
+            continue;
+        }
+
+        // 行走或工作中的农民也可能正在执行合法采集关系；只在危险时覆盖。
         int dx = center->BlockDR - threat->BlockDR;
         int dy = center->BlockUR - threat->BlockUR;
         int blockDR = center->BlockDR + (dx >= 0 ? 5 : -5);
         int blockUR = center->BlockUR + (dy >= 0 ? 5 : -5);
         blockDR = max(1, min(MAP_L - 2, blockDR));
         blockUR = max(1, min(MAP_U - 2, blockUR));
-        ai->HumanMove(farmer.SN,
-                      (blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                      (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+        int orderId = ai->HumanMove(farmer.SN,
+                                    (blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                                    (blockUR + 0.5) * double(BLOCKSIDELENGTH));
         farmerLastOrderFrame[farmer.SN] = g_frame;
     }
 }
 
-static bool TryBuild(UsrAI *ai, const tagInfo &info, int buildingType)
+static bool TryBuild(UsrAI *ai, int buildingType)
 {
     if (buildOrderId != -1)
     {
@@ -1002,10 +1095,10 @@ static bool TryBuild(UsrAI *ai, const tagInfo &info, int buildingType)
     }
     if (g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL)
         return false;
-    int farmerSN = FindBuilderFarmerSN(info);
+    int farmerSN = FindBuilderFarmerSN();
     if (farmerSN == -1)
         return false;
-    pair<int, int> position = GetBuildCandidate(info, buildingType);
+    pair<int, int> position = GetBuildCandidate(buildingType);
     if (position.first == -1)
         return false;
     buildOrderId = ai->HumanBuild(farmerSN, buildingType, position.first, position.second);
@@ -1016,7 +1109,7 @@ static bool TryBuild(UsrAI *ai, const tagInfo &info, int buildingType)
     return true;
 }
 
-static bool TryBuildingAction(UsrAI *ai, const tagInfo &info,
+static bool TryBuildingAction(UsrAI *ai,
                               int buildingType, int action)
 {
     int *pendingOrderId = nullptr;
@@ -1080,7 +1173,7 @@ static bool TryBuildingAction(UsrAI *ai, const tagInfo &info,
         g_frame - lastBuildingActionFrame < USR_BUILDING_ACTION_INTERVAL)
         return false;
 
-    const tagBuilding *building = FindReadyBuildingByType(info, buildingType);
+    const tagBuilding *building = FindReadyBuildingByType(buildingType);
     if (!building)
         return false;
 
@@ -1099,44 +1192,50 @@ static bool TryBuildingAction(UsrAI *ai, const tagInfo &info,
     return true;
 }
 
-static bool TryProduceFarmer(UsrAI *ai, const tagInfo &info,
+static bool TryProduceFarmer(UsrAI *ai,
                              bool nearPopulationCap)
 {
-    // DebugText 显示在游戏调试面板；限频输出，便于定位停产原因。
-    if (info.GameFrame % USR_DEBUG_TEXT_INTERVAL == 0)
-    {
-        ai->DebugText(QString("frame=%1 population=%2/%3 meat=%4 farmers=%5 nearCap=%6 centerReady=%7")
-                          .arg(info.GameFrame)
-                          .arg(info.Human_Num)
-                          .arg(info.Human_MaxNum)
-                          .arg(info.Meat)
-                          .arg(info.farmers.size())
-                          .arg(nearPopulationCap ? 1 : 0)
-                          .arg(FindReadyBuildingByType(info, BUILDING_CENTER) ? 1 : 0));
-    }
-
     if (nearPopulationCap || info.Meat < 50 ||
         static_cast<int>(info.farmers.size()) >= 14)
         return false;
 
-    return TryBuildingAction(ai, info, BUILDING_CENTER,
+    return TryBuildingAction(ai, BUILDING_CENTER,
                              BUILDING_CENTER_CREATEFARMER);
 }
 
-static bool TryProduceSoldier(UsrAI *ai, const tagInfo &info,
+static bool TryProduceSoldier(UsrAI *ai,
                               bool nearPopulationCap)
 {
     const int targetSoldiers = g_frame < 13000 ? 6 : 10;
     if (nearPopulationCap || info.Meat < 50 ||
-        CountArmyBySort(info, AT_CLUBMAN) >= targetSoldiers)
+        CountArmyBySort(AT_CLUBMAN) >= targetSoldiers)
         return false;
-    return TryBuildingAction(ai, info, BUILDING_ARMYCAMP,
+    return TryBuildingAction(ai, BUILDING_ARMYCAMP,
                              BUILDING_ARMYCAMP_CREATE_CLUBMAN);
+}
+
+static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
+{
+    if (!nearPopulationCap &&
+        CountArmyBySort(AT_BOWMAN) < 5 && info.Meat >= 40 && info.Wood >= 20)
+    {
+        TryBuildingAction(ai, BUILDING_RANGE,
+                          BUILDING_RANGE_CREATE_BOWMAN);
+    }
+}
+static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
+{
+    if (!nearPopulationCap &&
+        CountArmyBySort(AT_SCOUT) < 3 && info.Meat >= 100)
+    {
+        TryBuildingAction(ai, BUILDING_STABLE,
+                          BUILDING_STABLE_CREATE_SCOUT);
+    }
 }
 
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
-static void ManageEconomyAndProduction(UsrAI *ai, const tagInfo &info)
+static void ManageEconomyAndProduction(UsrAI *ai)
 {
     if (armyCampOrderId != -1)
     {
@@ -1162,8 +1261,8 @@ static void ManageEconomyAndProduction(UsrAI *ai, const tagInfo &info)
     if (g_frame >= 5000 && strategyDiagnosticFrame == USR_INVALID_FRAME)
     {
         strategyDiagnosticFrame = g_frame;
-        strategyDiagnosticClubmen = CountArmyBySort(info, AT_CLUBMAN);
-        strategyDiagnosticHasCamp = HasBuilding(info, BUILDING_ARMYCAMP) ? 1 : 0;
+        strategyDiagnosticClubmen = CountArmyBySort(AT_CLUBMAN);
+        strategyDiagnosticHasCamp = HasBuilding(BUILDING_ARMYCAMP) ? 1 : 0;
         strategyDiagnosticWood = info.Wood;
         strategyDiagnosticMeat = info.Meat;
         strategyDiagnosticStone = info.Stone;
@@ -1186,61 +1285,44 @@ static void ManageEconomyAndProduction(UsrAI *ai, const tagInfo &info)
 
     const bool nearPopulationCap = info.Human_Num + 1.0 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
-        !HasIncompleteBuilding(info, BUILDING_HOME))
+        !HasIncompleteBuilding(BUILDING_HOME))
     {
-        TryBuild(ai, info, BUILDING_HOME);
+        TryBuild(ai, BUILDING_HOME);
     }
 
-    if (!HasBuilding(info, BUILDING_ARMYCAMP) && info.Wood >= 125)
+    if (!HasBuilding(BUILDING_ARMYCAMP) && info.Wood >= 125)
     {
-        TryBuild(ai, info, BUILDING_ARMYCAMP);
+        TryBuild(ai, BUILDING_ARMYCAMP);
     }
-    if (!HasBuilding(info, BUILDING_RANGE) && info.Wood >= 150)
+    if (!HasBuilding(BUILDING_RANGE) && info.Wood >= 150)
     {
-        TryBuild(ai, info, BUILDING_RANGE);
+        TryBuild(ai, BUILDING_RANGE);
     }
-    if (!HasBuilding(info, BUILDING_STABLE) && info.Wood >= 150)
+    if (!HasBuilding(BUILDING_STABLE) && info.Wood >= 150)
     {
-        TryBuild(ai, info, BUILDING_STABLE);
+        TryBuild(ai, BUILDING_STABLE);
     }
-    if (!HasBuilding(info, BUILDING_ARROWTOWER) && info.Stone >= 150)
-    {
-        TryBuild(ai, info, BUILDING_ARROWTOWER);
-    }
-    if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
-        HasCompletedBuilding(info, BUILDING_RANGE) &&
-        HasCompletedBuilding(info, BUILDING_STABLE))
-    {
-        TryBuildingAction(ai, info, BUILDING_CENTER,
-                          BUILDING_CENTER_UPGRADE);
-    }
+    // if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
+    //     HasCompletedBuilding(info, BUILDING_RANGE) &&
+    //     HasCompletedBuilding(info, BUILDING_STABLE))
+    // {
+    //     TryBuildingAction(ai, info, BUILDING_CENTER,
+    //                       BUILDING_CENTER_UPGRADE);
+    // }
 
     // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
-    TryProduceSoldier(ai, info, nearPopulationCap);
-    TryProduceFarmer(ai, info, nearPopulationCap);
-
-    if (!nearPopulationCap &&
-        CountArmyBySort(info, AT_BOWMAN) < 5 && info.Meat >= 40 && info.Wood >= 20)
-    {
-        TryBuildingAction(ai, info, BUILDING_RANGE,
-                          BUILDING_RANGE_CREATE_BOWMAN);
-    }
-
-    if (!nearPopulationCap &&
-        CountArmyBySort(info, AT_SCOUT) < 3 && info.Meat >= 100)
-    {
-        TryBuildingAction(ai, info, BUILDING_STABLE,
-                          BUILDING_STABLE_CREATE_SCOUT);
-    }
-
-    TryAssignIdleFarmer(ai, info);
+    TryProduceSoldier(ai, nearPopulationCap);
+    TryProduceFarmer(ai, nearPopulationCap);
+    TryProduceBowman(ai, nearPopulationCap);
+    TryProduceScout(ai, nearPopulationCap);
+    TryAssignIdleFarmer(ai);
 }
 
-static pair<double, double> GetPriestRetreatPoint(const tagInfo &info,
-                                                   const tagArmy &priest,
-                                                   const tagArmy &threat)
+static pair<double, double> GetPriestRetreatPoint(
+    const tagArmy &priest,
+    const tagArmy &threat)
 {
-    const tagBuilding *center = FindCenter(info);
+    const tagBuilding *center = FindCenter();
     int dx = priest.BlockDR - threat.BlockDR;
     int dy = priest.BlockUR - threat.BlockUR;
     if (dx == 0 && dy == 0)
@@ -1258,7 +1340,7 @@ static pair<double, double> GetPriestRetreatPoint(const tagInfo &info,
                      (blockUR + 0.5) * double(BLOCKSIDELENGTH));
 }
 
-static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR)
+static bool IsPriestPointUsable(int blockDR, int blockUR)
 {
     if (blockDR < 1 || blockUR < 1 ||
         blockDR >= MAP_L - 1 || blockUR >= MAP_U - 1)
@@ -1276,11 +1358,11 @@ static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR)
 }
 
 // 祭司撤退点选择依赖该合法性检查，提前声明以保持函数定义顺序清晰。
-static bool IsPriestPointUsable(const tagInfo &info, int blockDR, int blockUR);
+static bool IsPriestPointUsable(int blockDR, int blockUR);
 
-static pair<double, double> GetPriestEmergencyPoint(const tagInfo &info,
-                                                    const tagArmy &priest,
-                                                    const tagArmy &threat)
+static pair<double, double> GetPriestEmergencyPoint(
+    const tagArmy &priest,
+    const tagArmy &threat)
 {
     const int dx = priest.BlockDR - threat.BlockDR;
     const int dy = priest.BlockUR - threat.BlockUR;
@@ -1303,7 +1385,7 @@ static pair<double, double> GetPriestEmergencyPoint(const tagInfo &info,
 
         blockDR = max(1, min(MAP_L - 2, blockDR));
         blockUR = max(1, min(MAP_U - 2, blockUR));
-        if (IsPriestPointUsable(info, blockDR, blockUR))
+        if (IsPriestPointUsable(blockDR, blockUR))
             return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
                              (blockUR + 0.5) * double(BLOCKSIDELENGTH));
     }
@@ -1313,53 +1395,76 @@ static pair<double, double> GetPriestEmergencyPoint(const tagInfo &info,
                      (priest.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
 }
 
-static pair<double, double> GetPriestDefensePoint(const tagInfo &info,
-                                                  const tagArmy &priest)
-{
-    const tagBuilding *tower = FindBuildingByType(info, BUILDING_ARROWTOWER, true);
-    const tagBuilding *center = FindCenter(info);
-    int anchorDR = center ? center->BlockDR : priest.BlockDR;
-    int anchorUR = center ? center->BlockUR : priest.BlockUR;
-    if (tower)
-    {
-        // 祭司站在箭塔相邻格，避免把移动目标设为建筑占用格。
-        static const int OFFSETS[][2] = {
-            {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
-        int bestDR = -1;
-        int bestUR = -1;
-        int bestScore = 1000000000;
-        for (int offsetIndex = 0; offsetIndex < 8; offsetIndex++)
-        {
-            const int blockDR = tower->BlockDR + OFFSETS[offsetIndex][0];
-            const int blockUR = tower->BlockUR + OFFSETS[offsetIndex][1];
-            if (!IsPriestPointUsable(info, blockDR, blockUR))
-                continue;
-            // 只按防线锚点排序，避免祭司自身移动导致安全点来回切换。
-            int score = BlockDis2(anchorDR, anchorUR, blockDR, blockUR) * 8 +
-                        offsetIndex;
-            if (score < bestScore)
-            {
-                bestScore = score;
-                bestDR = blockDR;
-                bestUR = blockUR;
-            }
-        }
-        if (bestDR != -1)
-            return make_pair((bestDR + 0.5) * double(BLOCKSIDELENGTH),
-                             (bestUR + 0.5) * double(BLOCKSIDELENGTH));
-    }
-
-    int blockDR = max(1, min(MAP_L - 2, anchorDR));
-    int blockUR = max(1, min(MAP_U - 2, anchorUR));
-    return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                     (blockUR + 0.5) * double(BLOCKSIDELENGTH));
-}
-
 // 接口：祭司安全与最终转换状态机。
 // 用途：危险时立即撤退；第三波后才在安全窗口推进并转换敌方工厂。
-static void ManagePriest(UsrAI *ai, const tagInfo &info)
+// 返回祭司转换目标的显式兵种优先级；枚举值本身不代表战斗阶级。
+static int PriestConversionPriority(int armySort)
 {
-    const tagArmy *priest = FindPriest(info);
+    switch (armySort)
+    {
+    case AT_STONE_THROWER:
+        return 110;
+    case AT_COMPOSITE_BOWMAN:
+        return 100;
+    case AT_CAVALRY:
+        return 95;
+    case AT_CHARIOT_ARCHER:
+        return 90;
+    case AT_BROADSWORDSMAN:
+        return 85;
+    case AT_HOPLITE:
+        return 84;
+    case AT_CHARIOT:
+        return 80;
+    case AT_SWORDSMAN:
+        return 75;
+    case AT_IMPROVED:
+        return 70;
+    case AT_BOWMAN:
+        return 60;
+    case AT_SLINGER:
+        return 55;
+    case AT_SCOUT:
+        return 50;
+    case AT_CLUBMAN:
+        return 40;
+    default:
+        return -1;
+    }
+}
+
+// 在祭司安全时选择当前可见的最高阶普通敌军；同阶优先选择距离较近者。
+static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
+{
+    const tagArmy *best = nullptr;
+    int bestPriority = -1;
+    int bestDis2 = 1000000000;
+
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.Blood <= 0 || enemy.Sort == AT_PRIEST)
+            continue;
+
+        const int priority = PriestConversionPriority(enemy.Sort);
+        if (priority < 0)
+            continue;
+
+        const int dis2 = BlockDis2(priest.BlockDR, priest.BlockUR,
+                                   enemy.BlockDR, enemy.BlockUR);
+        if (priority > bestPriority ||
+            (priority == bestPriority && dis2 < bestDis2))
+        {
+            best = &enemy;
+            bestPriority = priority;
+            bestDis2 = dis2;
+        }
+    }
+    return best;
+}
+
+static void ManagePriest(UsrAI *ai)
+{
+    const tagArmy *priest = FindPriest();
     if (!priest)
         return;
 
@@ -1372,13 +1477,42 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
             priestMoveOrderId = -1;
     }
 
-    // 只把严格小于两格的敌方单位视为祭司当前危险。
+    // WorkObjectSN 是 Core 当前关系的目标。转换关系从接近阶段开始就不能
+    // 被新的移动指令中止，不能只依赖 NowState 已经变成攻击状态。
+    bool conversionTargetAlive = false;
+    if (priest->WorkObjectSN != -1)
+    {
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.SN == priest->WorkObjectSN && enemy.Blood > 0)
+            {
+                conversionTargetAlive = true;
+                break;
+            }
+        }
+        if (!conversionTargetAlive)
+        {
+            for (const tagBuilding &building : info.enemy_buildings)
+            {
+                if (building.SN == priest->WorkObjectSN && building.Blood > 0)
+                {
+                    conversionTargetAlive = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (conversionTargetAlive)
+        return;
+
+    // 只有严格小于两格的敌方单位才会触发撤退。
     const tagArmy *closeThreat = nullptr;
     int closestDis2 = 1000000000;
     for (const tagArmy &enemy : info.enemy_armies)
     {
         if (enemy.Blood <= 0)
             continue;
+
         const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                                    enemy.BlockDR, enemy.BlockUR);
         if (dis2 < 2 * 2 && dis2 < closestDis2)
@@ -1395,13 +1529,14 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
         priestDangerTargetSN = closeThreat->SN;
 
         const pair<double, double> retreatPoint =
-            GetPriestEmergencyPoint(info, *priest, *closeThreat);
+            GetPriestEmergencyPoint(*priest, *closeThreat);
         const pair<int, int> target = make_pair(
             static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
             static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
         if (priestMoveOrderId == -1 &&
             (target != priestEmergencyTarget ||
-             g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL))
+             g_frame - priestEmergencyTargetFrame >=
+                 USR_PRIEST_ORDER_INTERVAL))
         {
             priestMoveOrderId = ai->HumanMove(priest->SN,
                                               retreatPoint.first,
@@ -1413,7 +1548,7 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
         return;
     }
 
-    // 所有敌人都超过两格后，不再追加移动，让下一条作战指令接管祭司。
+    // 安全后不再追加移动，避免移动指令反复中止转换关系。
     priestDangerTargetSN = -1;
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
@@ -1421,20 +1556,113 @@ static void ManagePriest(UsrAI *ai, const tagInfo &info)
         g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
         return;
 
-    const tagBuilding *siege = FindEnemySiege(info);
-    if (!siege)
+    const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
+    const tagBuilding *buildingTarget = nullptr;
+    if (!armyTarget)
+        buildingTarget = FindEnemySiege();
+
+    const int targetSN = armyTarget ? armyTarget->SN : (buildingTarget ? buildingTarget->SN : -1);
+    if (targetSN == -1)
         return;
 
-    // HumanAction 会中止祭司尚未完成的移动关系，并开始转换攻城武器。
-    priestMoveOrderId = ai->HumanAction(priest->SN, siege->SN);
+    // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
+    if (priest->WorkObjectSN == targetSN)
+        return;
+
+    priestMoveOrderId = ai->HumanAction(priest->SN, targetSN);
     priestEmergencyTargetFrame = g_frame;
     lastPriestOrderFrame = g_frame;
 }
 
-static void AssignFieldSelfDefense(UsrAI *ai, const tagInfo &info)
+static void DispatchScoutsAfterThirdWave(UsrAI *ai)
 {
-    const tagArmy *priest = FindPriest(info);
-    const int priestThreatSN = priest ? FindThreatToPriestSN(info, priest->SN) : -1;
+    const int thirdWaveEndFrame = 26000;
+    const int scoutOrderInterval = 180;
+    const int scoutWaypointCount = 8;
+    static const int scoutWaypoints[][2] = {
+        {4, 4}, {MAP_L / 2, 4}, {MAP_L - 4, 4}, {MAP_L - 4, MAP_U / 2}, {MAP_L - 4, MAP_U - 4}, {MAP_L / 2, MAP_U - 4}, {4, MAP_U - 4}, {4, MAP_U / 2}};
+
+    if (g_frame <= thirdWaveEndFrame)
+        return;
+
+    set<int> liveScouts;
+    for (const tagArmy &army : info.armies)
+    {
+        if (army.Blood > 0 && army.Sort == AT_SCOUT)
+            liveScouts.insert(army.SN);
+    }
+
+    for (map<int, int>::iterator it = scoutLastOrderFrame.begin();
+         it != scoutLastOrderFrame.end();)
+    {
+        if (liveScouts.find(it->first) == liveScouts.end())
+        {
+            scoutWaypointIndex.erase(it->first);
+            it = scoutLastOrderFrame.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    for (map<int, int>::iterator it = scoutWaypointIndex.begin();
+         it != scoutWaypointIndex.end();)
+    {
+        if (liveScouts.find(it->first) == liveScouts.end())
+            it = scoutWaypointIndex.erase(it);
+        else
+            ++it;
+    }
+
+    for (const tagArmy &scout : info.armies)
+    {
+        if (scout.Blood <= 0 || scout.Sort != AT_SCOUT)
+            continue;
+
+        const map<int, int>::const_iterator lastIt =
+            scoutLastOrderFrame.find(scout.SN);
+        if (lastIt != scoutLastOrderFrame.end() &&
+            g_frame - lastIt->second < scoutOrderInterval)
+            continue;
+
+        // 侦察骑兵已有战斗关系时交给统一防御逻辑，不强行改成巡逻。
+        if (scout.NowState == HUMAN_STATE_ATTACKING)
+            continue;
+        const map<int, int>::const_iterator targetIt = currentTarget.find(scout.SN);
+        int targetBlockDR = 0;
+        int targetBlockUR = 0;
+        if (targetIt != currentTarget.end() &&
+            FindEnemyUnitBlockPosition(targetIt->second,
+                                       targetBlockDR, targetBlockUR))
+            continue;
+
+        int &waypoint = scoutWaypointIndex[scout.SN];
+        if (waypoint < 0 || waypoint >= scoutWaypointCount)
+            waypoint = scout.SN % scoutWaypointCount;
+
+        int targetDR = scoutWaypoints[waypoint][0];
+        int targetUR = scoutWaypoints[waypoint][1];
+        if (BlockDis2(scout.BlockDR, scout.BlockUR, targetDR, targetUR) <= 9)
+        {
+            waypoint = (waypoint + 1) % scoutWaypointCount;
+            targetDR = scoutWaypoints[waypoint][0];
+            targetUR = scoutWaypoints[waypoint][1];
+        }
+
+        targetDR = max(1, min(MAP_L - 2, targetDR));
+        targetUR = max(1, min(MAP_U - 2, targetUR));
+        const int orderId = ai->HumanMove(
+            scout.SN,
+            (targetDR + 0.5) * double(BLOCKSIDELENGTH),
+            (targetUR + 0.5) * double(BLOCKSIDELENGTH));
+        scoutLastOrderFrame[scout.SN] = g_frame;
+    }
+}
+
+static void AssignFieldSelfDefense(UsrAI *ai)
+{
+    const tagArmy *priest = FindPriest();
+    const int priestThreatSN = priest ? FindThreatToPriestSN(priest->SN) : -1;
 
     for (const tagArmy &army : info.armies)
     {
@@ -1443,19 +1671,22 @@ static void AssignFieldSelfDefense(UsrAI *ai, const tagInfo &info)
 
         int targetSN = priestThreatSN;
         if (targetSN == -1)
-            targetSN = GetLockedArmyTarget(info, army.SN);
+            targetSN = GetLockedArmyTarget(army.SN);
 
         if (targetSN == -1)
-            targetSN = FindDirectThreatToArmySN(info, army.SN);
+            targetSN = FindDirectThreatToArmySN(army.SN);
 
         if (targetSN == -1)
-            targetSN = FindEnemyArmyInVision(info, army);
+            targetSN = FindEnemyArmyInVision(army);
 
         if (targetSN == -1)
-            targetSN = FindNearbyEnemyFarmerToAttack(info, army);
+            targetSN = FindNearbyEnemyLionToAttack(army);
 
         if (targetSN == -1)
-            targetSN = FindAssistThreatNearArmy(info, army);
+            targetSN = FindNearbyEnemyFarmerToAttack(army);
+
+        if (targetSN == -1)
+            targetSN = FindAssistThreatNearArmy(army);
 
         if (targetSN == -1)
             continue;
@@ -1473,7 +1704,7 @@ static void AssignFieldSelfDefense(UsrAI *ai, const tagInfo &info)
 
 // 接口：寻找箭塔射程内最近的敌方单位。
 // 用途：玩家箭塔自动攻击。
-static int FindArrowTowerTarget(const tagInfo &info, const tagBuilding &tower)
+static int FindArrowTowerTarget(const tagBuilding &tower)
 {
     int targetSN = -1;
     int bestDis = 1000000000;
@@ -1506,7 +1737,7 @@ static int FindArrowTowerTarget(const tagInfo &info, const tagBuilding &tower)
 
 // 接口：为所有我方箭塔执行自动索敌。
 // 用途：当前目标离开射程或不存在时，自动攻击射程内最近敌军/敌农民。
-static void AssignArrowTowerTargets(UsrAI *ai, const tagInfo &info)
+static void AssignArrowTowerTargets(UsrAI *ai)
 {
     for (const tagBuilding &building : info.buildings)
     {
@@ -1517,7 +1748,7 @@ static void AssignArrowTowerTargets(UsrAI *ai, const tagInfo &info)
         int targetUR = 0;
         const bool currentTargetInRange =
             building.Project != ACT_NULL &&
-            FindEnemyUnitBlockPosition(info, building.Project, targetDR, targetUR) &&
+            FindEnemyUnitBlockPosition(building.Project, targetDR, targetUR) &&
             BlockDis(building.BlockDR, building.BlockUR, targetDR, targetUR) <= ArrowTowerAttackRangeBlocks();
 
         if (currentTargetInRange)
@@ -1525,7 +1756,7 @@ static void AssignArrowTowerTargets(UsrAI *ai, const tagInfo &info)
         if (g_frame - towerLastOrderFrame[building.SN] < USR_TOWER_ORDER_INTERVAL)
             continue;
 
-        int targetSN = FindArrowTowerTarget(info, building);
+        int targetSN = FindArrowTowerTarget(building);
         if (targetSN != -1)
         {
             ai->HumanAction(building.SN, targetSN);
@@ -1552,12 +1783,12 @@ string GetUsrAIStrategyDiagnostic()
 
 void UsrAI::processData()
 {
-    tagInfo info = getInfo();
-
-    CleanDeadOwnerTargetLocks(info);
-    ManagePriest(this, info);
-    EvacuateFarmersDuringAttackWaves(this, info);
-    ManageEconomyAndProduction(this, info);
-    AssignFieldSelfDefense(this, info);
-    AssignArrowTowerTargets(this, info);
+    info = getInfo();
+    CleanDeadOwnerTargetLocks();
+    ManagePriest(this);
+    EvacuateFarmersDuringAttackWaves(this);
+    DispatchScoutsAfterThirdWave(this);
+    ManageEconomyAndProduction(this);
+    AssignFieldSelfDefense(this);
+    AssignArrowTowerTargets(this);
 }

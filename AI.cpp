@@ -9,7 +9,8 @@ AI::~AI() {
 }
 
 int AI::HumanMove(int SN, double DR0, double UR0){
-    return AddToIns(instruction(INS_HUMANMOVE,SN,Double::FromDouble(DR0),Double::FromDouble(UR0)));
+
+    return AddToIns(instruction(INS_HUMANMOVE, SN, Double::FromDouble(DR0), Double::FromDouble(UR0)));
 }
 
 int AI::HumanAction(int SN,int obSN){
@@ -17,7 +18,7 @@ int AI::HumanAction(int SN,int obSN){
 }
 
 int AI::HumanBuild(int SN, int BuildingNum, int BlockDR, int BlockUR){
-    return AddToIns(instruction(INS_HUMANBUILD,SN,BlockDR,BlockUR,BuildingNum));
+    return AddToIns(instruction(INS_HUMANBUILD, SN, BlockDR, BlockUR, BuildingNum));
 }
 
 int AI::BuildingAction(int SN,int Action){
