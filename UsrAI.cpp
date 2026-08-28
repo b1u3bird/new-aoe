@@ -77,23 +77,49 @@ static map<int, int> farmerLastOrderFrame;
 static map<int, int> farmerThreatLastFrame;
 // 农民确认脱离威胁后的起始帧，用于安全滞后。
 static map<int, int> farmerSafeSinceFrame;
-// 农民 SN 到固定资源角色的映射，角色值决定默认采集资源类型。
-static map<int, int> farmerResourceRole;
 // 第三波结束后侦察骑兵的移动节流和巡逻点状态。
 static map<int, int> scoutLastOrderFrame;
 static map<int, int> scoutWaypointIndex;
-// 下一个新农民使用的资源角色序号。
-static int nextFarmerResourceRole = 0;
+static map<int, pair<int, int>> scoutTargetBlock;
+static map<int, pair<int, int>> scoutLastBlock;
+static map<int, int> scoutStuckCount;
+static map<int, int> scoutEmergencyOrderId;
+static map<int, pair<int, int>> scoutEmergencyTarget;
+static map<int, int> scoutDangerLastFrame;
+static map<pair<int, int>, int> scoutFrontierVisitFrame;
+// 第三波结束后是否已经进入侦察任务，以及是否发现敌方基地。
+static bool scoutMissionStarted = false;
+static bool enemyBaseDiscovered = false;
+static set<int> farmerScouters;
+static map<int, pair<int, int>> farmerScoutTarget;
+static map<int, pair<int, int>> farmerScoutLastBlock;
+static map<int, int> farmerScoutLastOrderFrame;
+static map<int, int> farmerScoutStuckCount;
+static map<int, pair<int, int>> farmerScoutEmergencyTarget;
+static map<int, int> farmerScoutEmergencyLastOrderFrame;
 // 上次提交经济采集指令的游戏帧。
 static int lastEconomyOrderFrame = USR_INVALID_FRAME;
 // 上次提交建造指令的游戏帧。
 static int lastBuildOrderFrame = USR_INVALID_FRAME;
+// 上次为未完成建筑恢复建造的游戏帧。
+static int lastConstructionRecoveryFrame = USR_INVALID_FRAME;
+
+static int FindDirectThreatToFarmerSN(const tagFarmer &farmer);
+static int FindNearbyEnemyForFarmer(const tagFarmer &farmer);
+static bool IsKnownLandBlock(int blockDR, int blockUR);
+static bool IsExplorationFrontierBlock(int blockDR, int blockUR);
+static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR, int &targetUR);
+static bool FindBestFarmerScoutFrontier(const tagFarmer &farmer, int &targetDR,
+                                        int &targetUR);
 // 上次提交建筑研发、升级或生产动作的游戏帧。
 static int lastBuildingActionFrame = USR_INVALID_FRAME;
 // 上次提交单位生产动作的游戏帧。
 static int lastProductionActionFrame = USR_INVALID_FRAME;
 // 上次提交祭司移动或转换指令的游戏帧。
 static int lastPriestOrderFrame = USR_INVALID_FRAME;
+// 主力开始总攻后的祭司跟随门控状态。
+static bool offensiveAttackStarted = false;
+static int offensiveAttackStartFrame = USR_INVALID_FRAME;
 // 祭司最近一次确认安全的起始游戏帧。
 static int priestSafeSinceFrame = USR_INVALID_FRAME;
 // 当前祭司移动指令的异步指令 ID，-1 表示没有等待中的指令。
@@ -667,8 +693,6 @@ static const tagArmy *FindPriest()
 static int FindThreatToPriestSN(int priestSN)
 {
     const tagArmy *priest = FindPriest();
-    if (!priest)
-        return -1;
 
     int bestSN = -1;
     int bestDis2 = 1000000000;
@@ -874,12 +898,12 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     if (farmerCount == 0)
         return;
 
-    // 食物维持生产，木材保障建筑；石头和黄金只在确有需求时扩大配额。
-    int weight[4] = {5, 2, 0, 0};
-    if (info.Meat < 450)
-        weight[0] += 4;
-    else if (info.Meat < 800)
-        weight[0] += 2;
+    // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
+    int weight[4] = {8, 2, 0, 0};
+    if (info.Meat < 600)
+        weight[0] += 5;
+    else if (info.Meat < 1000)
+        weight[0] += 3;
 
     const bool needWoodBuilding =
         HasIncompleteBuilding(BUILDING_HOME) ||
@@ -898,10 +922,10 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         weight[2] += 5;
 
     // 工具时代升级、兵种升级和高级兵生产由黄金需求拉动；没有需求时保持零配额。
-    const bool needGold = info.civilizationStage == CIVILIZATION_TOOLAGE &&
-                          (info.Gold < 250 || HasBuilding(BUILDING_MARKET));
-    if (needGold)
-        weight[3] += 3;
+    // const bool needGold = info.civilizationStage == CIVILIZATION_TOOLAGE &&
+    //                       (info.Gold < 250 || HasBuilding(BUILDING_MARKET));
+    // if (needGold)
+    //     weight[3] += 3;
 
     const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
     if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
@@ -943,14 +967,25 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     }
 }
 
-static int ResourceRole(const tagFarmer &farmer)
+static bool IsFarmerClusterCrowded(int blockDR, int blockUR, int excludeSN)
 {
-    map<int, int>::iterator role = farmerResourceRole.find(farmer.SN);
-    if (role != farmerResourceRole.end())
-        return role->second;
-    const int assignedRole = nextFarmerResourceRole++ % 10;
-    farmerResourceRole[farmer.SN] = assignedRole;
-    return assignedRole;
+    int nearbyFarmers = 0;
+    for (const tagFarmer &other : info.farmers)
+    {
+        if (other.SN == excludeSN || other.Blood <= 0 ||
+            other.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+
+        // 将目标点周围相邻的局部区域限制为最多四名农民，减少互相卡位。
+        if (abs(other.BlockDR - blockDR) <= 1 &&
+            abs(other.BlockUR - blockUR) <= 1)
+        {
+            ++nearbyFarmers;
+            if (nearbyFarmers >= 3)
+                return true;
+        }
+    }
+    return false;
 }
 
 static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
@@ -971,6 +1006,10 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
     {
         const int bucket = ResourceBucket(resource.Type);
         if (bucket != desiredBucket || !IsGatherableResource(resource))
+            continue;
+
+        if (IsFarmerClusterCrowded(resource.BlockDR, resource.BlockUR,
+                                   farmer.SN))
             continue;
 
         const int workers = resourceWorkers[resource.SN];
@@ -1053,18 +1092,70 @@ static int FindBuilderFarmerSN()
     return bestSN;
 }
 
-static bool IsBuildCandidateUsable(int blockDR, int blockUR)
+static bool IsBuildCandidateUsable(int blockDR, int blockUR, int buildingType)
 {
     if (!info.theMap)
-        return true;
+        return false;
+
+    // Core 会按建筑类型检查实际占地；这里使用对应的保守尺寸提前筛除候选点。
+    const int buildSize = (buildingType == BUILDING_HOME ||
+                           buildingType == BUILDING_ARROWTOWER)
+                              ? 2
+                              : 3;
     if (blockDR < USR_ARROWTOWER_BUILD_MIN_MARGIN ||
         blockUR < USR_ARROWTOWER_BUILD_MIN_MARGIN ||
-        blockDR >= MAP_L - USR_ARROWTOWER_BUILD_MIN_MARGIN ||
-        blockUR >= MAP_U - USR_ARROWTOWER_BUILD_MIN_MARGIN)
-    {
+        blockDR + buildSize > MAP_L - USR_ARROWTOWER_BUILD_MIN_MARGIN ||
+        blockUR + buildSize > MAP_U - USR_ARROWTOWER_BUILD_MIN_MARGIN)
         return false;
+
+    const int baseHeight = (*info.theMap)[blockDR][blockUR].height;
+    for (int dr = blockDR; dr < blockDR + buildSize; ++dr)
+    {
+        for (int ur = blockUR; ur < blockUR + buildSize; ++ur)
+        {
+            if ((*info.theMap)[dr][ur].type == MAPPATTERN_OCEAN ||
+                (*info.theMap)[dr][ur].height != baseHeight)
+                return false;
+        }
     }
-    return (*info.theMap)[blockDR][blockUR].type != MAPPATTERN_OCEAN;
+
+    // tagInfo 不提供内核占用栅格，因此根据可见对象的实际位置做保守排除。
+    const int clearance = 1;
+    const auto overlaps = [blockDR, blockUR, buildSize, clearance](
+                              int objectDR, int objectUR, int objectSize)
+    {
+        return blockDR - clearance < objectDR + objectSize &&
+               blockDR + buildSize + clearance > objectDR &&
+               blockUR - clearance < objectUR + objectSize &&
+               blockUR + buildSize + clearance > objectUR;
+    };
+
+    for (const tagBuilding &building : info.buildings)
+    {
+        const int objectSize = (building.Type == BUILDING_HOME ||
+                                building.Type == BUILDING_ARROWTOWER)
+                                   ? 2
+                                   : 3;
+        if (overlaps(building.BlockDR, building.BlockUR, objectSize))
+            return false;
+    }
+    for (const tagResource &resource : info.resources)
+    {
+        if (overlaps(resource.BlockDR, resource.BlockUR, 1))
+            return false;
+    }
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood > 0 &&
+            overlaps(farmer.BlockDR, farmer.BlockUR, 1))
+            return false;
+    }
+    for (const tagArmy &army : info.armies)
+    {
+        if (army.Blood > 0 && overlaps(army.BlockDR, army.BlockUR, 1))
+            return false;
+    }
+    return true;
 }
 
 static pair<int, int> GetBuildCandidate(int buildingType)
@@ -1096,10 +1187,28 @@ static pair<int, int> GetBuildCandidate(int buildingType)
             ur += OFFSETS[index][1] > 0 ? radiusAddition :
                   (OFFSETS[index][1] < 0 ? -radiusAddition : 0);
         }
-        if (IsBuildCandidateUsable(dr, ur))
+        if (IsBuildCandidateUsable(dr, ur, buildingType))
         {
             buildCandidateIndex = (index + 1) % count;
             return make_pair(dr, ur);
+        }
+    }
+
+    // 固定偏移全部不可用时，按距离市镇中心由近到远扫描，避免候选点集中在同一组障碍物上。
+    const int maxRadius = max(MAP_L, MAP_U);
+    for (int radius = 1; radius <= maxRadius; ++radius)
+    {
+        for (int drOffset = -radius; drOffset <= radius; ++drOffset)
+        {
+            for (int urOffset = -radius; urOffset <= radius; ++urOffset)
+            {
+                if (max(abs(drOffset), abs(urOffset)) != radius)
+                    continue;
+                const int dr = center->BlockDR + drOffset;
+                const int ur = center->BlockUR + urOffset;
+                if (IsBuildCandidateUsable(dr, ur, buildingType))
+                    return make_pair(dr, ur);
+            }
         }
     }
     return make_pair(-1, -1);
@@ -1181,84 +1290,64 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
     return false;
 }
 
-static void EvacuateFarmersDuringAttackWaves(UsrAI *ai)
+static bool TryResumeIncompleteBuilding(UsrAI *ai)
 {
-    const tagBuilding *center = FindCenter();
+    const int recoveryInterval = 80;
+    if (g_frame - lastConstructionRecoveryFrame < recoveryInterval)
+        return false;
 
-    // 清理已经死亡或离开当前快照的农民，避免 SN 重用继承旧撤退状态。
-    set<int> liveFarmers;
-    for (const tagFarmer &farmer : info.farmers)
+    const tagBuilding *target = nullptr;
+    for (const tagBuilding &building : info.buildings)
     {
-        if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER)
-            liveFarmers.insert(farmer.SN);
-    }
-    for (map<int, int>::iterator it = farmerThreatLastFrame.begin();
-         it != farmerThreatLastFrame.end();)
-    {
-        if (liveFarmers.find(it->first) == liveFarmers.end())
-        {
-            farmerSafeSinceFrame.erase(it->first);
-            farmerLastOrderFrame.erase(it->first);
-            it = farmerThreatLastFrame.erase(it);
-        }
-        else
-        {
-            ++it;
-        }
-    }
-
-    for (const tagFarmer &farmer : info.farmers)
-    {
-        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+        if (building.Blood <= 0 || building.Percent >= 100)
             continue;
 
-        const tagArmy *threat = FindNearestEnemyArmy(
-            farmer.BlockDR,
-            farmer.BlockUR);
-        const int dis2 = threat
-                             ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                                         threat->BlockDR, threat->BlockUR)
-                             : 1000000000;
-        const bool threatened = threat &&
-                                (threat->WorkObjectSN == farmer.SN ||
-                                 dis2 <= USR_FIELD_FARMER_AGGRO_RADIUS *
-                                             USR_FIELD_FARMER_AGGRO_RADIUS);
-
-        if (!threatened)
+        bool hasBuilder = false;
+        for (const tagFarmer &farmer : info.farmers)
         {
-            if (farmerThreatLastFrame.find(farmer.SN) !=
-                    farmerThreatLastFrame.end() &&
-                farmerSafeSinceFrame.find(farmer.SN) == farmerSafeSinceFrame.end())
+            if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER &&
+                farmer.WorkObjectSN == building.SN)
             {
-                farmerSafeSinceFrame[farmer.SN] = g_frame;
+                hasBuilder = true;
+                break;
             }
-            continue;
         }
-
-        farmerThreatLastFrame[farmer.SN] = g_frame;
-        farmerSafeSinceFrame.erase(farmer.SN);
-        if (!center)
-            continue;
-
-        map<int, int>::const_iterator orderIt = farmerLastOrderFrame.find(farmer.SN);
-        if (orderIt != farmerLastOrderFrame.end() &&
-            g_frame - orderIt->second < 30)
-        {
-            continue;
-        }
-
-        // 行走或工作中的农民也可能正在执行合法采集关系；只在危险时覆盖。
-        int dx = center->BlockDR - threat->BlockDR;
-        int dy = center->BlockUR - threat->BlockUR;
-        int blockDR = center->BlockDR + (dx >= 0 ? 5 : -5);
-        int blockUR = center->BlockUR + (dy >= 0 ? 5 : -5);
-        blockDR = max(1, min(MAP_L - 2, blockDR));
-        blockUR = max(1, min(MAP_U - 2, blockUR));
-        int orderId = ai->HumanMove(farmer.SN,
-                                    (blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                                    (blockUR + 0.5) * double(BLOCKSIDELENGTH));
-        farmerLastOrderFrame[farmer.SN] = g_frame;
+        if (!hasBuilder && (!target || building.Percent > target->Percent))
+            target = &building;
     }
+    if (!target)
+        return false;
+
+    int bestFarmerSN = -1;
+    // 预留状态惩罚后仍允许在没有空闲农民时选择普通采集者。
+    int bestDis2 = 2000000000;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER ||
+            farmer.NowState == HUMAN_STATE_ATTACKING || IsFarmerBuilding(farmer))
+            continue;
+        if (FindDirectThreatToFarmerSN(farmer) != -1 ||
+            FindNearbyEnemyForFarmer(farmer) != -1)
+            continue;
+
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   target->BlockDR, target->BlockUR);
+        // 优先空闲农民；没有空闲农民时才中断最近农民的普通采集。
+        const int statePenalty = farmer.NowState == HUMAN_STATE_IDLE ? 0 : 1000000;
+        if (statePenalty + dis2 < bestDis2)
+        {
+            bestDis2 = statePenalty + dis2;
+            bestFarmerSN = farmer.SN;
+        }
+    }
+    if (bestFarmerSN == -1)
+        return false;
+
+    ai->HumanAction(bestFarmerSN, target->SN);
+    farmerLastOrderFrame[bestFarmerSN] = g_frame;
+    lastConstructionRecoveryFrame = g_frame;
+    buildFarmerSN = bestFarmerSN;
+    return true;
 }
 
 static bool TryBuild(UsrAI *ai, int buildingType)
@@ -1380,9 +1469,8 @@ static bool TryBuildingAction(UsrAI *ai,
 
 static bool TryProduceFarmer(UsrAI *ai,
                              bool nearPopulationCap)
-{
-    if (nearPopulationCap || info.Meat < 50 ||
-        static_cast<int>(info.farmers.size()) >= 14)
+{ //     static_cast<int>(info.farmers.size()) >= 14
+    if (nearPopulationCap || info.Meat < 50)
         return false;
 
     return TryBuildingAction(ai, BUILDING_CENTER,
@@ -1393,26 +1481,26 @@ static bool TryProduceSoldier(UsrAI *ai,
                               bool nearPopulationCap)
 {
     const int targetSoldiers = g_frame < 13000 ? 6 : 10;
-    if (nearPopulationCap || info.Meat < 50 ||
-        CountArmyBySort(AT_CLUBMAN) >= targetSoldiers)
+    // CountArmyBySort(AT_CLUBMAN) >= targetSoldiers
+    if (nearPopulationCap || info.Meat < 50)
         return false;
     return TryBuildingAction(ai, BUILDING_ARMYCAMP,
                              BUILDING_ARMYCAMP_CREATE_CLUBMAN);
 }
 
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
-{
+{ // CountArmyBySort(AT_BOWMAN) < 5 &&
     if (!nearPopulationCap &&
-        CountArmyBySort(AT_BOWMAN) < 5 && info.Meat >= 40 && info.Wood >= 20)
+        info.Meat >= 40 && info.Wood >= 20)
     {
         TryBuildingAction(ai, BUILDING_RANGE,
                           BUILDING_RANGE_CREATE_BOWMAN);
     }
 }
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
-{
+{ // CountArmyBySort(AT_SCOUT) < 3 &&
     if (!nearPopulationCap &&
-        CountArmyBySort(AT_SCOUT) < 3 && info.Meat >= 100)
+        info.Meat >= 100)
     {
         TryBuildingAction(ai, BUILDING_STABLE,
                           BUILDING_STABLE_CREATE_SCOUT);
@@ -1470,7 +1558,11 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         }
     }
 
-    const bool nearPopulationCap = info.Human_Num + 1.0 >= info.Human_MaxNum;
+    // 建筑可能因农民被攻击、碰撞或其他关系覆盖而中断；优先恢复已有工地，
+    // 防止未完成建筑长期占位却无人继续建造。
+    TryResumeIncompleteBuilding(ai);
+
+    const bool nearPopulationCap = info.Human_Num + 1.9 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
         !HasIncompleteBuilding(BUILDING_HOME))
     {
@@ -1652,8 +1744,6 @@ static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
-    if (!priest)
-        return;
 
     if (priestMoveOrderId != -1)
     {
@@ -1743,6 +1833,14 @@ static void ManagePriest(UsrAI *ai)
         g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
         return;
 
+    // 敌方基地已被发现但主力尚未真正出征时，祭司不得单独深入敌方区域。
+    // 主力出征后再等待一段时间，确保祭司不会抢在部队前面送死。
+    if (g_frame <= 26000)
+        ;
+    else if (!offensiveAttackStarted ||
+             g_frame - offensiveAttackStartFrame < 180)
+        return;
+
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
     if (!armyTarget)
@@ -1761,16 +1859,342 @@ static void ManagePriest(UsrAI *ai)
     lastPriestOrderFrame = g_frame;
 }
 
-static void DispatchScoutsAfterThirdWave(UsrAI *ai)
+static bool IsScoutFrontierUsable(int blockDR, int blockUR)
 {
-    const int thirdWaveEndFrame = 26000;
-    const int scoutOrderInterval = 180;
-    const int scoutWaypointCount = 8;
-    static const int scoutWaypoints[][2] = {
-        {4, 4}, {MAP_L / 2, 4}, {MAP_L - 4, 4}, {MAP_L - 4, MAP_U / 2}, {MAP_L - 4, MAP_U - 4}, {MAP_L / 2, MAP_U - 4}, {4, MAP_U - 4}, {4, MAP_U / 2}};
+    if (!IsExplorationFrontierBlock(blockDR, blockUR) ||
+        blockDR < 2 || blockUR < 2 ||
+        blockDR >= MAP_L - 2 || blockUR >= MAP_U - 2)
+        return false;
 
-    if (g_frame <= thirdWaveEndFrame)
+    for (const tagBuilding &building : info.buildings)
+    {
+        const int size = (building.Type == BUILDING_HOME ||
+                          building.Type == BUILDING_ARROWTOWER)
+                             ? 2
+                             : 3;
+        if (abs(blockDR - building.BlockDR) <= size + 1 &&
+            abs(blockUR - building.BlockUR) <= size + 1)
+            return false;
+    }
+    for (const tagResource &resource : info.resources)
+    {
+        if (resource.Blood > 0 &&
+            abs(blockDR - resource.BlockDR) <= 1 &&
+            abs(blockUR - resource.BlockUR) <= 1)
+            return false;
+    }
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.Blood > 0 &&
+            BlockDis2(blockDR, blockUR, enemy.BlockDR, enemy.BlockUR) <= 36)
+            return false;
+    }
+    return true;
+}
+
+static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR,
+                                  int &targetUR)
+{
+    int bestScore = -2000000000;
+    bool found = false;
+    for (int dr = 2; dr < MAP_L - 2; ++dr)
+    {
+        for (int ur = 2; ur < MAP_U - 2; ++ur)
+        {
+            if (!IsScoutFrontierUsable(dr, ur))
+                continue;
+
+            const pair<int, int> block = {dr, ur};
+            const int recentPenalty = scoutFrontierVisitFrame.count(block) &&
+                                              g_frame - scoutFrontierVisitFrame[block] < 2400
+                                          ? 1800
+                                          : 0;
+            const int distance = BlockDis2(scout.BlockDR, scout.BlockUR,
+                                           dr, ur);
+            int occupiedPenalty = 0;
+            for (const auto &other : info.armies)
+            {
+                if (other.SN != scout.SN && other.Sort == AT_SCOUT &&
+                    other.Blood > 0 && other.BlockDR == dr &&
+                    other.BlockUR == ur)
+                    occupiedPenalty += 2500;
+            }
+            const int score = -distance * 10 - recentPenalty - occupiedPenalty;
+            if (!found || score > bestScore)
+            {
+                bestScore = score;
+                targetDR = dr;
+                targetUR = ur;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+static bool FindBestFarmerScoutFrontier(const tagFarmer &farmer,
+                                        int &targetDR, int &targetUR)
+{
+    int bestScore = -2000000000;
+    bool found = false;
+    for (int dr = 2; dr < MAP_L - 2; ++dr)
+    {
+        for (int ur = 2; ur < MAP_U - 2; ++ur)
+        {
+            if (!IsScoutFrontierUsable(dr, ur))
+                continue;
+
+            const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                           dr, ur);
+            const int score = (IsExplorationFrontierBlock(dr, ur) ? 10000 : 0) -
+                              distance * 10;
+            if (!found || score > bestScore)
+            {
+                bestScore = score;
+                targetDR = dr;
+                targetUR = ur;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+static pair<double, double> GetFarmerScoutEmergencyPoint(
+    const tagFarmer &farmer, int threatDR, int threatUR)
+{
+    const int dx = farmer.BlockDR - threatDR;
+    const int dy = farmer.BlockUR - threatUR;
+    const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
+    const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+    const bool useDR = abs(dx) >= abs(dy);
+    const int offsets[][2] = {{12, 0}, {10, 0}, {8, 0}, {6, 0},
+                              {0, 12}, {0, 10}, {0, 8}, {0, 6}};
+    for (const auto &offset : offsets)
+    {
+        int blockDR = farmer.BlockDR;
+        int blockUR = farmer.BlockUR;
+        if (useDR)
+            blockDR += stepDR * offset[0];
+        else
+            blockUR += stepUR * offset[1];
+        blockDR = max(1, min(MAP_L - 2, blockDR));
+        blockUR = max(1, min(MAP_U - 2, blockUR));
+        if (IsPriestPointUsable(blockDR, blockUR))
+            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+    }
+    return make_pair((farmer.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                     (farmer.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+}
+
+static void DispatchFarmerScouts(UsrAI *ai)
+{
+    if (enemyBaseDiscovered)
         return;
+    const int orderInterval = 240;
+    const int delayedFallbackFrame = 30000;
+    const int maxFarmerScouts = 1;
+    int cavalryCount = 0;
+    for (const tagArmy &army : info.armies)
+    {
+        if (army.Blood > 0 && army.Sort == AT_SCOUT)
+            ++cavalryCount;
+    }
+
+    if (g_frame <= thirdWaveEndFrame ||
+        (cavalryCount > 0 && g_frame < delayedFallbackFrame))
+        return;
+    if (enemyBaseDiscovered)
+    {
+        farmerScouters.clear();
+        farmerScoutTarget.clear();
+        farmerScoutLastBlock.clear();
+        farmerScoutStuckCount.clear();
+        return;
+    }
+
+    for (set<int>::iterator it = farmerScouters.begin();
+         it != farmerScouters.end();)
+    {
+        bool alive = false;
+        for (const tagFarmer &farmer : info.farmers)
+        {
+            if (farmer.SN == *it && farmer.Blood > 0)
+            {
+                alive = true;
+                break;
+            }
+        }
+        if (!alive)
+            it = farmerScouters.erase(it);
+        else
+            ++it;
+    }
+
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if ((static_cast<int>(farmerScouters.size()) >= maxFarmerScouts &&
+             farmerScouters.find(farmer.SN) == farmerScouters.end()) ||
+            farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER ||
+            farmer.NowState != HUMAN_STATE_IDLE || IsFarmerBuilding(farmer) ||
+            FindDirectThreatToFarmerSN(farmer) != -1 ||
+            FindNearbyEnemyForFarmer(farmer) != -1)
+            continue;
+        if (g_frame - farmerScoutLastOrderFrame[farmer.SN] < orderInterval)
+            continue;
+
+        int targetDR = -1;
+        int targetUR = -1;
+        if (!FindBestFarmerScoutFrontier(farmer, targetDR, targetUR))
+            continue;
+
+        farmerScouters.insert(farmer.SN);
+        farmerScoutTarget[farmer.SN] = make_pair(targetDR, targetUR);
+        farmerScoutLastBlock[farmer.SN] =
+            make_pair(farmer.BlockDR, farmer.BlockUR);
+        farmerScoutLastOrderFrame[farmer.SN] = g_frame;
+        ai->HumanMove(farmer.SN,
+                      (targetDR + 0.5) * double(BLOCKSIDELENGTH),
+                      (targetUR + 0.5) * double(BLOCKSIDELENGTH));
+    }
+
+    for (set<int>::iterator it = farmerScouters.begin();
+         it != farmerScouters.end();)
+    {
+        const int farmerSN = *it;
+        bool removeScout = false;
+        for (const tagFarmer &farmer : info.farmers)
+        {
+            if (farmer.SN != farmerSN)
+                continue;
+            map<int, pair<int, int>>::const_iterator targetIt =
+                farmerScoutTarget.find(farmer.SN);
+            if (targetIt == farmerScoutTarget.end())
+                break;
+            if (BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                          targetIt->second.first, targetIt->second.second) <= 9)
+            {
+                farmerScoutTarget.erase(targetIt);
+                farmerScoutStuckCount[farmer.SN] = 0;
+            }
+            else if (BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                               farmerScoutLastBlock[farmer.SN].first,
+                               farmerScoutLastBlock[farmer.SN].second) <= 1 &&
+                     g_frame - farmerScoutLastOrderFrame[farmer.SN] >= orderInterval)
+            {
+                farmerScoutStuckCount[farmer.SN]++;
+                farmerScoutTarget.erase(targetIt);
+                removeScout = farmerScoutStuckCount[farmer.SN] >= 2;
+            }
+            break;
+        }
+        if (removeScout)
+        {
+            farmerScoutTarget.erase(farmerSN);
+            farmerScoutLastBlock.erase(farmerSN);
+            farmerScoutLastOrderFrame.erase(farmerSN);
+            farmerScoutStuckCount.erase(farmerSN);
+            it = farmerScouters.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+static int FindScoutThreatSN(const tagArmy &scout)
+{
+    int threatSN = -1;
+    int bestDis2 = USR_PRIEST_DANGER_RADIUS * USR_PRIEST_DANGER_RADIUS;
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(scout.BlockDR, scout.BlockUR,
+                                   enemy.BlockDR, enemy.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            threatSN = enemy.SN;
+        }
+    }
+    for (const tagFarmer &enemy : info.enemy_farmers)
+    {
+        if (enemy.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(scout.BlockDR, scout.BlockUR,
+                                   enemy.BlockDR, enemy.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            threatSN = enemy.SN;
+        }
+    }
+    return threatSN;
+}
+
+static bool FindScoutThreatBlock(int threatSN, int &blockDR, int &blockUR)
+{
+    if (FindEnemyUnitBlockPosition(threatSN, blockDR, blockUR))
+        return true;
+    for (const tagResource &resource : info.resources)
+    {
+        if (resource.SN == threatSN && resource.Blood > 0)
+        {
+            blockDR = resource.BlockDR;
+            blockUR = resource.BlockUR;
+            return true;
+        }
+    }
+    return false;
+}
+
+static pair<double, double> GetScoutEmergencyPoint(const tagArmy &scout,
+                                                    int threatDR, int threatUR)
+{
+    const int dx = scout.BlockDR - threatDR;
+    const int dy = scout.BlockUR - threatUR;
+    const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
+    const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+    const bool useDR = abs(dx) >= abs(dy);
+    const int offsets[][2] = {{12, 0}, {10, 0}, {8, 0}, {6, 0},
+                              {0, 12}, {0, 10}, {0, 8}, {0, 6}};
+    for (const auto &offset : offsets)
+    {
+        int blockDR = scout.BlockDR;
+        int blockUR = scout.BlockUR;
+        if (useDR)
+            blockDR += stepDR * offset[0];
+        else
+            blockUR += stepUR * offset[1];
+        blockDR = max(1, min(MAP_L - 2, blockDR));
+        blockUR = max(1, min(MAP_U - 2, blockUR));
+        if (IsPriestPointUsable(blockDR, blockUR))
+            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+    }
+    return make_pair((scout.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                     (scout.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+}
+
+static void DispatchScouts(UsrAI *ai)
+{
+    const int scoutOrderInterval = 180;
+    const int scoutEmergencyOrderInterval = 20;
+    const int scoutSafeRadius = 6;
+    const int scoutWaypointCount = 8;
+    const int scoutMargin = 10;
+    static const int scoutWaypoints[][2] = {
+        {scoutMargin, scoutMargin},
+        {MAP_L / 2, scoutMargin},
+        {MAP_L - scoutMargin - 1, scoutMargin},
+        {MAP_L - scoutMargin - 1, MAP_U / 2},
+        {MAP_L - scoutMargin - 1, MAP_U - scoutMargin - 1},
+        {MAP_L / 2, MAP_U - scoutMargin - 1},
+        {scoutMargin, MAP_U - scoutMargin - 1},
+        {scoutMargin, MAP_U / 2}};
 
     set<int> liveScouts;
     for (const tagArmy &army : info.armies)
@@ -1785,18 +2209,13 @@ static void DispatchScoutsAfterThirdWave(UsrAI *ai)
         if (liveScouts.find(it->first) == liveScouts.end())
         {
             scoutWaypointIndex.erase(it->first);
+            scoutTargetBlock.erase(it->first);
+            scoutStuckCount.erase(it->first);
+            scoutEmergencyOrderId.erase(it->first);
+            scoutEmergencyTarget.erase(it->first);
+            scoutDangerLastFrame.erase(it->first);
             it = scoutLastOrderFrame.erase(it);
         }
-        else
-        {
-            ++it;
-        }
-    }
-    for (map<int, int>::iterator it = scoutWaypointIndex.begin();
-         it != scoutWaypointIndex.end();)
-    {
-        if (liveScouts.find(it->first) == liveScouts.end())
-            it = scoutWaypointIndex.erase(it);
         else
             ++it;
     }
@@ -1806,43 +2225,349 @@ static void DispatchScoutsAfterThirdWave(UsrAI *ai)
         if (scout.Blood <= 0 || scout.Sort != AT_SCOUT)
             continue;
 
-        const map<int, int>::const_iterator lastIt =
+        const int threatSN = FindScoutThreatSN(scout);
+        int threatDR = -1;
+        int threatUR = -1;
+        if (threatSN != -1 &&
+            FindEnemyUnitBlockPosition(threatSN, threatDR, threatUR))
+        {
+            const pair<double, double> retreatPoint =
+                GetScoutEmergencyPoint(scout, threatDR, threatUR);
+            const pair<int, int> retreatTarget = make_pair(
+                static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
+                static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
+            const map<int, pair<int, int>>::const_iterator targetIt =
+                scoutEmergencyTarget.find(scout.SN);
+            if (targetIt == scoutEmergencyTarget.end() ||
+                targetIt->second != retreatTarget ||
+                g_frame - scoutDangerLastFrame[scout.SN] >=
+                    scoutEmergencyOrderInterval)
+            {
+                scoutEmergencyOrderId[scout.SN] = ai->HumanMove(
+                    scout.SN, retreatPoint.first, retreatPoint.second);
+                scoutEmergencyTarget[scout.SN] = retreatTarget;
+                scoutDangerLastFrame[scout.SN] = g_frame;
+            }
+            continue;
+        }
+
+        const map<int, pair<int, int>>::const_iterator emergencyIt =
+            scoutEmergencyTarget.find(scout.SN);
+        if (emergencyIt != scoutEmergencyTarget.end())
+        {
+            if (BlockDis2(scout.BlockDR, scout.BlockUR,
+                          emergencyIt->second.first,
+                          emergencyIt->second.second) <=
+                scoutSafeRadius * scoutSafeRadius)
+            {
+                scoutEmergencyTarget.erase(emergencyIt);
+                scoutEmergencyOrderId.erase(scout.SN);
+            }
+            else
+            {
+                continue;
+            }
+        }
+
+        map<int, int>::const_iterator lastIt =
             scoutLastOrderFrame.find(scout.SN);
         if (lastIt != scoutLastOrderFrame.end() &&
             g_frame - lastIt->second < scoutOrderInterval)
             continue;
 
-        // 侦察骑兵已有战斗关系时交给统一防御逻辑，不强行改成巡逻。
-        if (scout.NowState == HUMAN_STATE_ATTACKING)
-            continue;
-        const map<int, int>::const_iterator targetIt = currentTarget.find(scout.SN);
-        int targetBlockDR = 0;
-        int targetBlockUR = 0;
-        if (targetIt != currentTarget.end() &&
-            FindEnemyUnitBlockPosition(targetIt->second,
-                                       targetBlockDR, targetBlockUR))
-            continue;
-
-        int &waypoint = scoutWaypointIndex[scout.SN];
-        if (waypoint < 0 || waypoint >= scoutWaypointCount)
-            waypoint = scout.SN % scoutWaypointCount;
-
-        int targetDR = scoutWaypoints[waypoint][0];
-        int targetUR = scoutWaypoints[waypoint][1];
-        if (BlockDis2(scout.BlockDR, scout.BlockUR, targetDR, targetUR) <= 9)
+        int &stuckCount = scoutStuckCount[scout.SN];
+        map<int, pair<int, int>>::const_iterator targetIt =
+            scoutTargetBlock.find(scout.SN);
+        if (targetIt != scoutTargetBlock.end())
         {
-            waypoint = (waypoint + 1) % scoutWaypointCount;
+            if (BlockDis2(scout.BlockDR, scout.BlockUR,
+                          targetIt->second.first, targetIt->second.second) <= 9)
+            {
+                scoutTargetBlock.erase(targetIt);
+                stuckCount = 0;
+            }
+            else
+            {
+                map<int, pair<int, int>>::const_iterator oldBlockIt =
+                    scoutLastBlock.find(scout.SN);
+                if (oldBlockIt != scoutLastBlock.end() &&
+                    BlockDis2(scout.BlockDR, scout.BlockUR,
+                              oldBlockIt->second.first,
+                              oldBlockIt->second.second) <= 1)
+                {
+                    ++stuckCount;
+                    scoutTargetBlock.erase(targetIt);
+                }
+            }
+        }
+
+        int targetDR = -1;
+        int targetUR = -1;
+        if (FindBestScoutFrontier(scout, targetDR, targetUR))
+        {
+            scoutTargetBlock[scout.SN] = make_pair(targetDR, targetUR);
+        }
+        else
+        {
+            // 暂时没有可见前沿时才使用保底巡逻，避免固定路线主导探索。
+            int &waypoint = scoutWaypointIndex[scout.SN];
+            if (waypoint < 0 || waypoint >= scoutWaypointCount)
+                waypoint = scout.SN % scoutWaypointCount;
+            targetDR = scoutWaypoints[waypoint][0];
+            targetUR = scoutWaypoints[waypoint][1];
+            if (BlockDis2(scout.BlockDR, scout.BlockUR, targetDR, targetUR) <= 9)
+                waypoint = (waypoint + 1) % scoutWaypointCount;
             targetDR = scoutWaypoints[waypoint][0];
             targetUR = scoutWaypoints[waypoint][1];
         }
 
-        targetDR = max(1, min(MAP_L - 2, targetDR));
-        targetUR = max(1, min(MAP_U - 2, targetUR));
-        const int orderId = ai->HumanMove(
-            scout.SN,
-            (targetDR + 0.5) * double(BLOCKSIDELENGTH),
-            (targetUR + 0.5) * double(BLOCKSIDELENGTH));
+        targetDR = max(2, min(MAP_L - 3, targetDR));
+        targetUR = max(2, min(MAP_U - 3, targetUR));
+        ai->HumanMove(scout.SN,
+                      (targetDR + 0.5) * double(BLOCKSIDELENGTH),
+                      (targetUR + 0.5) * double(BLOCKSIDELENGTH));
+        scoutLastBlock[scout.SN] = make_pair(scout.BlockDR, scout.BlockUR);
         scoutLastOrderFrame[scout.SN] = g_frame;
+        scoutFrontierVisitFrame[make_pair(targetDR, targetUR)] = g_frame;
+    }
+}
+
+static int FindDirectThreatToFarmerSN(const tagFarmer &farmer)
+{
+    int bestSN = -1;
+    int bestDis2 = 1000000000;
+
+    for (const tagArmy &enemyArmy : info.enemy_armies)
+    {
+        if (enemyArmy.WorkObjectSN != farmer.SN)
+            continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   enemyArmy.BlockDR, enemyArmy.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = enemyArmy.SN;
+        }
+    }
+    for (const tagFarmer &enemyFarmer : info.enemy_farmers)
+    {
+        if (enemyFarmer.WorkObjectSN != farmer.SN)
+            continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   enemyFarmer.BlockDR, enemyFarmer.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = enemyFarmer.SN;
+        }
+    }
+    return bestSN;
+}
+
+static int FindNearbyEnemyForFarmer(const tagFarmer &farmer)
+{
+    const int aggroRadius = 3;
+    int bestSN = -1;
+    int bestDis2 = aggroRadius * aggroRadius;
+
+    for (const tagArmy &enemyArmy : info.enemy_armies)
+    {
+        if (enemyArmy.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   enemyArmy.BlockDR, enemyArmy.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = enemyArmy.SN;
+        }
+    }
+    for (const tagFarmer &enemyFarmer : info.enemy_farmers)
+    {
+        if (enemyFarmer.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   enemyFarmer.BlockDR, enemyFarmer.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = enemyFarmer.SN;
+        }
+    }
+    for (const tagResource &resource : info.resources)
+    {
+        if (resource.Type != RESOURCE_LION || resource.Blood <= 0)
+            continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   resource.BlockDR, resource.BlockUR);
+        if (dis2 < bestDis2)
+        {
+            bestDis2 = dis2;
+            bestSN = resource.SN;
+        }
+    }
+    return bestSN;
+}
+
+static void AssignFarmerSelfDefense(UsrAI *ai)
+{
+    map<int, int> targetWorkers;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+
+        int targetSN = FindDirectThreatToFarmerSN(farmer);
+        if (targetSN == -1)
+            targetSN = FindNearbyEnemyForFarmer(farmer);
+        if (targetSN == -1)
+            continue;
+
+        // 农民只进行近距离自卫；同一目标最多安排四名农民，避免围堵。
+        if (targetWorkers[targetSN] >= 4)
+            continue;
+        targetWorkers[targetSN]++;
+        currentTarget[farmer.SN] = targetSN;
+
+        if (farmer.WorkObjectSN != targetSN &&
+            g_frame - fieldSelfDefenseLastOrderFrame[farmer.SN] >=
+                USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL)
+        {
+            ai->HumanAction(farmer.SN, targetSN);
+            fieldSelfDefenseLastOrderFrame[farmer.SN] = g_frame;
+        }
+    }
+}
+
+static bool IsKnownLandBlock(int blockDR, int blockUR)
+{
+    if (!info.theMap || blockDR < 0 || blockUR < 0 ||
+        blockDR >= MAP_L || blockUR >= MAP_U)
+        return false;
+    const int type = (*info.theMap)[blockDR][blockUR].type;
+    return type == MAPPATTERN_GRASS || type == MAPPATTERN_SHOAL;
+}
+
+static bool IsUnknownBlock(int blockDR, int blockUR)
+{
+    if (!info.theMap || blockDR < 0 || blockUR < 0 ||
+        blockDR >= MAP_L || blockUR >= MAP_U)
+        return false;
+    return (*info.theMap)[blockDR][blockUR].type == MAPPATTERN_UNKNOWN;
+}
+
+static bool IsExplorationFrontierBlock(int blockDR, int blockUR)
+{
+    if (!IsKnownLandBlock(blockDR, blockUR))
+        return false;
+
+    const int offsets[][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    for (const auto &offset : offsets)
+    {
+        if (IsUnknownBlock(blockDR + offset[0], blockUR + offset[1]))
+            return true;
+    }
+    return false;
+}
+
+static int enemyBaseSN = -1;
+static int enemyBaseLastSeenFrame = USR_INVALID_FRAME;
+static int enemyBaseBlockDR = -1;
+static int enemyBaseBlockUR = -1;
+static int offensiveLastOrderFrame = USR_INVALID_FRAME;
+
+static void UpdateEnemyBaseDiscovery()
+{
+    // 30000 帧前即使已看到建筑，也不能触发主力总攻。
+    if (g_frame <= 30000)
+        return;
+
+    scoutMissionStarted = true;
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        // 任意存活敌方建筑都代表敌方基地已被侦察到，不要求必须是市镇中心。
+        if (building.Blood > 0)
+        {
+            enemyBaseDiscovered = true;
+            enemyBaseSN = building.SN;
+            enemyBaseBlockDR = building.BlockDR;
+            enemyBaseBlockUR = building.BlockUR;
+            enemyBaseLastSeenFrame = g_frame;
+            return;
+        }
+    }
+}
+
+static const tagBuilding *FindOffensiveTarget()
+{
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        if (building.Blood > 0 && building.SN == enemyBaseSN)
+            return &building;
+    }
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        if (building.Blood > 0 && building.Type == BUILDING_CENTER)
+            return &building;
+    }
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        if (building.Blood > 0)
+            return &building;
+    }
+    return nullptr;
+}
+
+static bool IsOffensiveArmy(const tagArmy &army)
+{
+    // 侦察骑兵继续承担视野任务，不加入主力攻坚编队；祭司由独立逻辑管理。
+    return army.Blood > 0 && army.Sort != AT_PRIEST &&
+           army.Sort != AT_SCOUT;
+}
+
+static void ManageOffensiveArmy(UsrAI *ai)
+{
+    if (g_frame <= 30000)
+        return;
+
+    UpdateEnemyBaseDiscovery();
+    if (!enemyBaseDiscovered)
+        return;
+
+    const tagBuilding *target = FindOffensiveTarget();
+    const int orderInterval = 60;
+    if (g_frame - offensiveLastOrderFrame < orderInterval)
+        return;
+    offensiveLastOrderFrame = g_frame;
+
+    bool issuedAttack = false;
+    for (const tagArmy &army : info.armies)
+    {
+        if (!IsOffensiveArmy(army))
+            continue;
+
+        if (target)
+        {
+            if (GetLockedArmyTarget(army.SN) == target->SN)
+                continue;
+            ClearArmyTargetLock(army.SN);
+            currentTarget[army.SN] = target->SN;
+            ai->HumanAction(army.SN, target->SN);
+            issuedAttack = true;
+        }
+        else if (enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0)
+        {
+            // 基地暂时离开视野时，先向最后已知位置推进，等待重新发现。
+            ClearArmyTargetLock(army.SN);
+            ai->HumanMove(army.SN,
+                          (enemyBaseBlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                          (enemyBaseBlockUR + 0.5) * double(BLOCKSIDELENGTH));
+        }
+    }
+    if (issuedAttack && !offensiveAttackStarted)
+    {
+        offensiveAttackStarted = true;
+        offensiveAttackStartFrame = g_frame;
     }
 }
 
@@ -1853,7 +2578,7 @@ static void AssignFieldSelfDefense(UsrAI *ai)
 
     for (const tagArmy &army : info.armies)
     {
-        if (army.Sort == AT_PRIEST)
+        if (army.Sort == AT_PRIEST || army.Sort == AT_SCOUT)
             continue;
 
         int targetSN = priestThreatSN;
@@ -1973,9 +2698,12 @@ void UsrAI::processData()
     info = getInfo();
     CleanDeadOwnerTargetLocks();
     ManagePriest(this);
-    EvacuateFarmersDuringAttackWaves(this);
-    DispatchScoutsAfterThirdWave(this);
+
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
+    DispatchFarmerScouts(this);
+    ManageOffensiveArmy(this);
+    AssignFarmerSelfDefense(this);
+    DispatchScoutsAfterThirdWave(this);
     AssignArrowTowerTargets(this);
 }
