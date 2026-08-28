@@ -29,8 +29,8 @@
 |------|----------|
 | `README.md` | 本文件：项目概览、安装构建、文件说明、架构与使用说明。 |
 | `AI接口使用指南.md` | 游戏状态结构体（tagInfo、tagFarmer、tagArmy、tagBuilding、tagResource 等）、getInfo()、指令返回值 ins_ret、示例代码；AI 编写必读。 |
-| `游戏编程玩法.md` | **仅用封装函数**的玩法代码：HumanMove、HumanBuild、HumanAction、BuildingAction、PinPointStrike；村民建造/采集、建筑操作、各兵种攻击与投石车定点投射的具体代码与示例。 |
-| `村民建造操作清单.md` | 村民可造建筑一览（时代、前置、木/食/石/金、建造时间）、建造条件与内核实现（conditionDevelop、Player::changeResource 等）、config 键名与代码位置。 |
+| `RTS_AI策略设计.md` | 玩家 AI 的 RTS 策略设计：阶段化决策、资源预算、并行调度、建筑与生产里程碑、三波防守、祭司保护与攻城建筑转换，以及异步指令失败恢复。 |
+| `游戏编程玩法.md` | **仅用封装函数**的玩法代码：HumanMove、HumanBuild、HumanAction、BuildingAction、PinPointStrike；村民建造/采集、建筑操作、各兵种攻击与投石车定点投射的具体代码与示例。 || `村民建造操作清单.md` | 村民可造建筑一览（时代、前置、木/食/石/金、建造时间）、建造条件与内核实现（conditionDevelop、Player::changeResource 等）、config 键名与代码位置。 |
 | `CURSOR_QT_开发指南.md` | 在 Cursor / VS Code 下的 Qt 环境配置、qmake 构建、调试配置与常见问题。 |
 
 ---

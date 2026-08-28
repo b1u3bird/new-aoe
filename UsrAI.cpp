@@ -15,64 +15,144 @@ ins UsrIns;
 #include <utility>
 #include <vector>
 
+// 军队自卫指令的最小发送间隔，单位为游戏帧。
 static const int USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL = 12;
+// 军队协防友军时允许响应的最大曼哈顿距离，单位为地图格。
 static const int USR_FIELD_ASSIST_RADIUS = 8;
+// 普通军队主动发现敌军的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_ARMY_AGGRO_RADIUS = 7;
+// 农民遭遇敌人时触发主动处理的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_FARMER_AGGRO_RADIUS = 6;
+// 箭塔重新选择攻击目标的最小间隔，单位为游戏帧。
 static const int USR_TOWER_ORDER_INTERVAL = 20;
+// 经济采集指令的最小发送间隔，单位为游戏帧。
 static const int USR_ECONOMY_ORDER_INTERVAL = 80;
+// 建造指令的最小发送间隔，单位为游戏帧。
 static const int USR_BUILD_ORDER_INTERVAL = 100;
+// 建筑研发或升级动作之间的最小发送间隔，单位为游戏帧。
 static const int USR_BUILDING_ACTION_INTERVAL = 80;
+// 同一生产通道没有收到异步结果时，允许恢复的超时帧数。
+static const int USR_PRODUCTION_ORDER_TIMEOUT = 300;
+// 调试面板状态输出间隔，避免逐帧刷屏。
+static const int USR_DEBUG_TEXT_INTERVAL = 200;
+// 祭司转换或移动指令的最小发送间隔，单位为游戏帧。
 static const int USR_PRIEST_ORDER_INTERVAL = 20;
+// 祭司危险判定半径，单位为地图格。
 static const int USR_PRIEST_DANGER_RADIUS = 9;
+// 祭司安全距离阈值，单位为地图格。
 static const int USR_PRIEST_SAFE_RADIUS = 6;
+// 祭司确认安全后等待的帧数。
 static const int USR_PRIEST_SAFE_FRAMES = 120;
+// 祭司开始进入防守准备状态的游戏帧。
 static const int USR_PRIEST_PREPARE_FRAME = 5200;
+// 祭司允许推进并尝试转换的最早游戏帧。
 static const int USR_PRIEST_ADVANCE_FRAME = 21500;
+// 兼容旧版祭司安全点的地图横向坐标，当前仅作为保留配置。
 static const int USR_PRIEST_SAFE_BLOCK_DR = 2;
+// 兼容旧版祭司安全点的地图纵向坐标，当前仅作为保留配置。
 static const int USR_PRIEST_SAFE_BLOCK_UR = 2;
+// 箭塔建筑候选点相对中心的目标距离，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_RADIUS = 18;
+// 建筑候选点距离地图边界的最小安全边距，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
+// 表示尚未发生过相关事件的哨兵帧值。
 static const int USR_INVALID_FRAME = -1000000000;
 
+// 我方军队 SN 到当前锁定敌方目标 SN 的映射。
 static map<int, int> currentTarget;
+// 我方军队 SN 到波次反击目标 SN 的映射。
 static map<int, int> waveRetaliationTarget;
+// 我方军队 SN 到首次发现波次威胁时刻的映射。
 static map<int, int> waveThreatFirstSeenFrame;
+// 我方军队 SN 到上次自卫指令帧的映射。
 static map<int, int> fieldSelfDefenseLastOrderFrame;
+// 我方箭塔 SN 到上次索敌指令帧的映射。
 static map<int, int> towerLastOrderFrame;
+// 我方主动进攻单位 SN 到其返回位置的映射，坐标单位为世界坐标。
 static map<int, pair<double, double>> harassHome;
+// 农民 SN 到上次采集或撤离指令帧的映射。
 static map<int, int> farmerLastOrderFrame;
+// 农民 SN 到固定资源角色的映射，角色值决定默认采集资源类型。
 static map<int, int> farmerResourceRole;
+// 下一个新农民使用的资源角色序号。
 static int nextFarmerResourceRole = 0;
+// 上次提交经济采集指令的游戏帧。
 static int lastEconomyOrderFrame = USR_INVALID_FRAME;
+// 上次提交建造指令的游戏帧。
 static int lastBuildOrderFrame = USR_INVALID_FRAME;
+// 上次提交建筑研发、升级或生产动作的游戏帧。
 static int lastBuildingActionFrame = USR_INVALID_FRAME;
+// 上次提交单位生产动作的游戏帧。
+static int lastProductionActionFrame = USR_INVALID_FRAME;
+// 上次提交祭司移动或转换指令的游戏帧。
 static int lastPriestOrderFrame = USR_INVALID_FRAME;
+// 祭司最近一次确认安全的起始游戏帧。
 static int priestSafeSinceFrame = USR_INVALID_FRAME;
+// 当前祭司移动指令的异步指令 ID，-1 表示没有等待中的指令。
 static int priestMoveOrderId = -1;
+// 当前祭司撤退或防守目标的地图格坐标。
 static pair<int, int> priestEmergencyTarget = make_pair(-1, -1);
+// 当前祭司撤退或防守目标最后一次更新的游戏帧。
 static int priestEmergencyTargetFrame = USR_INVALID_FRAME;
+// 最近一次检测到祭司危险状态的游戏帧。
 static int priestDangerLastFrame = USR_INVALID_FRAME;
+// 最近一次触发祭司危险状态的敌方单位 SN。
 static int priestDangerTargetSN = -1;
+// 下一个建筑候选位置在候选数组中的索引。
 static int buildCandidateIndex = 0;
+// 兵营建造指令的异步指令 ID，-1 表示没有等待中的指令。
 static int armyCampOrderId = -1;
+// 当前普通建造指令的异步指令 ID，-1 表示没有等待中的指令。
 static int buildOrderId = -1;
+// 当前普通建造指令对应的建筑类型。
 static int buildOrderType = -1;
+// 棍棒兵生产指令的异步指令 ID，-1 表示没有等待中的指令。
 static int clubmanOrderId = -1;
+// 农民生产指令的异步指令 ID，-1 表示没有等待中的指令。
 static int farmerOrderId = -1;
+// 农民生产指令提交时的游戏帧。
 static int farmerOrderFrame = USR_INVALID_FRAME;
+// 士兵生产指令的异步指令 ID，-1 表示没有等待中的指令。
 static int soldierOrderId = -1;
+// 士兵生产指令提交时的游戏帧。
 static int soldierOrderFrame = USR_INVALID_FRAME;
+// 靶场生产指令的异步指令 ID，-1 表示没有等待中的指令。
+static int rangeOrderId = -1;
+// 靶场生产指令提交时的游戏帧。
+static int rangeOrderFrame = USR_INVALID_FRAME;
+// 马厩生产指令的异步指令 ID，-1 表示没有等待中的指令。
+static int stableOrderId = -1;
+// 马厩生产指令提交时的游戏帧。
+static int stableOrderFrame = USR_INVALID_FRAME;
+// 最近一次非生产建筑动作的异步指令 ID。
+static int technologyOrderId = -1;
+// 最近一次非生产建筑动作提交时的游戏帧。
+static int technologyOrderFrame = USR_INVALID_FRAME;
+// 最近一次非生产建筑动作的动作枚举，用于异步成功后推进科技里程碑。
+static int technologyPendingAction = -1;
+// 已成功完成谷仓箭塔研发；当前接口不暴露科技树，按成功返回值缓存。
+static bool arrowTowerTechnologyReady = false;
+// 最近一次兵营建造指令的返回结果。
 static int armyCampResult = ACTION_SUCCESS;
+// 最近一次棍棒兵生产指令的返回结果。
 static int clubmanResult = ACTION_SUCCESS;
+// 兵营建造指令返回结果对应的游戏帧。
 static int armyCampResultFrame = USR_INVALID_FRAME;
+// 棍棒兵生产指令返回结果对应的游戏帧。
 static int clubmanResultFrame = USR_INVALID_FRAME;
+// 策略诊断快照记录的游戏帧。
 static int strategyDiagnosticFrame = USR_INVALID_FRAME;
+// 策略诊断快照中的棍棒兵数量。
 static int strategyDiagnosticClubmen = 0;
+// 策略诊断快照中是否存在兵营，1 表示存在，0 表示不存在。
 static int strategyDiagnosticHasCamp = 0;
+// 策略诊断快照中的木材数量。
 static int strategyDiagnosticWood = 0;
+// 策略诊断快照中的食物数量。
 static int strategyDiagnosticMeat = 0;
+// 策略诊断快照中的石头数量。
 static int strategyDiagnosticStone = 0;
+// 策略诊断快照中的黄金数量。
 static int strategyDiagnosticGold = 0;
 
 // 接口：计算两个格子坐标的曼哈顿距离。
@@ -456,15 +536,16 @@ static void SelectWaveUnitsBySort(const tagInfo &info,
     }
 }
 
-// 接口：为所有我方军队执行基础野外自卫逻辑。
-// 用途：被打自动反击、附近敌农民靠近时主动攻击、附近友军被打时协助。
 // 接口：按类型查找已完成且空闲的我方建筑。
 // 用途：统一调度时代、科技和生产命令，避免覆盖正在执行的项目。
 static const tagBuilding *FindReadyBuildingByType(const tagInfo &info, int type)
 {
     for (const tagBuilding &building : info.buildings)
     {
-        if (building.Type == type && building.Percent >= 100 && building.Project == -1)
+        // 普通建筑的 Project 直接映射 Building::getActNum()；空闲值为 ACT_NULL(0)，
+        // 而不是 -1。箭塔是例外，其 Project 保存攻击目标，未由此函数用于生产。
+        if (building.Type == type && building.Percent >= 100 &&
+            building.Project == ACT_NULL)
             return &building;
     }
     return nullptr;
@@ -887,7 +968,10 @@ static bool TryBuild(UsrAI *ai, const tagInfo &info, int buildingType)
         if (result == info.ins_ret.end())
             return false;
         if (result->second == ACTION_INVALID_POSITION_NOT_FIT ||
-            result->second == ACTION_INVALID_HUMANBUILD_OVERLAP)
+            result->second == ACTION_INVALID_HUMANBUILD_OVERLAP ||
+            result->second == ACTION_INVALID_HUMANBUILD_DIFFERENTHIGH ||
+            result->second == ACTION_INVALID_HUMANBUILD_OVERBORDER ||
+            result->second == ACTION_INVALID_HUMANBUILD_UNEXPLORE)
             buildCandidateIndex++;
         buildOrderId = -1;
         buildOrderType = -1;
@@ -912,48 +996,105 @@ static bool TryBuildingAction(UsrAI *ai, const tagInfo &info,
                               int buildingType, int action)
 {
     int *pendingOrderId = nullptr;
+    int *pendingOrderFrame = nullptr;
     if (action == BUILDING_CENTER_CREATEFARMER)
+    {
         pendingOrderId = &farmerOrderId;
-    else if (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN ||
-             action == BUILDING_ARMYCAMP_CREATE_SLINGER ||
-             action == BUILDING_ARMYCAMP_CREATE_BROADSWORD)
+        pendingOrderFrame = &farmerOrderFrame;
+    }
+    else if (buildingType == BUILDING_ARMYCAMP &&
+             (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN ||
+              action == BUILDING_ARMYCAMP_CREATE_SLINGER ||
+              action == BUILDING_ARMYCAMP_CREATE_BROADSWORD))
+    {
         pendingOrderId = &soldierOrderId;
+        pendingOrderFrame = &soldierOrderFrame;
+    }
+    else if (buildingType == BUILDING_RANGE &&
+             (action == BUILDING_RANGE_CREATE_BOWMAN ||
+              action == BUILDING_RANGE_CREATE_CHARIOT_ARCHER ||
+              action == BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN))
+    {
+        pendingOrderId = &rangeOrderId;
+        pendingOrderFrame = &rangeOrderFrame;
+    }
+    else if (buildingType == BUILDING_STABLE &&
+             (action == BUILDING_STABLE_CREATE_SCOUT ||
+              action == BUILDING_STABLE_CREATE_CHARIOT ||
+              action == BUILDING_STABLE_CREATE_CAVALRY))
+    {
+        pendingOrderId = &stableOrderId;
+        pendingOrderFrame = &stableOrderFrame;
+    }
+    else
+    {
+        pendingOrderId = &technologyOrderId;
+        pendingOrderFrame = &technologyOrderFrame;
+    }
 
-    if (pendingOrderId && *pendingOrderId != -1)
+    if (*pendingOrderId != -1)
     {
         map<int, int>::const_iterator result = info.ins_ret.find(*pendingOrderId);
-        int orderFrame = action == BUILDING_CENTER_CREATEFARMER
-                             ? farmerOrderFrame : soldierOrderFrame;
-        if (result == info.ins_ret.end() && g_frame - orderFrame < 300)
+        if (result == info.ins_ret.end() &&
+            g_frame - *pendingOrderFrame < USR_PRODUCTION_ORDER_TIMEOUT)
             return false;
+
+        if (result != info.ins_ret.end() &&
+            pendingOrderId == &technologyOrderId &&
+            technologyPendingAction == BUILDING_GRANARY_ARROWTOWER &&
+            result->second == ACTION_SUCCESS)
+        {
+            arrowTowerTechnologyReady = true;
+        }
         *pendingOrderId = -1;
+        if (pendingOrderId == &technologyOrderId)
+            technologyPendingAction = -1;
     }
-    if (g_frame - lastBuildingActionFrame < USR_BUILDING_ACTION_INTERVAL)
+
+    const bool productionAction = pendingOrderId != &technologyOrderId;
+    if (!productionAction &&
+        g_frame - lastBuildingActionFrame < USR_BUILDING_ACTION_INTERVAL)
         return false;
+
     const tagBuilding *building = FindReadyBuildingByType(info, buildingType);
     if (!building)
         return false;
-    int orderId = ai->BuildingAction(building->SN, action);
-    if (pendingOrderId)
-        *pendingOrderId = orderId;
-    if (action == BUILDING_CENTER_CREATEFARMER)
-        farmerOrderFrame = g_frame;
-    else if (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN ||
-             action == BUILDING_ARMYCAMP_CREATE_SLINGER ||
-             action == BUILDING_ARMYCAMP_CREATE_BROADSWORD)
-        soldierOrderFrame = g_frame;
+
+    const int orderId = ai->BuildingAction(building->SN, action);
+    *pendingOrderId = orderId;
+    *pendingOrderFrame = g_frame;
+    if (pendingOrderId == &technologyOrderId)
+        technologyPendingAction = action;
+    if (productionAction)
+        lastProductionActionFrame = g_frame;
+    else
+        lastBuildingActionFrame = g_frame;
+
     if (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN)
         clubmanOrderId = orderId;
-    lastBuildingActionFrame = g_frame;
     return true;
 }
 
 static bool TryProduceFarmer(UsrAI *ai, const tagInfo &info,
                              bool nearPopulationCap)
 {
+    // DebugText 显示在游戏调试面板；限频输出，便于定位停产原因。
+    if (info.GameFrame % USR_DEBUG_TEXT_INTERVAL == 0)
+    {
+        ai->DebugText(QString("frame=%1 population=%2/%3 meat=%4 farmers=%5 nearCap=%6 centerReady=%7")
+                          .arg(info.GameFrame)
+                          .arg(info.Human_Num)
+                          .arg(info.Human_MaxNum)
+                          .arg(info.Meat)
+                          .arg(info.farmers.size())
+                          .arg(nearPopulationCap ? 1 : 0)
+                          .arg(FindReadyBuildingByType(info, BUILDING_CENTER) ? 1 : 0));
+    }
+
     if (nearPopulationCap || info.Meat < 50 ||
         static_cast<int>(info.farmers.size()) >= 14)
         return false;
+
     return TryBuildingAction(ai, info, BUILDING_CENTER,
                              BUILDING_CENTER_CREATEFARMER);
 }
@@ -1017,91 +1158,55 @@ static void ManageEconomyAndProduction(UsrAI *ai, const tagInfo &info)
             buildOrderId = -1;
             buildOrderType = -1;
         }
-        else
-            return;
     }
 
     const bool nearPopulationCap = info.Human_Num + 1.0 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
         !HasIncompleteBuilding(info, BUILDING_HOME))
     {
-        if (TryBuild(ai, info, BUILDING_HOME))
-            return;
+        TryBuild(ai, info, BUILDING_HOME);
     }
 
     if (!HasBuilding(info, BUILDING_ARMYCAMP) && info.Wood >= 125)
     {
-        if (TryBuild(ai, info, BUILDING_ARMYCAMP))
-            return;
+        TryBuild(ai, info, BUILDING_ARMYCAMP);
     }
-
-    // 第一波前先形成最低防线，再启动工具时代升级。
-    const bool firstWaveReady = CountArmyBySort(info, AT_CLUBMAN) >= 5;
-    if (firstWaveReady && info.civilizationStage == CIVILIZATION_STONEAGE &&
-        HasCompletedBuilding(info, BUILDING_GRANARY) &&
-        HasCompletedBuilding(info, BUILDING_STOCK) && info.Meat >= 500)
+    if (!HasBuilding(info, BUILDING_RANGE) && info.Wood >= 150)
     {
-        if (TryBuildingAction(ai, info, BUILDING_CENTER,
-                              BUILDING_CENTER_UPGRADE))
-            return;
+        TryBuild(ai, info, BUILDING_RANGE);
     }
-
-    // 箭塔科技必须先于箭塔地基，否则引擎会以未解锁拒绝建造。
-    if (info.civilizationStage >= CIVILIZATION_TOOLAGE &&
-        !HasBuilding(info, BUILDING_ARROWTOWER))
+    if (!HasBuilding(info, BUILDING_STABLE) && info.Wood >= 150)
     {
-        if (TryBuildingAction(ai, info, BUILDING_GRANARY,
-                              BUILDING_GRANARY_ARROWTOWER))
-            return;
+        TryBuild(ai, info, BUILDING_STABLE);
     }
-
-    if (info.civilizationStage >= CIVILIZATION_TOOLAGE)
+    if (!HasBuilding(info, BUILDING_ARROWTOWER) && info.Stone >= 150)
     {
-        if (!HasBuilding(info, BUILDING_RANGE) && info.Wood >= 150)
-        {
-            if (TryBuild(ai, info, BUILDING_RANGE))
-                return;
-        }
-        if (!HasBuilding(info, BUILDING_STABLE) && info.Wood >= 150)
-        {
-            if (TryBuild(ai, info, BUILDING_STABLE))
-                return;
-        }
-        if (!HasBuilding(info, BUILDING_ARROWTOWER) && info.Stone >= 150)
-        {
-            if (TryBuild(ai, info, BUILDING_ARROWTOWER))
-                return;
-        }
-        if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
-            HasCompletedBuilding(info, BUILDING_RANGE) &&
-            HasCompletedBuilding(info, BUILDING_STABLE))
-        {
-            if (TryBuildingAction(ai, info, BUILDING_CENTER,
-                                  BUILDING_CENTER_UPGRADE))
-                return;
-        }
+        TryBuild(ai, info, BUILDING_ARROWTOWER);
+    }
+    if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
+        HasCompletedBuilding(info, BUILDING_RANGE) &&
+        HasCompletedBuilding(info, BUILDING_STABLE))
+    {
+        TryBuildingAction(ai, info, BUILDING_CENTER,
+                          BUILDING_CENTER_UPGRADE);
     }
 
-    if (TryProduceSoldier(ai, info, nearPopulationCap))
-        return;
+    // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
+    TryProduceSoldier(ai, info, nearPopulationCap);
+    TryProduceFarmer(ai, info, nearPopulationCap);
 
-    if (TryProduceFarmer(ai, info, nearPopulationCap))
-        return;
-
-    if (info.civilizationStage >= CIVILIZATION_TOOLAGE && !nearPopulationCap &&
+    if (!nearPopulationCap &&
         CountArmyBySort(info, AT_BOWMAN) < 5 && info.Meat >= 40 && info.Wood >= 20)
     {
-        if (TryBuildingAction(ai, info, BUILDING_RANGE,
-                              BUILDING_RANGE_CREATE_BOWMAN))
-            return;
+        TryBuildingAction(ai, info, BUILDING_RANGE,
+                          BUILDING_RANGE_CREATE_BOWMAN);
     }
 
-    if (info.civilizationStage >= CIVILIZATION_TOOLAGE && !nearPopulationCap &&
+    if (!nearPopulationCap &&
         CountArmyBySort(info, AT_SCOUT) < 3 && info.Meat >= 100)
     {
-        if (TryBuildingAction(ai, info, BUILDING_STABLE,
-                              BUILDING_STABLE_CREATE_SCOUT))
-            return;
+        TryBuildingAction(ai, info, BUILDING_STABLE,
+                          BUILDING_STABLE_CREATE_SCOUT);
     }
 
     TryAssignIdleFarmer(ai, info);
@@ -1429,7 +1534,7 @@ static void AssignArrowTowerTargets(UsrAI *ai, const tagInfo &info)
         int targetDR = 0;
         int targetUR = 0;
         const bool currentTargetInRange =
-            building.Project != -1 &&
+            building.Project != ACT_NULL &&
             FindEnemyUnitBlockPosition(info, building.Project, targetDR, targetUR) &&
             BlockDis(building.BlockDR, building.BlockUR, targetDR, targetUR) <= ArrowTowerAttackRangeBlocks();
 
