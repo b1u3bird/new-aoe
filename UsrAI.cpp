@@ -104,6 +104,52 @@ static int lastBuildOrderFrame = USR_INVALID_FRAME;
 // 上次为未完成建筑恢复建造的游戏帧。
 static int lastConstructionRecoveryFrame = USR_INVALID_FRAME;
 
+// 单个资源目标允许关联的农民数量上限，避免动态资源附近互相卡位。
+static const int USR_RESOURCE_HARD_CAP_FOOD = 4;
+static const int USR_RESOURCE_HARD_CAP_OTHER = 3;
+// 资源目标采集指令失败后的基础冷却和最大冷却。
+static const int USR_RESOURCE_FAIL_COOLDOWN = 240;
+static const int USR_RESOURCE_FAIL_COOLDOWN_MAX = 1200;
+// Core 状态快照刷新前，保留成功订单预占的宽限帧数。
+static const int USR_RESOURCE_PENDING_GRACE = 120;
+// 即使 Core 未返回结果，预占也必须在绝对期限后释放。
+static const int USR_RESOURCE_PENDING_MAX_LIFETIME = 600;
+
+struct ResourceAttemptState
+{
+    int cooldownUntilFrame;
+    int failureCount;
+    int lastAttemptFrame;
+
+    ResourceAttemptState()
+        : cooldownUntilFrame(USR_INVALID_FRAME), failureCount(0),
+          lastAttemptFrame(USR_INVALID_FRAME)
+    {
+    }
+};
+
+struct PendingGatherOrder
+{
+    int orderId;
+    int targetSN;
+    int submitFrame;
+    int result;
+    int resultFrame;
+
+    PendingGatherOrder()
+        : orderId(-1), targetSN(-1), submitFrame(USR_INVALID_FRAME),
+          result(USR_INVALID_FRAME), resultFrame(USR_INVALID_FRAME)
+    {
+    }
+};
+
+// 资源 SN 到最近一次采集尝试状态的映射。
+static map<int, ResourceAttemptState> resourceAttemptState;
+// 农民 SN 到尚未完全反映在 Core 快照中的采集订单预占。
+static map<int, PendingGatherOrder> pendingGatherOrders;
+// 用于检测同一进程中新对局导致的帧号回退。
+static int farmerResourceStateFrame = USR_INVALID_FRAME;
+
 static int FindDirectThreatToFarmerSN(const tagFarmer &farmer);
 static int FindNearbyEnemyForFarmer(const tagFarmer &farmer);
 static bool IsKnownLandBlock(int blockDR, int blockUR);
@@ -111,6 +157,7 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR);
 static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR, int &targetUR);
 static bool FindBestFarmerScoutFrontier(const tagFarmer &farmer, int &targetDR,
                                         int &targetUR);
+static bool IsAliveFarmerSN(int farmerSN);
 // 上次提交建筑研发、升级或生产动作的游戏帧。
 static int lastBuildingActionFrame = USR_INVALID_FRAME;
 // 上次提交单位生产动作的游戏帧。
@@ -896,11 +943,30 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         }
     }
 
+    // Core 快照尚未建立关系时，用 pending 预占补齐配额统计。
+    for (map<int, PendingGatherOrder>::const_iterator it =
+             pendingGatherOrders.begin();
+         it != pendingGatherOrders.end(); ++it)
+    {
+        if (!IsAliveFarmerSN(it->first))
+            continue;
+        for (const tagResource &resource : info.resources)
+        {
+            if (resource.SN != it->second.targetSN ||
+                !IsGatherableResource(resource))
+                continue;
+            const int bucket = ResourceBucket(resource.Type);
+            if (bucket >= 0)
+                current[bucket]++;
+            break;
+        }
+    }
+
     if (farmerCount == 0)
         return;
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
-    int weight[4] = {8, 2, 0, 0};
+    int weight[4] = {8, 0, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.Meat < 1000)
@@ -913,14 +979,12 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         HasIncompleteBuilding(BUILDING_STABLE);
     if (info.Wood < 250)
         weight[1] += 4;
-    else if (info.Wood < 500)
-        weight[1] += 2;
     if (needWoodBuilding)
         weight[1] += 4;
 
-    const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
-    if (needStone && info.Stone < 300)
-        weight[2] += 5;
+    // const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
+    // if (needStone && info.Stone < 300)
+    //     weight[2] += 5;
 
     // 工具时代升级、兵种升级和高级兵生产由黄金需求拉动；没有需求时保持零配额。
     // const bool needGold = info.civilizationStage == CIVILIZATION_TOOLAGE &&
@@ -989,6 +1053,183 @@ static bool IsFarmerClusterCrowded(int blockDR, int blockUR, int excludeSN)
     return false;
 }
 
+static bool IsAliveFarmerSN(int farmerSN)
+{
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.SN == farmerSN)
+            return farmer.Blood > 0;
+    }
+    return false;
+}
+
+static bool IsVisibleResourceSN(int resourceSN)
+{
+    for (const tagResource &resource : info.resources)
+    {
+        if (resource.SN == resourceSN)
+            return true;
+    }
+    return false;
+}
+
+static void RecordResourceAttemptFailure(int resourceSN)
+{
+    if (resourceSN < 0)
+        return;
+
+    ResourceAttemptState &state = resourceAttemptState[resourceSN];
+    if (state.failureCount < 4)
+        state.failureCount++;
+
+    int cooldown = USR_RESOURCE_FAIL_COOLDOWN;
+    for (int i = 1; i < state.failureCount; i++)
+    {
+        if (cooldown >= USR_RESOURCE_FAIL_COOLDOWN_MAX / 2)
+        {
+            cooldown = USR_RESOURCE_FAIL_COOLDOWN_MAX;
+            break;
+        }
+        cooldown *= 2;
+    }
+    if (cooldown > USR_RESOURCE_FAIL_COOLDOWN_MAX)
+        cooldown = USR_RESOURCE_FAIL_COOLDOWN_MAX;
+
+    state.lastAttemptFrame = g_frame;
+    state.cooldownUntilFrame = g_frame + cooldown;
+}
+
+static void CleanupFarmerResourceState()
+{
+    for (map<int, PendingGatherOrder>::iterator it = pendingGatherOrders.begin();
+         it != pendingGatherOrders.end();)
+    {
+        const int farmerSN = it->first;
+        PendingGatherOrder &pending = it->second;
+        if (!IsAliveFarmerSN(farmerSN))
+        {
+            it = pendingGatherOrders.erase(it);
+        }
+        else if (!IsVisibleResourceSN(pending.targetSN))
+        {
+            // 目标消失通常表示已被耗尽或删除，不应把正常完成误记为失败。
+            it = pendingGatherOrders.erase(it);
+        }
+        else
+            ++it;
+    }
+
+    for (map<int, ResourceAttemptState>::iterator it = resourceAttemptState.begin();
+         it != resourceAttemptState.end();)
+    {
+        if (!IsVisibleResourceSN(it->first) &&
+            g_frame >= it->second.cooldownUntilFrame)
+            it = resourceAttemptState.erase(it);
+        else
+            ++it;
+    }
+}
+
+static void ProcessPendingGatherOrders()
+{
+    if (farmerResourceStateFrame != USR_INVALID_FRAME &&
+        g_frame < farmerResourceStateFrame)
+    {
+        resourceAttemptState.clear();
+        pendingGatherOrders.clear();
+        farmerLastOrderFrame.clear();
+        farmerThreatLastFrame.clear();
+        farmerSafeSinceFrame.clear();
+        lastEconomyOrderFrame = USR_INVALID_FRAME;
+    }
+    farmerResourceStateFrame = g_frame;
+
+    CleanupFarmerResourceState();
+
+    for (map<int, PendingGatherOrder>::iterator it = pendingGatherOrders.begin();
+         it != pendingGatherOrders.end();)
+    {
+        const int farmerSN = it->first;
+        PendingGatherOrder &pending = it->second;
+        const tagFarmer *farmerState = NULL;
+        for (const tagFarmer &farmer : info.farmers)
+        {
+            if (farmer.SN == farmerSN)
+            {
+                farmerState = &farmer;
+                break;
+            }
+        }
+
+        // ins_ret 会跨帧保留，因此结果只在第一次观察到时记录。
+        if (pending.result == USR_INVALID_FRAME)
+        {
+            map<int, int>::const_iterator result =
+                info.ins_ret.find(pending.orderId);
+            if (result != info.ins_ret.end())
+            {
+                pending.result = result->second;
+                pending.resultFrame = g_frame;
+                if (pending.result != ACTION_SUCCESS)
+                {
+                    RecordResourceAttemptFailure(pending.targetSN);
+                    it = pendingGatherOrders.erase(it);
+                    continue;
+                }
+            }
+        }
+
+        // 关系已经进入快照后，真实 worker 统计会接管 pending 预占。
+        if (farmerState != NULL &&
+            farmerState->WorkObjectSN == pending.targetSN)
+        {
+            resourceAttemptState.erase(pending.targetSN);
+            it = pendingGatherOrders.erase(it);
+            continue;
+        }
+
+        if (pending.result == ACTION_SUCCESS &&
+            g_frame - pending.resultFrame >= USR_RESOURCE_PENDING_GRACE)
+        {
+            // 农民已恢复空闲且关系仍未建立，说明该资源目标不可用。
+            if (farmerState != NULL &&
+                farmerState->NowState == HUMAN_STATE_IDLE)
+                RecordResourceAttemptFailure(pending.targetSN);
+            it = pendingGatherOrders.erase(it);
+            continue;
+        }
+
+        if (pending.result == USR_INVALID_FRAME &&
+            g_frame - pending.submitFrame >= USR_RESOURCE_PENDING_GRACE &&
+            farmerState != NULL && farmerState->NowState == HUMAN_STATE_IDLE)
+        {
+            RecordResourceAttemptFailure(pending.targetSN);
+            it = pendingGatherOrders.erase(it);
+            continue;
+        }
+
+        if (g_frame - pending.submitFrame >=
+            USR_RESOURCE_PENDING_MAX_LIFETIME)
+        {
+            // 非空闲状态通常表示订单被建造、自卫等逻辑覆盖，只释放预占。
+            it = pendingGatherOrders.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
+static void CancelPendingGatherOrder(int farmerSN)
+{
+    pendingGatherOrders.erase(farmerSN);
+}
+
+static int ResourceHardCapacity(int bucket)
+{
+    return bucket == 0 ? USR_RESOURCE_HARD_CAP_FOOD
+                       : USR_RESOURCE_HARD_CAP_OTHER;
+}
+
 static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
                               const int current[4])
 {
@@ -1003,17 +1244,34 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         resourceWorkers[other.WorkObjectSN]++;
     }
 
+    for (map<int, PendingGatherOrder>::const_iterator it =
+             pendingGatherOrders.begin();
+         it != pendingGatherOrders.end(); ++it)
+    {
+        if (it->first != farmer.SN && IsAliveFarmerSN(it->first))
+            resourceWorkers[it->second.targetSN]++;
+    }
+
     for (const tagResource &resource : info.resources)
     {
         const int bucket = ResourceBucket(resource.Type);
         if (bucket != desiredBucket || !IsGatherableResource(resource))
             continue;
 
+        map<int, ResourceAttemptState>::const_iterator attemptIt =
+            resourceAttemptState.find(resource.SN);
+        if (attemptIt != resourceAttemptState.end() &&
+            g_frame < attemptIt->second.cooldownUntilFrame)
+            continue;
+
+        const int workers = resourceWorkers[resource.SN];
+        if (workers >= ResourceHardCapacity(bucket))
+            continue;
+
         if (IsFarmerClusterCrowded(resource.BlockDR, resource.BlockUR,
                                    farmer.SN))
             continue;
 
-        const int workers = resourceWorkers[resource.SN];
         const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
                                        resource.BlockDR, resource.BlockUR);
         const int softCapacity = bucket == 0 ? 4 : 3;
@@ -1217,13 +1475,15 @@ static pair<int, int> GetBuildCandidate(int buildingType)
 
 static bool TryAssignIdleFarmer(UsrAI *ai)
 {
+    // 订单结果和超时状态必须每次调度调用都回收，不能被经济下单节流延迟。
+    ProcessPendingGatherOrders();
     if (g_frame - lastEconomyOrderFrame < USR_ECONOMY_ORDER_INTERVAL)
         return false;
 
     static int target[4] = {0, 0, 0, 0};
     static int assigned[4] = {0, 0, 0, 0};
     static int quotaFrame = -1000000;
-    if (g_frame - quotaFrame >= 240)
+    if (g_frame < quotaFrame || g_frame - quotaFrame >= 240)
     {
         CalculateFarmerTargets(target, assigned);
         quotaFrame = g_frame;
@@ -1235,6 +1495,8 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
             farmer.NowState != HUMAN_STATE_IDLE)
             continue;
         if (IsFarmerBuilding(farmer) || farmer.SN == buildFarmerSN)
+            continue;
+        if (pendingGatherOrders.find(farmer.SN) != pendingGatherOrders.end())
             continue;
 
         // 被威胁的农民必须先经过安全滞后，避免敌人刚离开就反复撤退/采集。
@@ -1280,7 +1542,12 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
         if (targetSN < 0)
             continue;
 
-        ai->HumanAction(farmer.SN, targetSN);
+        const int orderId = ai->HumanAction(farmer.SN, targetSN);
+        PendingGatherOrder pending;
+        pending.orderId = orderId;
+        pending.targetSN = targetSN;
+        pending.submitFrame = g_frame;
+        pendingGatherOrders[farmer.SN] = pending;
         farmerLastOrderFrame[farmer.SN] = g_frame;
         lastEconomyOrderFrame = g_frame;
         assigned[desiredBucket]++;
@@ -1344,6 +1611,7 @@ static bool TryResumeIncompleteBuilding(UsrAI *ai)
     if (bestFarmerSN == -1)
         return false;
 
+    CancelPendingGatherOrder(bestFarmerSN);
     ai->HumanAction(bestFarmerSN, target->SN);
     farmerLastOrderFrame[bestFarmerSN] = g_frame;
     lastConstructionRecoveryFrame = g_frame;
@@ -1376,6 +1644,7 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     pair<int, int> position = GetBuildCandidate(buildingType);
     if (position.first == -1)
         return false;
+    CancelPendingGatherOrder(farmerSN);
     buildOrderId = ai->HumanBuild(farmerSN, buildingType, position.first, position.second);
     buildOrderType = buildingType;
     buildFarmerSN = farmerSN;
@@ -1696,8 +1965,11 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     //                       BUILDING_CENTER_UPGRADE);
     // }
 
-    // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
-    ManageWeightedProduction(ai, nearPopulationCap);
+    // ManageWeightedProduction(ai, nearPopulationCap);
+    TryProduceScout(ai, nearPopulationCap);
+    TryProduceFarmer(ai, nearPopulationCap);
+    TryProduceBowman(ai, nearPopulationCap);
+    TryProduceSoldier(ai, nearPopulationCap);
 
     TryAssignIdleFarmer(ai);
 }
@@ -1915,10 +2187,11 @@ static void ManagePriest(UsrAI *ai)
         const pair<int, int> target = make_pair(
             static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
             static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
+        // ||
+        // g_frame - priestEmergencyTargetFrame >=
+        // USR_PRIEST_ORDER_INTERVAL))
         if (priestMoveOrderId == -1 &&
-            (target != priestEmergencyTarget ||
-             g_frame - priestEmergencyTargetFrame >=
-                 USR_PRIEST_ORDER_INTERVAL))
+            (target != priestEmergencyTarget))
         {
             priestMoveOrderId = ai->HumanMove(priest->SN,
                                               retreatPoint.first,
@@ -1934,8 +2207,7 @@ static void ManagePriest(UsrAI *ai)
     priestDangerTargetSN = -1;
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
-    if (priest->ConvertCooldown > 0 || priestMoveOrderId != -1 ||
-        g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
+    if (priest->ConvertCooldown > 0 || priestMoveOrderId != -1) // ||g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL
         return;
 
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
@@ -2357,6 +2629,7 @@ static void AssignFarmerSelfDefense(UsrAI *ai)
             g_frame - fieldSelfDefenseLastOrderFrame[farmer.SN] >=
                 USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL)
         {
+            CancelPendingGatherOrder(farmer.SN);
             ai->HumanAction(farmer.SN, targetSN);
             fieldSelfDefenseLastOrderFrame[farmer.SN] = g_frame;
         }
