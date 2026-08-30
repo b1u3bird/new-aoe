@@ -1280,7 +1280,7 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
         if (targetSN < 0)
             continue;
 
-        const int orderId = ai->HumanAction(farmer.SN, targetSN);
+        ai->HumanAction(farmer.SN, targetSN);
         farmerLastOrderFrame[farmer.SN] = g_frame;
         lastEconomyOrderFrame = g_frame;
         assigned[desiredBucket]++;
@@ -1481,8 +1481,6 @@ static bool TryProduceFarmer(UsrAI *ai,
 static bool TryProduceSoldier(UsrAI *ai,
                               bool nearPopulationCap)
 {
-    const int targetSoldiers = g_frame < 13000 ? 6 : 10;
-    // CountArmyBySort(AT_CLUBMAN) >= targetSoldiers
     if (nearPopulationCap || info.Meat < 50)
         return false;
     return TryBuildingAction(ai, BUILDING_ARMYCAMP,
@@ -1490,22 +1488,21 @@ static bool TryProduceSoldier(UsrAI *ai,
 }
 
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
-{ // CountArmyBySort(AT_BOWMAN) < 5 &&
-    if (!nearPopulationCap &&
-        info.Meat >= 40 && info.Wood >= 20)
-    {
-        TryBuildingAction(ai, BUILDING_RANGE,
-                          BUILDING_RANGE_CREATE_BOWMAN);
-    }
+{
+    if (nearPopulationCap || info.Meat < 40 || info.Wood < 20)
+        return false;
+
+    return TryBuildingAction(ai, BUILDING_RANGE,
+                             BUILDING_RANGE_CREATE_BOWMAN);
 }
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
-{ //
-    if (CountArmyBySort(AT_SCOUT) < 3 && !nearPopulationCap &&
-        info.Meat >= 100)
-    {
-        TryBuildingAction(ai, BUILDING_STABLE,
-                          BUILDING_STABLE_CREATE_SCOUT);
-    }
+{
+    if (nearPopulationCap || CountArmyBySort(AT_SCOUT) >= 3 ||
+        info.Meat < 100)
+        return false;
+
+    return TryBuildingAction(ai, BUILDING_STABLE,
+                             BUILDING_STABLE_CREATE_SCOUT);
 }
 static int CountEnemyArmy()
 {
@@ -1700,11 +1697,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // }
 
     // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
-    // ManageWeightedProduction(ai, nearPopulationCap);
-    TryProduceScout(ai, nearPopulationCap);
-    TryProduceFarmer(ai, nearPopulationCap);
-    TryProduceBowman(ai, nearPopulationCap);
-    TryProduceSoldier(ai, nearPopulationCap);
+    ManageWeightedProduction(ai, nearPopulationCap);
 
     TryAssignIdleFarmer(ai);
 }
@@ -2606,6 +2599,22 @@ static void AssignArrowTowerTargets(UsrAI *ai)
             towerLastOrderFrame[building.SN] = g_frame;
         }
     }
+}
+
+std::string GetUsrAIStrategyDiagnostic()
+{
+    std::string message = "diag_frame=" + std::to_string(strategyDiagnosticFrame);
+    message += ";clubmen=" + std::to_string(strategyDiagnosticClubmen);
+    message += ";camp=" + std::to_string(strategyDiagnosticHasCamp);
+    message += ";camp_ret=" + std::to_string(armyCampResult);
+    message += ";camp_ret_frame=" + std::to_string(armyCampResultFrame);
+    message += ";wood=" + std::to_string(strategyDiagnosticWood);
+    message += ";meat=" + std::to_string(strategyDiagnosticMeat);
+    message += ";stone=" + std::to_string(strategyDiagnosticStone);
+    message += ";gold=" + std::to_string(strategyDiagnosticGold);
+    message += ";club_ret=" + std::to_string(clubmanResult);
+    message += ";club_ret_frame=" + std::to_string(clubmanResultFrame);
+    return message;
 }
 
 void UsrAI::processData()
