@@ -2096,117 +2096,158 @@ static pair<double, double> GetFarmerScoutEmergencyPoint(
 
 static void DispatchFarmerScouts(UsrAI *ai)
 {
-    if (enemyBaseDiscovered)
-        return;
-    const int orderInterval = 240;
-    const int delayedFallbackFrame = 30000;
-    const int maxFarmerScouts = 1;
-    int cavalryCount = 0;
+    const int scoutOrderInterval = 180;
+    const int scoutEmergencyOrderInterval = 20;
+    const int scoutSafeRadius = 6;
+    const int scoutWaypointCount = 8;
+    const int scoutMargin = 10;
+    static const int scoutWaypoints[][2] = {
+        {scoutMargin, scoutMargin},
+        {MAP_L / 2, scoutMargin},
+        {MAP_L - scoutMargin - 1, scoutMargin},
+        {MAP_L - scoutMargin - 1, MAP_U / 2},
+        {MAP_L - scoutMargin - 1, MAP_U - scoutMargin - 1},
+        {MAP_L / 2, MAP_U - scoutMargin - 1},
+        {scoutMargin, MAP_U - scoutMargin - 1},
+        {scoutMargin, MAP_U / 2}};
+
+    set<int> liveScouts;
     for (const tagArmy &army : info.armies)
     {
         if (army.Blood > 0 && army.Sort == AT_SCOUT)
-            ++cavalryCount;
+            liveScouts.insert(army.SN);
     }
 
-    if (g_frame <= thirdWaveEndFrame ||
-        (cavalryCount > 0 && g_frame < delayedFallbackFrame))
-        return;
-    if (enemyBaseDiscovered)
+    for (map<int, int>::iterator it = scoutLastOrderFrame.begin();
+         it != scoutLastOrderFrame.end();)
     {
-        farmerScouters.clear();
-        farmerScoutTarget.clear();
-        farmerScoutLastBlock.clear();
-        farmerScoutStuckCount.clear();
-        return;
-    }
-
-    for (set<int>::iterator it = farmerScouters.begin();
-         it != farmerScouters.end();)
-    {
-        bool alive = false;
-        for (const tagFarmer &farmer : info.farmers)
+        if (liveScouts.find(it->first) == liveScouts.end())
         {
-            if (farmer.SN == *it && farmer.Blood > 0)
-            {
-                alive = true;
-                break;
-            }
+            scoutWaypointIndex.erase(it->first);
+            scoutTargetBlock.erase(it->first);
+            scoutStuckCount.erase(it->first);
+            scoutEmergencyOrderId.erase(it->first);
+            scoutEmergencyTarget.erase(it->first);
+            scoutDangerLastFrame.erase(it->first);
+            it = scoutLastOrderFrame.erase(it);
         }
-        if (!alive)
-            it = farmerScouters.erase(it);
         else
             ++it;
     }
 
-    for (const tagFarmer &farmer : info.farmers)
+    for (const tagArmy &scout : info.armies)
     {
-        if ((static_cast<int>(farmerScouters.size()) >= maxFarmerScouts &&
-             farmerScouters.find(farmer.SN) == farmerScouters.end()) ||
-            farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER ||
-            farmer.NowState != HUMAN_STATE_IDLE || IsFarmerBuilding(farmer) ||
-            FindDirectThreatToFarmerSN(farmer) != -1 ||
-            FindNearbyEnemyForFarmer(farmer) != -1)
+        if (scout.Blood <= 0 || scout.Sort != AT_SCOUT)
             continue;
-        if (g_frame - farmerScoutLastOrderFrame[farmer.SN] < orderInterval)
+
+        const int threatSN = FindScoutThreatSN(scout);
+        int threatDR = -1;
+        int threatUR = -1;
+        if (threatSN != -1 &&
+            FindEnemyUnitBlockPosition(threatSN, threatDR, threatUR))
+        {
+            const pair<double, double> retreatPoint =
+                GetScoutEmergencyPoint(scout, threatDR, threatUR);
+            const pair<int, int> retreatTarget = make_pair(
+                static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
+                static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
+            const map<int, pair<int, int>>::const_iterator targetIt =
+                scoutEmergencyTarget.find(scout.SN);
+            if (targetIt == scoutEmergencyTarget.end() ||
+                targetIt->second != retreatTarget ||
+                g_frame - scoutDangerLastFrame[scout.SN] >=
+                    scoutEmergencyOrderInterval)
+            {
+                scoutEmergencyOrderId[scout.SN] = ai->HumanMove(
+                    scout.SN, retreatPoint.first, retreatPoint.second);
+                scoutEmergencyTarget[scout.SN] = retreatTarget;
+                scoutDangerLastFrame[scout.SN] = g_frame;
+            }
             continue;
+        }
+
+        const map<int, pair<int, int>>::const_iterator emergencyIt =
+            scoutEmergencyTarget.find(scout.SN);
+        if (emergencyIt != scoutEmergencyTarget.end())
+        {
+            if (BlockDis2(scout.BlockDR, scout.BlockUR,
+                          emergencyIt->second.first,
+                          emergencyIt->second.second) <=
+                scoutSafeRadius * scoutSafeRadius)
+            {
+                scoutEmergencyTarget.erase(emergencyIt);
+                scoutEmergencyOrderId.erase(scout.SN);
+            }
+            else
+            {
+                continue;
+            }
+        }
+
+        // 26000 帧以前只保留遇袭撤退，不下达任何探索指令。
+        if (g_frame < 26000)
+            continue;
+
+        map<int, int>::const_iterator lastIt =
+            scoutLastOrderFrame.find(scout.SN);
+        if (lastIt != scoutLastOrderFrame.end() &&
+            g_frame - lastIt->second < scoutOrderInterval)
+            continue;
+
+        int &stuckCount = scoutStuckCount[scout.SN];
+        map<int, pair<int, int>>::const_iterator targetIt =
+            scoutTargetBlock.find(scout.SN);
+        if (targetIt != scoutTargetBlock.end())
+        {
+            if (BlockDis2(scout.BlockDR, scout.BlockUR,
+                          targetIt->second.first, targetIt->second.second) <= 9)
+            {
+                scoutTargetBlock.erase(targetIt);
+                stuckCount = 0;
+            }
+            else
+            {
+                map<int, pair<int, int>>::const_iterator oldBlockIt =
+                    scoutLastBlock.find(scout.SN);
+                if (oldBlockIt != scoutLastBlock.end() &&
+                    BlockDis2(scout.BlockDR, scout.BlockUR,
+                              oldBlockIt->second.first,
+                              oldBlockIt->second.second) <= 1)
+                {
+                    ++stuckCount;
+                    scoutTargetBlock.erase(targetIt);
+                }
+            }
+        }
 
         int targetDR = -1;
         int targetUR = -1;
-        if (!FindBestFarmerScoutFrontier(farmer, targetDR, targetUR))
-            continue;
-
-        farmerScouters.insert(farmer.SN);
-        farmerScoutTarget[farmer.SN] = make_pair(targetDR, targetUR);
-        farmerScoutLastBlock[farmer.SN] =
-            make_pair(farmer.BlockDR, farmer.BlockUR);
-        farmerScoutLastOrderFrame[farmer.SN] = g_frame;
-        ai->HumanMove(farmer.SN,
-                      (targetDR + 0.5) * double(BLOCKSIDELENGTH),
-                      (targetUR + 0.5) * double(BLOCKSIDELENGTH));
-    }
-
-    for (set<int>::iterator it = farmerScouters.begin();
-         it != farmerScouters.end();)
-    {
-        const int farmerSN = *it;
-        bool removeScout = false;
-        for (const tagFarmer &farmer : info.farmers)
+        if (FindBestScoutFrontier(scout, targetDR, targetUR))
         {
-            if (farmer.SN != farmerSN)
-                continue;
-            map<int, pair<int, int>>::const_iterator targetIt =
-                farmerScoutTarget.find(farmer.SN);
-            if (targetIt == farmerScoutTarget.end())
-                break;
-            if (BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                          targetIt->second.first, targetIt->second.second) <= 9)
-            {
-                farmerScoutTarget.erase(targetIt);
-                farmerScoutStuckCount[farmer.SN] = 0;
-            }
-            else if (BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                               farmerScoutLastBlock[farmer.SN].first,
-                               farmerScoutLastBlock[farmer.SN].second) <= 1 &&
-                     g_frame - farmerScoutLastOrderFrame[farmer.SN] >= orderInterval)
-            {
-                farmerScoutStuckCount[farmer.SN]++;
-                farmerScoutTarget.erase(targetIt);
-                removeScout = farmerScoutStuckCount[farmer.SN] >= 2;
-            }
-            break;
-        }
-        if (removeScout)
-        {
-            farmerScoutTarget.erase(farmerSN);
-            farmerScoutLastBlock.erase(farmerSN);
-            farmerScoutLastOrderFrame.erase(farmerSN);
-            farmerScoutStuckCount.erase(farmerSN);
-            it = farmerScouters.erase(it);
+            scoutTargetBlock[scout.SN] = make_pair(targetDR, targetUR);
         }
         else
         {
-            ++it;
+            // 暂时没有可见前沿时才使用保底巡逻，避免固定路线主导探索。
+            int &waypoint = scoutWaypointIndex[scout.SN];
+            if (waypoint < 0 || waypoint >= scoutWaypointCount)
+                waypoint = scout.SN % scoutWaypointCount;
+            targetDR = scoutWaypoints[waypoint][0];
+            targetUR = scoutWaypoints[waypoint][1];
+            if (BlockDis2(scout.BlockDR, scout.BlockUR, targetDR, targetUR) <= 9)
+                waypoint = (waypoint + 1) % scoutWaypointCount;
+            targetDR = scoutWaypoints[waypoint][0];
+            targetUR = scoutWaypoints[waypoint][1];
         }
+
+        targetDR = max(2, min(MAP_L - 3, targetDR));
+        targetUR = max(2, min(MAP_U - 3, targetUR));
+        ai->HumanMove(scout.SN,
+                      (targetDR + 0.5) * double(BLOCKSIDELENGTH),
+                      (targetUR + 0.5) * double(BLOCKSIDELENGTH));
+        scoutLastBlock[scout.SN] = make_pair(scout.BlockDR, scout.BlockUR);
+        scoutLastOrderFrame[scout.SN] = g_frame;
+        scoutFrontierVisitFrame[make_pair(targetDR, targetUR)] = g_frame;
     }
 }
 
@@ -2810,6 +2851,6 @@ void UsrAI::processData()
     DispatchFarmerScouts(this);
     ManageOffensiveArmy(this);
     AssignFarmerSelfDefense(this);
-    DispatchScoutsAfterThirdWave(this);
+    DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
