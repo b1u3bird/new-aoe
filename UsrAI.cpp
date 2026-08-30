@@ -1939,14 +1939,6 @@ static void ManagePriest(UsrAI *ai)
         g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL)
         return;
 
-    // 敌方基地已被发现但主力尚未真正出征时，祭司不得单独深入敌方区域。
-    // 主力出征后再等待一段时间，确保祭司不会抢在部队前面送死。
-    if (g_frame <= 26000)
-        ;
-    else if (!offensiveAttackStarted ||
-             g_frame - offensiveAttackStartFrame < 180)
-        return;
-
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
     if (!armyTarget)
@@ -2037,220 +2029,6 @@ static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR,
     }
     return found;
 }
-
-static bool FindBestFarmerScoutFrontier(const tagFarmer &farmer,
-                                        int &targetDR, int &targetUR)
-{
-    int bestScore = -2000000000;
-    bool found = false;
-    for (int dr = 2; dr < MAP_L - 2; ++dr)
-    {
-        for (int ur = 2; ur < MAP_U - 2; ++ur)
-        {
-            if (!IsScoutFrontierUsable(dr, ur))
-                continue;
-
-            const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
-                                           dr, ur);
-            const int score = (IsExplorationFrontierBlock(dr, ur) ? 10000 : 0) -
-                              distance * 10;
-            if (!found || score > bestScore)
-            {
-                bestScore = score;
-                targetDR = dr;
-                targetUR = ur;
-                found = true;
-            }
-        }
-    }
-    return found;
-}
-
-static pair<double, double> GetFarmerScoutEmergencyPoint(
-    const tagFarmer &farmer, int threatDR, int threatUR)
-{
-    const int dx = farmer.BlockDR - threatDR;
-    const int dy = farmer.BlockUR - threatUR;
-    const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
-    const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
-    const bool useDR = abs(dx) >= abs(dy);
-    const int offsets[][2] = {{12, 0}, {10, 0}, {8, 0}, {6, 0},
-                              {0, 12}, {0, 10}, {0, 8}, {0, 6}};
-    for (const auto &offset : offsets)
-    {
-        int blockDR = farmer.BlockDR;
-        int blockUR = farmer.BlockUR;
-        if (useDR)
-            blockDR += stepDR * offset[0];
-        else
-            blockUR += stepUR * offset[1];
-        blockDR = max(1, min(MAP_L - 2, blockDR));
-        blockUR = max(1, min(MAP_U - 2, blockUR));
-        if (IsPriestPointUsable(blockDR, blockUR))
-            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
-    }
-    return make_pair((farmer.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
-                     (farmer.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
-}
-
-static void DispatchFarmerScouts(UsrAI *ai)
-{
-    const int scoutOrderInterval = 180;
-    const int scoutEmergencyOrderInterval = 20;
-    const int scoutSafeRadius = 6;
-    const int scoutWaypointCount = 8;
-    const int scoutMargin = 10;
-    static const int scoutWaypoints[][2] = {
-        {scoutMargin, scoutMargin},
-        {MAP_L / 2, scoutMargin},
-        {MAP_L - scoutMargin - 1, scoutMargin},
-        {MAP_L - scoutMargin - 1, MAP_U / 2},
-        {MAP_L - scoutMargin - 1, MAP_U - scoutMargin - 1},
-        {MAP_L / 2, MAP_U - scoutMargin - 1},
-        {scoutMargin, MAP_U - scoutMargin - 1},
-        {scoutMargin, MAP_U / 2}};
-
-    set<int> liveScouts;
-    for (const tagArmy &army : info.armies)
-    {
-        if (army.Blood > 0 && army.Sort == AT_SCOUT)
-            liveScouts.insert(army.SN);
-    }
-
-    for (map<int, int>::iterator it = scoutLastOrderFrame.begin();
-         it != scoutLastOrderFrame.end();)
-    {
-        if (liveScouts.find(it->first) == liveScouts.end())
-        {
-            scoutWaypointIndex.erase(it->first);
-            scoutTargetBlock.erase(it->first);
-            scoutStuckCount.erase(it->first);
-            scoutEmergencyOrderId.erase(it->first);
-            scoutEmergencyTarget.erase(it->first);
-            scoutDangerLastFrame.erase(it->first);
-            it = scoutLastOrderFrame.erase(it);
-        }
-        else
-            ++it;
-    }
-
-    for (const tagArmy &scout : info.armies)
-    {
-        if (scout.Blood <= 0 || scout.Sort != AT_SCOUT)
-            continue;
-
-        const int threatSN = FindScoutThreatSN(scout);
-        int threatDR = -1;
-        int threatUR = -1;
-        if (threatSN != -1 &&
-            FindEnemyUnitBlockPosition(threatSN, threatDR, threatUR))
-        {
-            const pair<double, double> retreatPoint =
-                GetScoutEmergencyPoint(scout, threatDR, threatUR);
-            const pair<int, int> retreatTarget = make_pair(
-                static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
-                static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
-            const map<int, pair<int, int>>::const_iterator targetIt =
-                scoutEmergencyTarget.find(scout.SN);
-            if (targetIt == scoutEmergencyTarget.end() ||
-                targetIt->second != retreatTarget ||
-                g_frame - scoutDangerLastFrame[scout.SN] >=
-                    scoutEmergencyOrderInterval)
-            {
-                scoutEmergencyOrderId[scout.SN] = ai->HumanMove(
-                    scout.SN, retreatPoint.first, retreatPoint.second);
-                scoutEmergencyTarget[scout.SN] = retreatTarget;
-                scoutDangerLastFrame[scout.SN] = g_frame;
-            }
-            continue;
-        }
-
-        const map<int, pair<int, int>>::const_iterator emergencyIt =
-            scoutEmergencyTarget.find(scout.SN);
-        if (emergencyIt != scoutEmergencyTarget.end())
-        {
-            if (BlockDis2(scout.BlockDR, scout.BlockUR,
-                          emergencyIt->second.first,
-                          emergencyIt->second.second) <=
-                scoutSafeRadius * scoutSafeRadius)
-            {
-                scoutEmergencyTarget.erase(emergencyIt);
-                scoutEmergencyOrderId.erase(scout.SN);
-            }
-            else
-            {
-                continue;
-            }
-        }
-
-        // 26000 帧以前只保留遇袭撤退，不下达任何探索指令。
-        if (g_frame < 26000)
-            continue;
-
-        map<int, int>::const_iterator lastIt =
-            scoutLastOrderFrame.find(scout.SN);
-        if (lastIt != scoutLastOrderFrame.end() &&
-            g_frame - lastIt->second < scoutOrderInterval)
-            continue;
-
-        int &stuckCount = scoutStuckCount[scout.SN];
-        map<int, pair<int, int>>::const_iterator targetIt =
-            scoutTargetBlock.find(scout.SN);
-        if (targetIt != scoutTargetBlock.end())
-        {
-            if (BlockDis2(scout.BlockDR, scout.BlockUR,
-                          targetIt->second.first, targetIt->second.second) <= 9)
-            {
-                scoutTargetBlock.erase(targetIt);
-                stuckCount = 0;
-            }
-            else
-            {
-                map<int, pair<int, int>>::const_iterator oldBlockIt =
-                    scoutLastBlock.find(scout.SN);
-                if (oldBlockIt != scoutLastBlock.end() &&
-                    BlockDis2(scout.BlockDR, scout.BlockUR,
-                              oldBlockIt->second.first,
-                              oldBlockIt->second.second) <= 1)
-                {
-                    ++stuckCount;
-                    scoutTargetBlock.erase(targetIt);
-                }
-            }
-        }
-
-        int targetDR = -1;
-        int targetUR = -1;
-        if (FindBestScoutFrontier(scout, targetDR, targetUR))
-        {
-            scoutTargetBlock[scout.SN] = make_pair(targetDR, targetUR);
-        }
-        else
-        {
-            // 暂时没有可见前沿时才使用保底巡逻，避免固定路线主导探索。
-            int &waypoint = scoutWaypointIndex[scout.SN];
-            if (waypoint < 0 || waypoint >= scoutWaypointCount)
-                waypoint = scout.SN % scoutWaypointCount;
-            targetDR = scoutWaypoints[waypoint][0];
-            targetUR = scoutWaypoints[waypoint][1];
-            if (BlockDis2(scout.BlockDR, scout.BlockUR, targetDR, targetUR) <= 9)
-                waypoint = (waypoint + 1) % scoutWaypointCount;
-            targetDR = scoutWaypoints[waypoint][0];
-            targetUR = scoutWaypoints[waypoint][1];
-        }
-
-        targetDR = max(2, min(MAP_L - 3, targetDR));
-        targetUR = max(2, min(MAP_U - 3, targetUR));
-        ai->HumanMove(scout.SN,
-                      (targetDR + 0.5) * double(BLOCKSIDELENGTH),
-                      (targetUR + 0.5) * double(BLOCKSIDELENGTH));
-        scoutLastBlock[scout.SN] = make_pair(scout.BlockDR, scout.BlockUR);
-        scoutLastOrderFrame[scout.SN] = g_frame;
-        scoutFrontierVisitFrame[make_pair(targetDR, targetUR)] = g_frame;
-    }
-}
-
 static int FindScoutThreatSN(const tagArmy &scout)
 {
     int threatSN = -1;
@@ -2325,7 +2103,6 @@ static pair<double, double> GetScoutEmergencyPoint(const tagArmy &scout,
     return make_pair((scout.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
                      (scout.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
 }
-
 static void DispatchScouts(UsrAI *ai)
 {
     const int scoutOrderInterval = 180;
@@ -2848,7 +2625,6 @@ void UsrAI::processData()
 
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
-    DispatchFarmerScouts(this);
     ManageOffensiveArmy(this);
     AssignFarmerSelfDefense(this);
     DispatchScouts(this);
