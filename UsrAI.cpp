@@ -715,7 +715,7 @@ static const tagBuilding *FindEnemySiege()
 {
     for (const tagBuilding &building : info.enemy_buildings)
     {
-        if (building.Type == BUILDING_SIEGE && building.Blood > 0)
+        if (building.Blood > 0)
             return &building;
     }
     return nullptr;
