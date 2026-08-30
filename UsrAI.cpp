@@ -847,6 +847,8 @@ static int FindEnemyArmyInVision(const tagArmy &army)
 
 static int ResourcePriority(int resourceType)
 {
+    if (resourceType == RESOURCE_ELEPHANT)
+        return 0;
     if (info.Meat < 550)
     {
         if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE ||
@@ -859,8 +861,7 @@ static int ResourcePriority(int resourceType)
         return 2;
     if (info.Gold < 200 && resourceType == RESOURCE_GOLD)
         return 3;
-    if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE ||
-        resourceType == RESOURCE_ELEPHANT)
+    if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE)
         return 4;
     if (resourceType == RESOURCE_TREE)
         return 5;
@@ -994,7 +995,7 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
 
     const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
     if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
-        weight[1] += 3;
+        weight[1] += 2;
 
     int totalWeight = 0;
     for (int bucket = 0; bucket < 4; bucket++)
@@ -1137,10 +1138,34 @@ static void ProcessPendingGatherOrders()
     {
         resourceAttemptState.clear();
         pendingGatherOrders.clear();
+        currentTarget.clear();
+        waveRetaliationTarget.clear();
+        waveThreatFirstSeenFrame.clear();
         farmerLastOrderFrame.clear();
         farmerThreatLastFrame.clear();
         farmerSafeSinceFrame.clear();
+        fieldSelfDefenseLastOrderFrame.clear();
         lastEconomyOrderFrame = USR_INVALID_FRAME;
+        lastBuildOrderFrame = USR_INVALID_FRAME;
+        lastConstructionRecoveryFrame = USR_INVALID_FRAME;
+        lastBuildingActionFrame = USR_INVALID_FRAME;
+        lastProductionActionFrame = USR_INVALID_FRAME;
+        buildOrderId = -1;
+        buildOrderType = -1;
+        buildFarmerSN = -1;
+        armyCampOrderId = -1;
+        clubmanOrderId = -1;
+        farmerOrderId = -1;
+        farmerOrderFrame = USR_INVALID_FRAME;
+        soldierOrderId = -1;
+        soldierOrderFrame = USR_INVALID_FRAME;
+        rangeOrderId = -1;
+        rangeOrderFrame = USR_INVALID_FRAME;
+        stableOrderId = -1;
+        stableOrderFrame = USR_INVALID_FRAME;
+        technologyOrderId = -1;
+        technologyOrderFrame = USR_INVALID_FRAME;
+        technologyPendingAction = -1;
     }
     farmerResourceStateFrame = g_frame;
 
@@ -1189,12 +1214,12 @@ static void ProcessPendingGatherOrders()
         }
 
         if (pending.result == ACTION_SUCCESS &&
-            g_frame - pending.resultFrame >= USR_RESOURCE_PENDING_GRACE)
+            g_frame - pending.resultFrame >= USR_RESOURCE_PENDING_GRACE &&
+            farmerState != NULL &&
+            farmerState->NowState == HUMAN_STATE_IDLE)
         {
-            // 农民已恢复空闲且关系仍未建立，说明该资源目标不可用。
-            if (farmerState != NULL &&
-                farmerState->NowState == HUMAN_STATE_IDLE)
-                RecordResourceAttemptFailure(pending.targetSN);
+            // 成功返回后若农民已恢复空闲且关系仍未建立，说明目标不可用。
+            RecordResourceAttemptFailure(pending.targetSN);
             it = pendingGatherOrders.erase(it);
             continue;
         }
@@ -1480,21 +1505,18 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
     if (g_frame - lastEconomyOrderFrame < USR_ECONOMY_ORDER_INTERVAL)
         return false;
 
-    static int target[4] = {0, 0, 0, 0};
-    static int assigned[4] = {0, 0, 0, 0};
-    static int quotaFrame = -1000000;
-    if (g_frame < quotaFrame || g_frame - quotaFrame >= 240)
-    {
-        CalculateFarmerTargets(target, assigned);
-        quotaFrame = g_frame;
-    }
+    int target[4] = {0, 0, 0, 0};
+    int assigned[4] = {0, 0, 0, 0};
+    // 每次派工都按 Core 快照和 pending 预占重算，避免失败或抢占后配额滞后。
+    CalculateFarmerTargets(target, assigned);
 
     for (const tagFarmer &farmer : info.farmers)
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0 ||
             farmer.NowState != HUMAN_STATE_IDLE)
             continue;
-        if (IsFarmerBuilding(farmer) || farmer.SN == buildFarmerSN)
+        if (IsFarmerBuilding(farmer) ||
+            (farmer.SN == buildFarmerSN && buildOrderId != -1))
             continue;
         if (pendingGatherOrders.find(farmer.SN) != pendingGatherOrders.end())
             continue;
@@ -2893,6 +2915,8 @@ std::string GetUsrAIStrategyDiagnostic()
 void UsrAI::processData()
 {
     info = getInfo();
+    // 在任何策略读取静态订单状态前处理新对局帧号回退和采集订单结果。
+    ProcessPendingGatherOrders();
     CleanDeadOwnerTargetLocks();
     ManagePriest(this);
     ManageEconomyAndProduction(this);
