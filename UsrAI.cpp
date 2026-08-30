@@ -1506,7 +1506,116 @@ static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
                           BUILDING_STABLE_CREATE_SCOUT);
     }
 }
+static int CountEnemyArmy()
+{
+    int count = 0;
+    for (const tagArmy &army : info.enemy_armies)
+    {
+        if (army.Blood > 0)
+            count++;
+    }
+    return count;
+}
 
+static int ProductionPendingCount(int orderId)
+{
+    return orderId == -1 ? 0 : 1;
+}
+
+static int ClampProductionWeight(int weight)
+{
+    return max(0, min(100, weight));
+}
+
+static bool IsProductionSlotSelected(int weight, int offset)
+{
+    if (weight <= 0)
+        return false;
+    if (weight >= 100)
+        return true;
+
+    return (g_frame + offset) % 100 < weight;
+}
+
+static int CalculateProductionWeight(int currentCount, int pendingCount,
+                                     int targetCount, int baseWeight,
+                                     int enemyPressure)
+{
+    const int projectedCount = currentCount + pendingCount;
+    const int deficit = max(0, targetCount - projectedCount);
+    return ClampProductionWeight(baseWeight + deficit * 12 +
+                                 enemyPressure * 5);
+}
+
+static bool HasProductionCapacity(int buildingType, int orderId,
+                                  bool nearPopulationCap)
+{
+    return !nearPopulationCap && orderId == -1 &&
+           FindReadyBuildingByType(buildingType) != nullptr;
+}
+
+static bool TryProduceFarmer(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
+
+static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap)
+{
+    const int enemyCount = CountEnemyArmy();
+    const int farmerCount = static_cast<int>(info.farmers.size());
+    const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
+    const int bowmanCount = CountArmyBySort(AT_BOWMAN);
+    const int scoutCount = CountArmyBySort(AT_SCOUT);
+
+    // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
+    const int farmerTarget = 10 + min(6, enemyCount / 3);
+    const int armyTarget = 6 + min(10, enemyCount);
+    const int bowmanTarget = max(3, enemyCount / 2);
+    const int scoutTarget = 3;
+
+    const int farmerWeight = CalculateProductionWeight(
+        farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
+        farmerCount < 8 ? 35 : 8, enemyCount / 4);
+    const int soldierWeight = CalculateProductionWeight(
+        clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget,
+        18, enemyCount);
+    const int bowmanWeight = CalculateProductionWeight(
+        bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget,
+        12, enemyCount / 2);
+    const int scoutWeight = CalculateProductionWeight(
+        scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
+        g_frame >= 26000 ? 10 : 4, enemyCount / 3);
+
+    if (HasProductionCapacity(BUILDING_CENTER, farmerOrderId,
+                              nearPopulationCap) &&
+        info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0))
+    {
+        TryProduceFarmer(ai, nearPopulationCap);
+    }
+
+    if (HasProductionCapacity(BUILDING_ARMYCAMP, soldierOrderId,
+                              nearPopulationCap) &&
+        info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25))
+    {
+        TryProduceSoldier(ai, nearPopulationCap);
+    }
+
+    if (HasProductionCapacity(BUILDING_RANGE, rangeOrderId,
+                              nearPopulationCap) &&
+        info.Meat >= 40 && info.Wood >= 20 &&
+        IsProductionSlotSelected(bowmanWeight, 50))
+    {
+        TryProduceBowman(ai, nearPopulationCap);
+    }
+
+    if (HasProductionCapacity(BUILDING_STABLE, stableOrderId,
+                              nearPopulationCap) &&
+        scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
+        info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75))
+    {
+        TryProduceScout(ai, nearPopulationCap);
+    }
+}
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
 static void ManageEconomyAndProduction(UsrAI *ai)
@@ -1590,10 +1699,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // }
 
     // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
-    TryProduceSoldier(ai, nearPopulationCap);
-    TryProduceFarmer(ai, nearPopulationCap);
-    TryProduceBowman(ai, nearPopulationCap);
-    TryProduceScout(ai, nearPopulationCap);
+    ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
 }
 
