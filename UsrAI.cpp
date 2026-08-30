@@ -1498,8 +1498,8 @@ static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
     }
 }
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
-{ // CountArmyBySort(AT_SCOUT) < 3 &&
-    if (!nearPopulationCap &&
+{ //
+    if (CountArmyBySort(AT_SCOUT) < 3 && !nearPopulationCap &&
         info.Meat >= 100)
     {
         TryBuildingAction(ai, BUILDING_STABLE,
@@ -1699,7 +1699,12 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // }
 
     // 生产可以和农民建造并行；两类命令只在各自主体上等待返回。
-    ManageWeightedProduction(ai, nearPopulationCap);
+    // ManageWeightedProduction(ai, nearPopulationCap);
+    TryProduceScout(ai, nearPopulationCap);
+    TryProduceFarmer(ai, nearPopulationCap);
+    TryProduceBowman(ai, nearPopulationCap);
+    TryProduceSoldier(ai, nearPopulationCap);
+
     TryAssignIdleFarmer(ai);
 }
 
@@ -2192,7 +2197,8 @@ static void DispatchScouts(UsrAI *ai)
                 continue;
             }
         }
-
+        if (g_frame < 26000)
+            continue;
         map<int, int>::const_iterator lastIt =
             scoutLastOrderFrame.find(scout.SN);
         if (lastIt != scoutLastOrderFrame.end() &&
