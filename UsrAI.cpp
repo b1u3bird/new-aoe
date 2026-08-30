@@ -711,11 +711,12 @@ static int FindThreatToPriestSN(int priestSN)
     return bestSN;
 }
 
-static const tagBuilding *FindEnemySiege()
+static const tagBuilding *FindEnemySiege(const tagArmy &priest)
 {
     for (const tagBuilding &building : info.enemy_buildings)
     {
-        if (building.Blood > 0)
+        const int dis2 = BlockDis2(building.BlockDR, building.BlockDR, priest.BlockDR, priest.BlockUR);
+        if (building.Blood > 0 && dis2 < 12 * 12)
             return &building;
     }
     return nullptr;
@@ -1946,8 +1947,8 @@ static void ManagePriest(UsrAI *ai)
 
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
-    if (!armyTarget)
-        buildingTarget = FindEnemySiege();
+    if (!armyTarget && g_frame >= 30000)
+        buildingTarget = FindEnemySiege(*priest);
 
     const int targetSN = armyTarget ? armyTarget->SN : (buildingTarget ? buildingTarget->SN : -1);
     if (targetSN == -1)
@@ -2607,28 +2608,11 @@ static void AssignArrowTowerTargets(UsrAI *ai)
     }
 }
 
-string GetUsrAIStrategyDiagnostic()
-{
-    string message = "diag_frame=" + to_string(strategyDiagnosticFrame);
-    message += ";clubmen=" + to_string(strategyDiagnosticClubmen);
-    message += ";camp=" + to_string(strategyDiagnosticHasCamp);
-    message += ";camp_ret=" + to_string(armyCampResult);
-    message += ";camp_ret_frame=" + to_string(armyCampResultFrame);
-    message += ";wood=" + to_string(strategyDiagnosticWood);
-    message += ";meat=" + to_string(strategyDiagnosticMeat);
-    message += ";stone=" + to_string(strategyDiagnosticStone);
-    message += ";gold=" + to_string(strategyDiagnosticGold);
-    message += ";club_ret=" + to_string(clubmanResult);
-    message += ";club_ret_frame=" + to_string(clubmanResultFrame);
-    return message;
-}
-
 void UsrAI::processData()
 {
     info = getInfo();
     CleanDeadOwnerTargetLocks();
     ManagePriest(this);
-
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
     ManageOffensiveArmy(this);
