@@ -2272,10 +2272,7 @@ bool MainWidget::isLoss()
 {
     //失败条件(任一满足即失败)：
     //1.游戏时长耗尽(时长上限由 config.json 的 GAME_LOSE_SEC 配置，当前为30分钟)
-    if (sel->getSecend() >= GAME_LOSE_SEC) {
-        gameOverReason = "timeout";
-        return true;
-    }
+    if (sel->getSecend() >= GAME_LOSE_SEC) return true;
 
     //查看当前是否拥有存活的巫师英雄(祭司)与市镇中心
     Player* currentPlayer = player[NOWPLAYERREPRESENT];
@@ -2291,15 +2288,10 @@ bool MainWidget::isLoss()
     //2.巫师英雄(祭司)死亡：完整播放倒地动画，并保留尸体若干帧后再结束游戏
     static const int PRIEST_LOSS_DELAY_FRAMES = 15;
     if (everHavePriest && !havePriest && !pause &&
-        ++priestLossDelayFrames >= PRIEST_LOSS_DELAY_FRAMES) {
-        gameOverReason = "priest_lost";
+        ++priestLossDelayFrames >= PRIEST_LOSS_DELAY_FRAMES)
         return true;
-    }
     //3.市镇中心被摧毁：曾拥有过，现不再拥有存活的市镇中心
-    if (everHaveCenter && !haveCenter) {
-        gameOverReason = "center_destroyed";
-        return true;
-    }
+    if (everHaveCenter && !haveCenter) return true;
 
     return false;
 }
@@ -2549,13 +2541,11 @@ void MainWidget::ScoreSave(string gameResult)
 
 void MainWidget::HandleGameOver()
 {
-    bool win = isWin();
-    auto *p = player[NOWPLAYERREPRESENT];
-    std::string message = win ? "victory" : gameOverReason;
-    message += ";" + GetUsrAIStrategyDiagnostic();
-
-    ResultLogInfo(win, usrScore.getScore(), p->getWood(), p->getFood(),
-                  p->getGold(), p->getScore(), message).LogOut();
+    //
+    bool win=isWin();
+    //
+    auto*p=player[NOWPLAYERREPRESENT];
+    ResultLogInfo(win,usrScore.getScore(),p->getWood(),p->getFood(),p->getGold(),p->getScore()).LogOut();
 }
 //**************槽函数***************
 // 游戏帧更新
