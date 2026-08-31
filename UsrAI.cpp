@@ -222,20 +222,6 @@ static int clubmanResult = ACTION_SUCCESS;
 static int armyCampResultFrame = USR_INVALID_FRAME;
 // 棍棒兵生产指令返回结果对应的游戏帧。
 static int clubmanResultFrame = USR_INVALID_FRAME;
-// 策略诊断快照记录的游戏帧。
-static int strategyDiagnosticFrame = USR_INVALID_FRAME;
-// 策略诊断快照中的棍棒兵数量。
-static int strategyDiagnosticClubmen = 0;
-// 策略诊断快照中是否存在兵营，1 表示存在，0 表示不存在。
-static int strategyDiagnosticHasCamp = 0;
-// 策略诊断快照中的木材数量。
-static int strategyDiagnosticWood = 0;
-// 策略诊断快照中的食物数量。
-static int strategyDiagnosticMeat = 0;
-// 策略诊断快照中的石头数量。
-static int strategyDiagnosticStone = 0;
-// 策略诊断快照中的黄金数量。
-static int strategyDiagnosticGold = 0;
 
 // 接口：计算两个格子坐标的曼哈顿距离。
 // 用途：适合做射程、警戒范围、追击半径等粗略判断。
@@ -973,15 +959,13 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     else if (info.Meat < 1000)
         weight[0] += 3;
 
-    const bool needWoodBuilding =
-        HasIncompleteBuilding(BUILDING_HOME) ||
-        HasIncompleteBuilding(BUILDING_ARMYCAMP) ||
-        HasIncompleteBuilding(BUILDING_RANGE) ||
-        HasIncompleteBuilding(BUILDING_STABLE);
-    if (info.Wood < 250)
-        weight[1] += 4;
-    if (needWoodBuilding)
-        weight[1] += 4;
+    // const bool needWoodBuilding =
+    //     HasIncompleteBuilding(BUILDING_HOME) ||
+    //     HasIncompleteBuilding(BUILDING_ARMYCAMP) ||
+    //     HasIncompleteBuilding(BUILDING_RANGE) ||
+    //     HasIncompleteBuilding(BUILDING_STABLE);
+    if (info.Wood < 300)
+        weight[1] += 6;
 
     // const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
     // if (needStone && info.Stone < 300)
@@ -993,9 +977,9 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     // if (needGold)
     //     weight[3] += 3;
 
-    const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
-    if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
-        weight[1] += 2;
+    // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
+    // if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
+    //     weight[1] += 2;
 
     int totalWeight = 0;
     for (int bucket = 0; bucket < 4; bucket++)
@@ -1679,90 +1663,17 @@ static bool TryBuild(UsrAI *ai, int buildingType)
 static bool TryBuildingAction(UsrAI *ai,
                               int buildingType, int action)
 {
-    int *pendingOrderId = nullptr;
-    int *pendingOrderFrame = nullptr;
-    if (action == BUILDING_CENTER_CREATEFARMER)
-    {
-        pendingOrderId = &farmerOrderId;
-        pendingOrderFrame = &farmerOrderFrame;
-    }
-    else if (buildingType == BUILDING_ARMYCAMP &&
-             (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN ||
-              action == BUILDING_ARMYCAMP_CREATE_SLINGER ||
-              action == BUILDING_ARMYCAMP_CREATE_BROADSWORD))
-    {
-        pendingOrderId = &soldierOrderId;
-        pendingOrderFrame = &soldierOrderFrame;
-    }
-    else if (buildingType == BUILDING_RANGE &&
-             (action == BUILDING_RANGE_CREATE_BOWMAN ||
-              action == BUILDING_RANGE_CREATE_CHARIOT_ARCHER ||
-              action == BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN))
-    {
-        pendingOrderId = &rangeOrderId;
-        pendingOrderFrame = &rangeOrderFrame;
-    }
-    else if (buildingType == BUILDING_STABLE &&
-             (action == BUILDING_STABLE_CREATE_SCOUT ||
-              action == BUILDING_STABLE_CREATE_CHARIOT ||
-              action == BUILDING_STABLE_CREATE_CAVALRY))
-    {
-        pendingOrderId = &stableOrderId;
-        pendingOrderFrame = &stableOrderFrame;
-    }
-    else
-    {
-        pendingOrderId = &technologyOrderId;
-        pendingOrderFrame = &technologyOrderFrame;
-    }
-
-    if (*pendingOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(*pendingOrderId);
-        if (result == info.ins_ret.end() &&
-            g_frame - *pendingOrderFrame < USR_PRODUCTION_ORDER_TIMEOUT)
-            return false;
-
-        if (result != info.ins_ret.end() &&
-            pendingOrderId == &technologyOrderId &&
-            technologyPendingAction == BUILDING_GRANARY_ARROWTOWER &&
-            result->second == ACTION_SUCCESS)
-        {
-            arrowTowerTechnologyReady = true;
-        }
-        *pendingOrderId = -1;
-        if (pendingOrderId == &technologyOrderId)
-            technologyPendingAction = -1;
-    }
-
-    const bool productionAction = pendingOrderId != &technologyOrderId;
-    if (!productionAction &&
-        g_frame - lastBuildingActionFrame < USR_BUILDING_ACTION_INTERVAL)
-        return false;
-
     const tagBuilding *building = FindReadyBuildingByType(buildingType);
     if (!building)
         return false;
-
     const int orderId = ai->BuildingAction(building->SN, action);
-    *pendingOrderId = orderId;
-    *pendingOrderFrame = g_frame;
-    if (pendingOrderId == &technologyOrderId)
-        technologyPendingAction = action;
-    if (productionAction)
-        lastProductionActionFrame = g_frame;
-    else
-        lastBuildingActionFrame = g_frame;
-
-    if (action == BUILDING_ARMYCAMP_CREATE_CLUBMAN)
-        clubmanOrderId = orderId;
     return true;
 }
 
 static bool TryProduceFarmer(UsrAI *ai,
                              bool nearPopulationCap)
-{ //     static_cast<int>(info.farmers.size()) >= 14
-    if (nearPopulationCap || info.Meat < 50)
+{
+    if (static_cast<int>(info.farmers.size()) >= 14 || nearPopulationCap || info.Meat < 50)
         return false;
 
     return TryBuildingAction(ai, BUILDING_CENTER,
@@ -1848,99 +1759,67 @@ static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
 
-static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap)
-{
-    const int enemyCount = CountEnemyArmy();
-    const int farmerCount = static_cast<int>(info.farmers.size());
-    const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
-    const int bowmanCount = CountArmyBySort(AT_BOWMAN);
-    const int scoutCount = CountArmyBySort(AT_SCOUT);
+// static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap)
+// {
+//     const int enemyCount = CountEnemyArmy();
+//     const int farmerCount = static_cast<int>(info.farmers.size());
+//     const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
+//     const int bowmanCount = CountArmyBySort(AT_BOWMAN);
+//     const int scoutCount = CountArmyBySort(AT_SCOUT);
 
-    // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
-    const int farmerTarget = 10 + min(6, enemyCount / 3);
-    const int armyTarget = 6 + min(10, enemyCount);
-    const int bowmanTarget = max(3, enemyCount / 2);
-    const int scoutTarget = 3;
+//     // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
+//     const int farmerTarget = 10 + min(6, enemyCount / 3);
+//     const int armyTarget = 6 + min(10, enemyCount);
+//     const int bowmanTarget = max(3, enemyCount / 2);
+//     const int scoutTarget = 3;
 
-    const int farmerWeight = CalculateProductionWeight(
-        farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
-        farmerCount < 8 ? 35 : 8, enemyCount / 4);
-    const int soldierWeight = CalculateProductionWeight(
-        clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget,
-        18, enemyCount);
-    const int bowmanWeight = CalculateProductionWeight(
-        bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget,
-        12, enemyCount / 2);
-    const int scoutWeight = CalculateProductionWeight(
-        scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
-        g_frame >= 26000 ? 10 : 4, enemyCount / 3);
+//     const int farmerWeight = CalculateProductionWeight(
+//         farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
+//         farmerCount < 8 ? 35 : 8, enemyCount / 4);
+//     const int soldierWeight = CalculateProductionWeight(
+//         clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget,
+//         18, enemyCount);
+//     const int bowmanWeight = CalculateProductionWeight(
+//         bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget,
+//         12, enemyCount / 2);
+//     const int scoutWeight = CalculateProductionWeight(
+//         scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
+//         g_frame >= 26000 ? 10 : 4, enemyCount / 3);
 
-    if (HasProductionCapacity(BUILDING_CENTER, farmerOrderId,
-                              nearPopulationCap) &&
-        info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0))
-    {
-        TryProduceFarmer(ai, nearPopulationCap);
-    }
+//     if (HasProductionCapacity(BUILDING_CENTER, farmerOrderId,
+//                               nearPopulationCap) &&
+//         info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0))
+//     {
+//         TryProduceFarmer(ai, nearPopulationCap);
+//     }
 
-    if (HasProductionCapacity(BUILDING_ARMYCAMP, soldierOrderId,
-                              nearPopulationCap) &&
-        info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25))
-    {
-        TryProduceSoldier(ai, nearPopulationCap);
-    }
+//     if (HasProductionCapacity(BUILDING_ARMYCAMP, soldierOrderId,
+//                               nearPopulationCap) &&
+//         info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25))
+//     {
+//         TryProduceSoldier(ai, nearPopulationCap);
+//     }
 
-    if (HasProductionCapacity(BUILDING_RANGE, rangeOrderId,
-                              nearPopulationCap) &&
-        info.Meat >= 40 && info.Wood >= 20 &&
-        IsProductionSlotSelected(bowmanWeight, 50))
-    {
-        TryProduceBowman(ai, nearPopulationCap);
-    }
+//     if (HasProductionCapacity(BUILDING_RANGE, rangeOrderId,
+//                               nearPopulationCap) &&
+//         info.Meat >= 40 && info.Wood >= 20 &&
+//         IsProductionSlotSelected(bowmanWeight, 50))
+//     {
+//         TryProduceBowman(ai, nearPopulationCap);
+//     }
 
-    if (HasProductionCapacity(BUILDING_STABLE, stableOrderId,
-                              nearPopulationCap) &&
-        scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
-        info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75))
-    {
-        TryProduceScout(ai, nearPopulationCap);
-    }
-}
+//     if (HasProductionCapacity(BUILDING_STABLE, stableOrderId,
+//                               nearPopulationCap) &&
+//         scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
+//         info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75))
+//     {
+//         TryProduceScout(ai, nearPopulationCap);
+//     }
+// }
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
 static void ManageEconomyAndProduction(UsrAI *ai)
 {
-    if (armyCampOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(armyCampOrderId);
-        if (result != info.ins_ret.end())
-        {
-            armyCampResult = result->second;
-            armyCampResultFrame = g_frame;
-            armyCampOrderId = -1;
-        }
-    }
-    if (clubmanOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(clubmanOrderId);
-        if (result != info.ins_ret.end())
-        {
-            clubmanResult = result->second;
-            clubmanResultFrame = g_frame;
-            clubmanOrderId = -1;
-        }
-    }
-
-    if (g_frame >= 5000 && strategyDiagnosticFrame == USR_INVALID_FRAME)
-    {
-        strategyDiagnosticFrame = g_frame;
-        strategyDiagnosticClubmen = CountArmyBySort(AT_CLUBMAN);
-        strategyDiagnosticHasCamp = HasBuilding(BUILDING_ARMYCAMP) ? 1 : 0;
-        strategyDiagnosticWood = info.Wood;
-        strategyDiagnosticMeat = info.Meat;
-        strategyDiagnosticStone = info.Stone;
-        strategyDiagnosticGold = info.Gold;
-    }
-
     if (buildOrderId != -1)
     {
         map<int, int>::const_iterator result = info.ins_ret.find(buildOrderId);
@@ -1967,17 +1846,32 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_HOME);
     }
 
-    if (!HasBuilding(BUILDING_ARMYCAMP) && info.Wood >= 125)
+    if (!HasBuilding(BUILDING_ARMYCAMP))
     {
-        TryBuild(ai, BUILDING_ARMYCAMP);
+        if (info.Wood >= 125)
+            TryBuild(ai, BUILDING_ARMYCAMP);
     }
-    if (!HasBuilding(BUILDING_RANGE) && info.Wood >= 150)
+    else if (!HasBuilding(BUILDING_RANGE))
     {
-        TryBuild(ai, BUILDING_RANGE);
+        if (info.Wood >= 150)
+            TryBuild(ai, BUILDING_RANGE);
     }
-    if (!HasBuilding(BUILDING_STABLE) && info.Wood >= 150)
+    // else if (!HasBuilding(BUILDING_MARKET))
+    // {
+    //     if (info.Wood >= 100)
+    //         TryBuild(ai, BUILDING_MARKET);
+    // }
+    // else if (!HasBuilding(BUILDING_FARM))
+    // {
+    //     if (info.Wood >= 75)
+    //     {
+    //         TryBuild(ai, BUILDING_FARM);
+    //     }
+    // }
+    else if (!HasBuilding(BUILDING_STABLE))
     {
-        TryBuild(ai, BUILDING_STABLE);
+        if (info.Wood >= 150)
+            TryBuild(ai, BUILDING_STABLE);
     }
     // if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
     //     HasCompletedBuilding(info, BUILDING_RANGE) &&
@@ -1988,6 +1882,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // }
 
     // ManageWeightedProduction(ai, nearPopulationCap);
+    TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
     TryProduceScout(ai, nearPopulationCap);
     TryProduceFarmer(ai, nearPopulationCap);
     TryProduceBowman(ai, nearPopulationCap);
@@ -2894,22 +2789,6 @@ static void AssignArrowTowerTargets(UsrAI *ai)
             towerLastOrderFrame[building.SN] = g_frame;
         }
     }
-}
-
-std::string GetUsrAIStrategyDiagnostic()
-{
-    std::string message = "diag_frame=" + std::to_string(strategyDiagnosticFrame);
-    message += ";clubmen=" + std::to_string(strategyDiagnosticClubmen);
-    message += ";camp=" + std::to_string(strategyDiagnosticHasCamp);
-    message += ";camp_ret=" + std::to_string(armyCampResult);
-    message += ";camp_ret_frame=" + std::to_string(armyCampResultFrame);
-    message += ";wood=" + std::to_string(strategyDiagnosticWood);
-    message += ";meat=" + std::to_string(strategyDiagnosticMeat);
-    message += ";stone=" + std::to_string(strategyDiagnosticStone);
-    message += ";gold=" + std::to_string(strategyDiagnosticGold);
-    message += ";club_ret=" + std::to_string(clubmanResult);
-    message += ";club_ret_frame=" + std::to_string(clubmanResultFrame);
-    return message;
 }
 
 void UsrAI::processData()
