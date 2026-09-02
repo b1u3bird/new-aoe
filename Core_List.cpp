@@ -147,6 +147,23 @@ int Core_List::addRelation(Coordinate* object1, Coordinate* object2, int eventTy
         if (eventType == CoreEven_Gather && object1->getSort() == SORT_FARMER && object2->getSort() == SORT_BUILDING\
             && buildGoalOb != NULL && !buildGoalOb->isMatchResourceType(((Farmer*)object1)->getResourceSort()))
             return ACTION_INVALID_HUMANACTION_BUILD2RESOURCENOMATCH;
+        //当前生物已经死亡且无供给，直接返回
+        {
+            if(eventType==CoreEven_Gather&&object2->getSort()==SORT_ANIMAL){
+                 Animal*animal=static_cast<Animal*>(object2);
+                 if(!animal->is_Surplus()){
+                    return ACTION_INVALID_RESOURCE;
+                 }
+            }
+        }
+        //如果当前是祭祀
+        {
+            if(eventType==CoreEven_Attacking&&object1->getSort()==SORT_ARMY&&object1->getNum()==AT_PRIEST&&object1==object2){
+                //祭祀不能对自己进行操作
+                return ACTION_INVALID_OBSN;
+            }
+        }
+        //
         if (eventType == CoreEven_Transport) {//运输船运输人必须保持距离合适
             Farmer* f0 = (Farmer*)object2;
             Human* f1 = (Human*)object1;
@@ -563,6 +580,20 @@ void Core_List::manageRelationList()
                     break;
                 }
             }
+            //状态额外操作
+            {
+                //从部分其他的状态需要清空当前资源
+                if(object1->getSort()==SORT_FARMER){
+                    switch (thisDetailEven.phaseList[nowPhaseNum]) {
+                    case CoreDetail_Attack:case CoreDetail_PinPoint_Attack:case CoreDetail_UpdateRatio:
+                        {
+                            Farmer*farmer=static_cast<Farmer*>(object1);
+                            farmer->update_resourceClear();
+                        }
+                    }
+                }
+            }
+            //
             iter++;
         }
         else iter = relate_AllObject.erase(iter);   //删表
@@ -1785,6 +1816,8 @@ void Core_List::work_CrashPhase(MoveObject* moveOb)
 
 bool Core_List::JudgeMoveObjIsLandUnit(MoveObject* moveOb)
 {
+    if (moveOb == NULL) return true;
+
     bool ship = 0;
     {
         Human* human = 0;moveOb->printer_ToHuman((void**)&human);
@@ -1817,6 +1850,7 @@ pair<stack<Point>, array<Double, 2>> Core_List::findPath(Map::TypeRef&findPathMa
     static vector<Data>vis;
     static Double Sqrt2 = sqrt(Double(2));
     static vector<Data>goalPoint;
+    Double dr0 = Double::FromDouble(1e9), ur0 = Double::FromDouble(1e9);
     /////////////////////////////////////////////////////////启发函数
     static auto PredictDistance = [&](const Data& start, const Data& end)->Double {
         static vector<Double>power((MAP_L+MAP_U+1)*(MAP_L+MAP_U+1));
@@ -1834,8 +1868,8 @@ pair<stack<Point>, array<Double, 2>> Core_List::findPath(Map::TypeRef&findPathMa
         //限制范围
         {
             int x=destination.x,y=destination.y;
-            x=min(x,MAP_L);x=max(x,0);
-            y=min(y,MAP_U);y=max(y,0);
+            x=min(x,MAP_L-1);x=max(x,0);
+            y=min(y,MAP_U-1);y=max(y,0);
             destination.x=x;
             destination.y=y;
         }
@@ -1883,10 +1917,11 @@ pair<stack<Point>, array<Double, 2>> Core_List::findPath(Map::TypeRef&findPathMa
             }
         }
         //
-        if (!flag && (tx != start.x || ty != start.y)) {
-            static const Double fac = Double("0.001");
-            goalOb = 0;
-            destination.x = tx, destination.y = ty;
+        if (!flag) {
+            goalOb = NULL;
+            destination = Point(tx, ty);
+            dr0 = (Double(tx) + Double("0.5")) * BLOCKSIDELENGTH;
+            ur0 = (Double(ty) + Double("0.5")) * BLOCKSIDELENGTH;
         }
 
     }
@@ -1894,7 +1929,6 @@ pair<stack<Point>, array<Double, 2>> Core_List::findPath(Map::TypeRef&findPathMa
     goalPoint.clear();
     stack<Point> path;
     bool meetGoal = false;
-    Double dr0 = Double::FromDouble(1e9), ur0 =  Double::FromDouble(1e9);
     ++mask;//把寻路掩码递增1
     //initMap_HaveJud();
     //memset(goalMap,0,sizeof(goalMap));
@@ -2175,19 +2209,13 @@ bool Core_List::checkIsCoast(int x, int y)
 
 bool Core_List::checkIsLandUint(Coordinate *obj)
 {
-    //可能是船类
-    Farmer*human=0;
-    obj->printer_ToHuman((void**)(&human));
-    if(human){
-        if(human->getSort()==SORT_FARMER){
-            Farmer*f=(Farmer*)human;
-            return f->get_farmerType()==FARMERTYPE_FARMER;
-        }
-        else if(human->getSort()==SORT_ARMY){
-            Army*army=(Army*)human;
-            return army->getNum()!=AT_SHIP;
-        }
-    }
+    if (obj == NULL) return true;
+
+    //所有可移动对象统一使用同一个陆地/水上分类入口，避免寻路和位置纠错结论不一致。
+    MoveObject* moveObject = NULL;
+    obj->printer_ToMoveObject((void**)&moveObject);
+    if (moveObject != NULL) return JudgeMoveObjIsLandUnit(moveObject);
+
     //可能是建筑类
     Building*building=0;
     obj->printer_ToBuilding((void**)(&building));
@@ -2414,7 +2442,7 @@ void Core_List::initDetailList()
         overCondition.clear();
 
         //行动起始，判断是否可直接采集
-        relation_Event_static[CoreEven_Gather].setJump(0, 2);
+        //relation_Event_static[CoreEven_Gather].setJump(0, 2);
         //猎物可采集后，跳转至前往资源
         relation_Event_static[CoreEven_Gather].setJump(3, 6);
         //资源被采集完毕后，若身上无资源，则直接停止
