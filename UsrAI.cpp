@@ -835,26 +835,21 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         return;
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
-    int weight[4] = {8, 0, 0, 0};
+    // 木材给基础权重持续采集，黄金在青铜时代后也持续采集，避免「缺了才采」的波动。
+    int weight[4] = {8, 4, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
       weight[0] += 3;
 
-    // const bool needWoodBuilding =
-    //     HasIncompleteBuilding(BUILDING_HOME) ||
-    //     HasIncompleteBuilding(BUILDING_ARMYCAMP) ||
-    //     HasIncompleteBuilding(BUILDING_RANGE) ||
-    //     HasIncompleteBuilding(BUILDING_STABLE);
     if (info.Wood < 300)
       weight[1] += 10;
     if (!HasBuilding(BUILDING_STABLE))
       weight[1] += 5;
-    // const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
-    // if (needStone && info.Stone < 300)
-    //     weight[2] += 5;
 
-    // 黄金：后勤(180食物+100金)与兵种升级需要黄金，缺黄金时补充采集。
+    // 黄金：后勤/阔剑兵/骑兵需要黄金，青铜时代后持续采集，缺黄金时额外补充。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE)
+      weight[3] += 4;
     if (info.Gold < 100)
       weight[3] += 6;
 
