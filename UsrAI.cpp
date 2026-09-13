@@ -1279,6 +1279,7 @@ static bool IsBuildCandidateUsable(int blockDR, int blockUR, int buildingType)
         for (int ur = blockUR; ur < blockUR + buildSize; ++ur)
         {
             if ((*info.theMap)[dr][ur].type == MAPPATTERN_OCEAN ||
+                (*info.theMap)[dr][ur].type == MAPPATTERN_UNKNOWN ||
                 (*info.theMap)[dr][ur].height != baseHeight)
                 return false;
         }
@@ -1596,12 +1597,10 @@ static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
 }
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
 {
-    if (nearPopulationCap || CountArmyBySort(AT_SCOUT) >= 3 ||
-        info.Meat < 100)
-        return false;
+  if (nearPopulationCap || info.Meat < 100)
+    return false;
 
-    return TryBuildingAction(ai, BUILDING_STABLE,
-                             BUILDING_STABLE_CREATE_SCOUT);
+  return TryBuildingAction(ai, BUILDING_STABLE, BUILDING_STABLE_CREATE_SCOUT);
 }
 static bool HasProductionCapacity(int buildingType, int orderId,
                                   bool nearPopulationCap)
@@ -1615,49 +1614,38 @@ static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
 
+// 生产函数指针类型：与 TryProduceFarmer/Soldier/Bowman/Scout 签名一致。
+typedef bool (*ProduceFunc)(UsrAI *, bool);
+
+// 接口：当前数量低于目标时调用对应生产函数补员。
+// 用途：每个人种设目标，未达标就生产；资源与人口上限由生产函数内部把关。
+static void ProduceIfBelowTarget(UsrAI *ai, bool nearPopulationCap,
+                                 int currentCount, int target,
+                                 ProduceFunc produce) {
+  if (currentCount < target)
+    produce(ai, nearPopulationCap);
+}
+
 static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
-  const int enemyCount = CountEnemyArmy();
   const int farmerCount = static_cast<int>(info.farmers.size());
   const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
   const int bowmanCount = CountArmyBySort(AT_BOWMAN);
   const int scoutCount = CountArmyBySort(AT_SCOUT);
 
-  // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
-  const int farmerTarget = 10 + min(6, enemyCount / 3);
-  const int armyTarget = 6 + min(10, enemyCount);
-  const int bowmanTarget = max(3, enemyCount / 2);
+  // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
+  const int farmerTarget = 10;
+  const int armyTarget = 5;
+  const int bowmanTarget = 5;
   const int scoutTarget = 3;
 
-  const int farmerWeight = CalculateProductionWeight(
-      farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
-      farmerCount < 8 ? 35 : 8, enemyCount / 4);
-  const int soldierWeight = CalculateProductionWeight(
-      clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget, 18,
-      enemyCount);
-  const int bowmanWeight = CalculateProductionWeight(
-      bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget, 12,
-      enemyCount / 2);
-  const int scoutWeight = CalculateProductionWeight(
-      scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
-      g_frame >= 26000 ? 10 : 4, enemyCount / 3);
-
-  if (info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0)) {
-    TryProduceFarmer(ai, nearPopulationCap);
-  }
-
-  if (info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25)) {
-    TryProduceSoldier(ai, nearPopulationCap);
-  }
-
-  if (info.Meat >= 40 && info.Wood >= 20 &&
-      IsProductionSlotSelected(bowmanWeight, 50)) {
-    TryProduceBowman(ai, nearPopulationCap);
-  }
-
-  if (scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
-      info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75)) {
-    TryProduceScout(ai, nearPopulationCap);
-  }
+  ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
+                       TryProduceFarmer);
+  ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
+                       TryProduceSoldier);
+  ProduceIfBelowTarget(ai, nearPopulationCap, bowmanCount, bowmanTarget,
+                       TryProduceBowman);
+  ProduceIfBelowTarget(ai, nearPopulationCap, scoutCount, scoutTarget,
+                       TryProduceScout);
 }
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
@@ -1712,17 +1700,13 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_STABLE);
     }
     if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
-        HasCompletedBuilding(info, BUILDING_RANGE) &&
-        HasCompletedBuilding(info, BUILDING_STABLE)) {
-      TryBuildingAction(ai, info, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
+        HasBuilding(BUILDING_RANGE) && HasBuilding(BUILDING_STABLE)) {
+      TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
 
-    // ManageWeightedProduction(ai, nearPopulationCap);
+    ManageWeightedProduction(ai, nearPopulationCap);
     TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
-    TryProduceScout(ai, nearPopulationCap);
-    TryProduceFarmer(ai, nearPopulationCap);
-    TryProduceBowman(ai, nearPopulationCap);
-    TryProduceSoldier(ai, nearPopulationCap);
+
     TryAssignIdleFarmer(ai);
 }
 
