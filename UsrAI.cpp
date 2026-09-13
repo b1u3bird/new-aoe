@@ -621,6 +621,18 @@ static int CountArmyBySort(int sort)
     return count;
 }
 
+// 统计敌方某兵种存活数量，用于按敌方阵容调整我方兵种生产。
+static int CountEnemyBySort(int sort)
+{
+    int count = 0;
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.Sort == sort && enemy.Blood > 0)
+            count++;
+    }
+    return count;
+}
+
 static const tagBuilding *FindCenter()
 {
     for (const tagBuilding &building : info.buildings)
@@ -836,7 +848,7 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
     // 木材给基础权重持续采集，黄金在青铜时代后也持续采集，避免「缺了才采」的波动。
-    int weight[4] = {8, 2, 0, 0};
+    int weight[4] = {10, 2, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
@@ -1787,6 +1799,11 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     bowmanTarget = 5;
     scoutTarget = 3;
   }
+  // 敌方阔剑兵近战克制棍棒兵（攻9近防1），转产远程弓兵（阔剑兵远防0）。
+  if (CountEnemyBySort(AT_BROADSWORDSMAN) > 0) {
+    armyTarget = 0;
+    bowmanTarget += 6;
+  }
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
                        TryProduceFarmer);
   ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
@@ -1842,7 +1859,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     } else {
       // 农场数量不超过村民数量的四分之一，避免过早扩张。
       const int villagerCount = static_cast<int>(info.farmers.size());
-      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 5) {
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 4) {
         TryBuild(ai, BUILDING_FARM);
       }
     }
@@ -2555,8 +2572,8 @@ static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 
 static void UpdateEnemyBaseDiscovery()
 {
-    // 30000 帧前即使已看到建筑，也不能触发主力总攻。
-    if (g_frame <= 30000)
+    // 15000 帧前即使已看到建筑，也不能触发主力总攻。
+    if (g_frame <= 15000)
         return;
 
     for (const tagBuilding &building : info.enemy_buildings)
@@ -2603,7 +2620,14 @@ static bool IsOffensiveArmy(const tagArmy &army)
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
-    if (g_frame <= 30000)
+    if (g_frame <= 15000)
+        return;
+
+    // 兵力不足时不进攻，避免送死。
+    const int offensiveArmyCount =
+        CountArmyBySort(AT_CLUBMAN) + CountArmyBySort(AT_BOWMAN) +
+        CountArmyBySort(AT_BROADSWORDSMAN) + CountArmyBySort(AT_COMPOSITE_BOWMAN);
+    if (offensiveArmyCount < 8)
         return;
 
     UpdateEnemyBaseDiscovery();
