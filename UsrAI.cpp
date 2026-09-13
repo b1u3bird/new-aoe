@@ -115,12 +115,14 @@ struct PendingGatherOrder
     int submitFrame;
     int result;
     int resultFrame;
+    // 关系建立（WorkObjectSN !=
+    // -1）的帧，用于区分「稳定采集」与「卡住后被取消」。
+    int relationFrame;
 
     PendingGatherOrder()
         : orderId(-1), targetSN(-1), submitFrame(USR_INVALID_FRAME),
-          result(USR_INVALID_FRAME), resultFrame(USR_INVALID_FRAME)
-    {
-    }
+          result(USR_INVALID_FRAME), resultFrame(USR_INVALID_FRAME),
+          relationFrame(USR_INVALID_FRAME) {}
 };
 
 // 资源 SN 到最近一次采集尝试状态的映射。
@@ -137,6 +139,7 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR);
 static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR, int &targetUR);
 ;
 static bool IsAliveFarmerSN(int farmerSN);
+static bool IsFarmerRelationEstablished(int farmerSN, int targetSN);
 // 上次提交建筑研发、升级或生产动作的游戏帧。
 static int lastBuildingActionFrame = USR_INVALID_FRAME;
 // 上次提交单位生产动作的游戏帧。
@@ -711,16 +714,16 @@ static int FindEnemyArmyInVision(const tagArmy &army)
 
 static int ResourceBucket(int resourceType)
 {
-    if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE ||
-        resourceType == RESOURCE_ELEPHANT)
-        return 0;
-    if (resourceType == RESOURCE_TREE)
-        return 1;
-    if (resourceType == RESOURCE_STONE)
-        return 2;
-    if (resourceType == RESOURCE_GOLD)
-        return 3;
-    return -1;
+  // 食物来源只保留浆果丛与瞪羚；大象会反击农民、击杀损失过大，不纳入采集。
+  if (resourceType == RESOURCE_BUSH || resourceType == RESOURCE_GAZELLE)
+    return 0;
+  if (resourceType == RESOURCE_TREE)
+    return 1;
+  if (resourceType == RESOURCE_STONE)
+    return 2;
+  if (resourceType == RESOURCE_GOLD)
+    return 3;
+  return -1;
 }
 
 static bool IsGatherableResource(const tagResource &resource)
@@ -801,23 +804,24 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         }
     }
 
-    // Core 快照尚未建立关系时，用 pending 预占补齐配额统计。
+    // Core 快照尚未建立关系时，用 pending 预占补齐配额统计；
+    // 已建立关系的 pending 由真实 WorkObjectSN 统计覆盖，跳过避免双重计数。
     for (map<int, PendingGatherOrder>::const_iterator it =
              pendingGatherOrders.begin();
          it != pendingGatherOrders.end(); ++it)
     {
-        if (!IsAliveFarmerSN(it->first))
-            continue;
-        for (const tagResource &resource : info.resources)
-        {
-            if (resource.SN != it->second.targetSN ||
-                !IsGatherableResource(resource))
-                continue;
-            const int bucket = ResourceBucket(resource.Type);
-            if (bucket >= 0)
-                current[bucket]++;
-            break;
-        }
+      if (!IsAliveFarmerSN(it->first) ||
+          IsFarmerRelationEstablished(it->first, it->second.targetSN))
+        continue;
+      for (const tagResource &resource : info.resources) {
+        if (resource.SN != it->second.targetSN ||
+            !IsGatherableResource(resource))
+          continue;
+        const int bucket = ResourceBucket(resource.Type);
+        if (bucket >= 0)
+          current[bucket]++;
+        break;
+      }
         for (const tagBuilding &building : info.buildings) {
           if (building.SN == it->second.targetSN &&
               IsGatherableFarm(building)) {
@@ -834,7 +838,7 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     int weight[4] = {8, 0, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
-    else if (info.civilizationStage == CIVILIZATION_TOOLAGE)
+    else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
       weight[0] += 3;
 
     // const bool needWoodBuilding =
@@ -923,6 +927,16 @@ static bool IsAliveFarmerSN(int farmerSN)
             return farmer.Blood > 0;
     }
     return false;
+}
+
+// 判断农民是否已建立到 targetSN 的采集关系；已建立时真实 WorkObjectSN
+// 统计已覆盖， pending 预占不应重复计入，避免 worker 统计虚高导致派工不足。
+static bool IsFarmerRelationEstablished(int farmerSN, int targetSN) {
+  for (const tagFarmer &farmer : info.farmers) {
+    if (farmer.SN == farmerSN)
+      return farmer.WorkObjectSN == targetSN;
+  }
+  return false;
 }
 
 static bool IsVisibleResourceSN(int targetSN) {
@@ -1059,13 +1073,21 @@ static void ProcessPendingGatherOrders()
             }
         }
 
-        // 关系已经进入快照后，真实 worker 统计会接管 pending 预占。
-        if (farmerState != NULL &&
-            farmerState->WorkObjectSN == pending.targetSN)
-        {
-            resourceAttemptState.erase(pending.targetSN);
-            it = pendingGatherOrders.erase(it);
-            continue;
+        // 关系建立后不立即释放预占：农民可能被障碍卡住，关系随后被 Core 取消。
+        // 只要还有工作对象就保留 pending，避免卡住后反复派工同一资源。
+        if (farmerState != NULL && farmerState->WorkObjectSN != -1) {
+          if (pending.relationFrame == USR_INVALID_FRAME)
+            pending.relationFrame = g_frame;
+          ++it;
+          continue;
+        }
+
+        // 关系建立后又回到空闲，说明目标不可达或关系被取消，记录失败并退避。
+        if (pending.relationFrame != USR_INVALID_FRAME && farmerState != NULL &&
+            farmerState->NowState == HUMAN_STATE_IDLE) {
+          RecordResourceAttemptFailure(pending.targetSN);
+          it = pendingGatherOrders.erase(it);
+          continue;
         }
 
         if (pending.result == ACTION_SUCCESS &&
@@ -1110,6 +1132,27 @@ static int ResourceHardCapacity(int bucket)
                        : USR_RESOURCE_HARD_CAP_OTHER;
 }
 
+// 返回资源点到最近交付建筑（市镇中心 + 特殊建筑）的距离平方。
+// 特殊建筑：仓库（木头/石头/黄金/猎物食物）或谷仓（农场食物）。
+static int FindNearestReturnBuildingDistance(int specialBuilding,
+                                             int blockDR, int blockUR)
+{
+    int bestDis2 = 1000000000;
+    for (const tagBuilding &building : info.buildings)
+    {
+        if (building.Blood <= 0 || building.Percent < 100)
+            continue;
+        if (building.Type != BUILDING_CENTER &&
+            building.Type != specialBuilding)
+            continue;
+        const int dis2 = BlockDis2(blockDR, blockUR,
+                                   building.BlockDR, building.BlockUR);
+        if (dis2 < bestDis2)
+            bestDis2 = dis2;
+    }
+    return bestDis2;
+}
+
 static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
                               const int current[4])
 {
@@ -1128,8 +1171,9 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
              pendingGatherOrders.begin();
          it != pendingGatherOrders.end(); ++it)
     {
-        if (it->first != farmer.SN && IsAliveFarmerSN(it->first))
-            resourceWorkers[it->second.targetSN]++;
+      if (it->first != farmer.SN && IsAliveFarmerSN(it->first) &&
+          !IsFarmerRelationEstablished(it->first, it->second.targetSN))
+        resourceWorkers[it->second.targetSN]++;
     }
 
     for (const tagResource &resource : info.resources)
@@ -1154,6 +1198,8 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
 
         const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
                                        resource.BlockDR, resource.BlockUR);
+        const int returnDistance = FindNearestReturnBuildingDistance(
+            BUILDING_STOCK, resource.BlockDR, resource.BlockUR);
         const int softCapacity = bucket == 0 ? 4 : 3;
         const int crowdPenalty = workers >= softCapacity
                                      ? (workers - softCapacity + 1) * 80
@@ -1161,7 +1207,10 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         const int remainingPenalty = resource.Cnt > 0 && resource.Cnt < 100
                                          ? 100
                                          : 0;
-        const int score = distance + crowdPenalty + remainingPenalty -
+        // 瞪羚需要先击杀（耗时且可能被反击），降低其优先级，优先直接采集的资源。
+        const int huntPenalty = resource.Type == RESOURCE_GAZELLE ? 60 : 0;
+        const int score = distance + returnDistance + crowdPenalty +
+                          remainingPenalty + huntPenalty -
                           (current[bucket] > 0 ? 0 : 2);
         if (score < bestScore)
         {
@@ -1192,13 +1241,15 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
 
         const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
                                        building.BlockDR, building.BlockUR);
+        const int returnDistance = FindNearestReturnBuildingDistance(
+            BUILDING_GRANARY, building.BlockDR, building.BlockUR);
         const int softCapacity = 4;
         const int crowdPenalty = workers >= softCapacity
                                      ? (workers - softCapacity + 1) * 80
                                      : workers * 12;
         const int remainingPenalty = building.Cnt < 100 ? 100 : 0;
-        const int score = distance + crowdPenalty + remainingPenalty -
-                          (current[0] > 0 ? 0 : 2);
+        const int score = distance + returnDistance + crowdPenalty +
+                          remainingPenalty - (current[0] > 0 ? 0 : 2);
         if (score < bestScore) {
           bestScore = score;
           bestSN = building.SN;
@@ -1390,6 +1441,28 @@ static pair<int, int> GetBuildCandidate(int buildingType)
     return make_pair(-1, -1);
 }
 
+// 在指定锚点附近扫描一个可建造位置，用于在资源群旁建仓库/谷仓。
+static pair<int, int> GetBuildCandidateNear(int anchorDR, int anchorUR,
+                                            int buildingType)
+{
+    static const int OFFSETS[][2] = {
+        {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+        {2, 0}, {-2, 0}, {0, 2}, {0, -2},
+        {2, 2}, {-2, 2}, {2, -2}, {-2, -2},
+        {3, 0}, {-3, 0}, {0, 3}, {0, -3},
+        {4, 0}, {-4, 0}, {0, 4}, {0, -4}
+    };
+    const int count = static_cast<int>(sizeof(OFFSETS) / sizeof(OFFSETS[0]));
+    for (int i = 0; i < count; i++)
+    {
+        const int dr = anchorDR + OFFSETS[i][0];
+        const int ur = anchorUR + OFFSETS[i][1];
+        if (IsBuildCandidateUsable(dr, ur, buildingType))
+            return make_pair(dr, ur);
+    }
+    return make_pair(-1, -1);
+}
+
 static bool TryAssignIdleFarmer(UsrAI *ai)
 {
     // 订单结果和超时状态必须每次调度调用都回收，不能被经济下单节流延迟。
@@ -1568,6 +1641,69 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     return true;
 }
 
+// 在离交付建筑较远的资源群旁建仓库/谷仓，缩短交付往返距离。
+static void TryBuildReturnDepot(UsrAI *ai)
+{
+    if (buildOrderId != -1 ||
+        g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL)
+        return;
+
+    // 找交付距离最远的资源（木头/石头/黄金/猎物 → 仓库；农场 → 谷仓）。
+    int worstBuildingType = -1;
+    int worstReturnDis2 = 0;
+    int anchorDR = 0, anchorUR = 0;
+    for (const tagResource &resource : info.resources)
+    {
+        if (!IsGatherableResource(resource))
+            continue;
+        const int dis2 = FindNearestReturnBuildingDistance(
+            BUILDING_STOCK, resource.BlockDR, resource.BlockUR);
+        if (dis2 > worstReturnDis2)
+        {
+            worstReturnDis2 = dis2;
+            worstBuildingType = BUILDING_STOCK;
+            anchorDR = resource.BlockDR;
+            anchorUR = resource.BlockUR;
+        }
+    }
+    for (const tagBuilding &building : info.buildings)
+    {
+        if (!IsGatherableFarm(building))
+            continue;
+        const int dis2 = FindNearestReturnBuildingDistance(
+            BUILDING_GRANARY, building.BlockDR, building.BlockUR);
+        if (dis2 > worstReturnDis2)
+        {
+            worstReturnDis2 = dis2;
+            worstBuildingType = BUILDING_GRANARY;
+            anchorDR = building.BlockDR;
+            anchorUR = building.BlockUR;
+        }
+    }
+
+    // 交付距离平方超过 400（约 20 格）才值得建仓。
+    if (worstBuildingType == -1 || worstReturnDis2 <= 400)
+        return;
+    if (info.Wood < 120)
+        return;
+    if (HasBuilding(worstBuildingType))
+        return;
+
+    pair<int, int> pos = GetBuildCandidateNear(anchorDR, anchorUR,
+                                               worstBuildingType);
+    if (pos.first == -1)
+        return;
+    const int farmerSN = FindBuilderFarmerSN();
+    if (farmerSN == -1)
+        return;
+    CancelPendingGatherOrder(farmerSN);
+    buildOrderId = ai->HumanBuild(farmerSN, worstBuildingType,
+                                  pos.first, pos.second);
+    buildOrderType = worstBuildingType;
+    buildFarmerSN = farmerSN;
+    lastBuildOrderFrame = g_frame;
+}
+
 static bool TryBuildingAction(UsrAI *ai,
                               int buildingType, int action)
 {
@@ -1643,17 +1779,17 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int scoutCount = CountArmyBySort(AT_SCOUT);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  int farmerTarget = 15;
+  int farmerTarget = 20;
 
-  int armyTarget;
-  int bowmanTarget;
-  int scoutTarget;
+  int armyTarget = 0;
+  int bowmanTarget = 0;
+  int scoutTarget = 0;
   if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
     armyTarget = 3;
     bowmanTarget = 3;
   } else {
-    armyTarget = 10;
-    bowmanTarget = 10;
+    armyTarget = 5;
+    bowmanTarget = 5;
     scoutTarget = 3;
   }
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
@@ -1706,10 +1842,12 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     }
 
     if (!HasBuilding(BUILDING_MARKET)) {
-      if (info.Wood >= 100)
+      if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
     } else {
-      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < 3) {
+      // 农场数量不超过村民数量的四分之一，避免过早扩张。
+      const int villagerCount = static_cast<int>(info.farmers.size());
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 5) {
         TryBuild(ai, BUILDING_FARM);
       }
     }
@@ -1717,12 +1855,27 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_STABLE);
     }
+    // 在离交付建筑较远的资源群旁建仓库/谷仓，缩短交付往返。
+    TryBuildReturnDepot(ai);
     if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
         (HasBuilding(BUILDING_MARKET) + HasBuilding(BUILDING_RANGE) +
          HasBuilding(BUILDING_STABLE)) >= 2) {
       TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
     TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
+    // 工具时代的科技：木材加工（伐木效率 +50%）。
+    TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
+    // 青铜时代的兵种科技升级：复合弓兵、阔剑兵、战车（车轮）、后勤。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
+      //   TryBuildingAction(ai, BUILDING_RANGE,
+      //                     BUILDING_RANGE_UPGRADE_COMPOSITE_BOW);
+      TryBuildingAction(ai, BUILDING_ARMYCAMP,
+                        BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
+      //   TryBuildingAction(ai, BUILDING_MARKET,
+      //   BUILDING_MARKET_WHEEL_UPGRADE); TryBuildingAction(ai,
+      //   BUILDING_ARMYCAMP,
+      //                     BUILDING_ARMYCAMP_RESEARCH_LOGISTICS);
+    }
     ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
 }
@@ -2615,7 +2768,7 @@ void UsrAI::processData()
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
     ManageOffensiveArmy(this);
-    AssignFarmerSelfDefense(this);
+    // AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
