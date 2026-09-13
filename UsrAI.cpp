@@ -656,6 +656,8 @@ static const tagArmy *FindPriest()
 static int FindThreatToPriestSN(int priestSN)
 {
     const tagArmy *priest = FindPriest();
+    if (priest == nullptr)
+        return -1;
 
     int bestSN = -1;
     int bestDis2 = 1000000000;
@@ -2018,6 +2020,8 @@ static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
+    if (priest == nullptr)
+        return;  // 祭司死亡后不再执行祭司逻辑，避免解引用空指针
 
     if (priestMoveOrderId != -1)
     {
