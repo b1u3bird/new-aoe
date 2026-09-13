@@ -176,6 +176,13 @@ static int technologyOrderId = -1;
 static int technologyOrderFrame = USR_INVALID_FRAME;
 // 最近一次非生产建筑动作的动作枚举，用于异步成功后推进科技里程碑。
 static int technologyPendingAction = -1;
+// 研发完成的兵种科技数量，全部完成后解锁兵力生产上限并开始进攻。
+static int researchedTechCount = 0;
+// 各兵种科技的研发订单 ID（-1 表示无 pending）。
+static int clubmanUpgradeOrderId = -1;
+static int broadswordUpgradeOrderId = -1;
+// 解锁兵力上限所需研发完成的兵种科技数量（棍棒兵升级、阔剑兵）。
+static const int TOTAL_REQUIRED_TECH = 2;
 // 已成功完成谷仓箭塔研发；当前接口不暴露科技树，按成功返回值缓存。
 static bool arrowTowerTechnologyReady = false;
 // 最近一次兵营建造指令的返回结果。
@@ -888,6 +895,10 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     if (info.Gold < 100)
       weight[3] += 6;
 
+    // 石头：造箭塔需要石头（每个 150），箭塔未满 4 个时高权重采石。
+    if (CountBuilding(BUILDING_ARROWTOWER) < 4)
+      weight[2] += 12;
+
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
     // if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
     //     weight[1] += 2;
@@ -1065,6 +1076,9 @@ static void ProcessPendingGatherOrders()
         technologyOrderId = -1;
         technologyOrderFrame = USR_INVALID_FRAME;
         technologyPendingAction = -1;
+        researchedTechCount = 0;
+        clubmanUpgradeOrderId = -1;
+        broadswordUpgradeOrderId = -1;
     }
     farmerResourceStateFrame = g_frame;
 
@@ -1734,6 +1748,31 @@ static void TryBuildReturnDepot(UsrAI *ai)
     lastBuildOrderFrame = g_frame;
 }
 
+// 检查单个科技研发订单结果，研发成功则计数。
+static void CheckTechOrder(int &orderId)
+{
+    if (orderId == -1)
+        return;
+    map<int, int>::const_iterator result = info.ins_ret.find(orderId);
+    if (result == info.ins_ret.end())
+        return;
+    if (result->second == ACTION_SUCCESS)
+        researchedTechCount++;
+    orderId = -1;
+}
+
+// 研发科技：处理旧结果 + 空闲时下单（记录订单 ID 以便追踪研发完成）。
+static void ResearchTech(UsrAI *ai, int &orderId, int buildingType, int action)
+{
+    CheckTechOrder(orderId);
+    if (orderId != -1)
+        return;
+    const tagBuilding *building = FindReadyBuildingByType(buildingType);
+    if (!building)
+        return;
+    orderId = ai->BuildingAction(building->SN, action);
+}
+
 static bool TryBuildingAction(UsrAI *ai,
                               int buildingType, int action)
 {
@@ -1827,6 +1866,11 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     armyTarget = 0;
     bowmanTarget += 6;
   }
+  // 所有关键科技研发完成后，兵力生产解锁上限（受人口上限约束）。
+  if (researchedTechCount >= TOTAL_REQUIRED_TECH) {
+    armyTarget = 999;
+    bowmanTarget = 999;
+  }
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
                        TryProduceFarmer);
   ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
@@ -1866,7 +1910,11 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_HOME);
     }
 
-    // 优先建市场与农场，稳定食物来源，再补兵营/靶场。
+    // 开局建谷仓（解锁箭塔），再市场/农场，再兵营/靶场，马厩最后。
+    if (!HasBuilding(BUILDING_GRANARY)) {
+      if (info.Wood >= 120)
+        TryBuild(ai, BUILDING_GRANARY);
+    }
     if (!HasBuilding(BUILDING_MARKET)) {
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
@@ -1891,6 +1939,10 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_STABLE);
     }
+    // 箭塔防守：最多造四个箭塔（箭塔科技研发后 Core 才允许建造）。
+    if (CountBuilding(BUILDING_ARROWTOWER) < 4 && info.Stone >= 150) {
+      TryBuild(ai, BUILDING_ARROWTOWER);
+    }
     // 在离交付建筑较远的资源群旁建仓库/谷仓，缩短交付往返。
     TryBuildReturnDepot(ai);
     if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
@@ -1898,22 +1950,18 @@ static void ManageEconomyAndProduction(UsrAI *ai)
          HasBuilding(BUILDING_STABLE)) >= 2) {
       TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
-    TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
+    // 谷仓研发箭塔（解锁箭塔建造）。
+    TryBuildingAction(ai, BUILDING_GRANARY, BUILDING_GRANARY_ARROWTOWER);
+    ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
     // 工具时代的科技：木材加工（伐木效率 +50%）。
     TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
     // 驯养动物（农场食物 +75）：4 块以上农场才划算，避免前期浪费食物。
     if (CountBuilding(BUILDING_FARM) >= 4)
         TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
-    // 青铜时代的兵种科技升级：复合弓兵、阔剑兵、战车（车轮）、后勤。
+    // 青铜时代的兵种科技升级：阔剑兵。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
-      //   TryBuildingAction(ai, BUILDING_RANGE,
-      //                     BUILDING_RANGE_UPGRADE_COMPOSITE_BOW);
-      TryBuildingAction(ai, BUILDING_ARMYCAMP,
-                        BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
-      //   TryBuildingAction(ai, BUILDING_MARKET,
-      //   BUILDING_MARKET_WHEEL_UPGRADE); TryBuildingAction(ai,
-      //   BUILDING_ARMYCAMP,
-      //                     BUILDING_ARMYCAMP_RESEARCH_LOGISTICS);
+      ResearchTech(ai, broadswordUpgradeOrderId, BUILDING_ARMYCAMP,
+                   BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
     }
     ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
@@ -2601,9 +2649,7 @@ static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 
 static void UpdateEnemyBaseDiscovery()
 {
-    // 15000 帧前即使已看到建筑，也不能触发主力总攻。
-    if (g_frame <= 15000)
-        return;
+    // 侦察骑兵探路后即可发现敌方基地；进攻时机由科技完成度控制。
 
     for (const tagBuilding &building : info.enemy_buildings)
     {
@@ -2650,8 +2696,8 @@ static bool IsOffensiveArmy(const tagArmy &army)
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
-    if (g_frame <= 15000)
-        return;
+    if (researchedTechCount < TOTAL_REQUIRED_TECH)
+        return;  // 所有关键科技研发完成后才开始进攻
 
     // 兵力不足时不进攻，避免送死。
     const int offensiveArmyCount =
