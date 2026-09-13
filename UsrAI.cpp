@@ -695,7 +695,7 @@ static const tagBuilding *FindEnemySiege(const tagArmy &priest)
                 continue;
             const int enemyDis2 = BlockDis2(building.BlockDR, building.BlockUR,
                                             enemy.BlockDR, enemy.BlockUR);
-            if (enemyDis2 < 3 * 3)
+            if (enemyDis2 < 2 * 2)
             {
                 safe = false;
                 break;
@@ -1866,16 +1866,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_HOME);
     }
 
-    if (!HasBuilding(BUILDING_ARMYCAMP))
-    {
-        if (info.Wood >= 125)
-            TryBuild(ai, BUILDING_ARMYCAMP);
-    }
-    if (!HasBuilding(BUILDING_RANGE)) {
-      if (info.Wood >= 150)
-        TryBuild(ai, BUILDING_RANGE);
-    }
-
+    // 优先建市场与农场，稳定食物来源，再补兵营/靶场。
     if (!HasBuilding(BUILDING_MARKET)) {
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
@@ -1885,6 +1876,16 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 4) {
         TryBuild(ai, BUILDING_FARM);
       }
+    }
+
+    if (!HasBuilding(BUILDING_ARMYCAMP))
+    {
+        if (info.Wood >= 125)
+            TryBuild(ai, BUILDING_ARMYCAMP);
+    }
+    if (!HasBuilding(BUILDING_RANGE)) {
+      if (info.Wood >= 150)
+        TryBuild(ai, BUILDING_RANGE);
     }
     if (!HasBuilding(BUILDING_STABLE)) {
       if (info.Wood >= 150)
