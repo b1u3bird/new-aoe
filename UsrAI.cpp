@@ -1467,8 +1467,8 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
 {
     // 订单结果和超时状态必须每次调度调用都回收，不能被经济下单节流延迟。
     ProcessPendingGatherOrders();
-    if (g_frame - lastEconomyOrderFrame < USR_ECONOMY_ORDER_INTERVAL)
-        return false;
+    // 每农民已有 farmerLastOrderFrame 节流，不再用全局节流，
+    // 避免多农民同时空闲（建筑完工/资源耗尽）时派工过慢。
 
     int target[4] = {0, 0, 0, 0};
     int assigned[4] = {0, 0, 0, 0};
@@ -2261,7 +2261,7 @@ static pair<double, double> GetScoutEmergencyPoint(const tagArmy &scout,
 }
 static void DispatchScouts(UsrAI *ai)
 {
-    const int scoutOrderInterval = 180;
+    const int scoutOrderInterval = 60;
     const int scoutEmergencyOrderInterval = 20;
     const int scoutSafeRadius = 6;
     const int scoutWaypointCount = 8;
@@ -2348,7 +2348,7 @@ static void DispatchScouts(UsrAI *ai)
                 continue;
             }
         }
-        if (g_frame < 26000)
+        if (g_frame < 8000)
             continue;
         map<int, int>::const_iterator lastIt =
             scoutLastOrderFrame.find(scout.SN);
