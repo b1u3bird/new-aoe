@@ -39,6 +39,38 @@ int scoreTypeForCreatedObject(int objectSort, int objectNum)
     return _TECH;
 }
 
+int gatherIntervalFrames()
+{
+    return TimePerFrame > 0
+        ? (1000 + TimePerFrame - 1) / TimePerFrame
+        : 1;
+}
+
+int gatherSourceState(Coordinate* target)
+{
+    if (target == NULL)
+        return -1;
+
+    if (target->getSort() == SORT_ANIMAL)
+    {
+        if (target->getNum() == ANIMAL_TREE || target->getNum() == ANIMAL_FOREST)
+            return FARMER_LUMBER;
+        return FARMER_HUNTER;
+    }
+    if (target->getSort() == SORT_STATICRES)
+    {
+        if (target->getNum() == NUM_STATICRES_Bush)
+            return FARMER_GATHERER;
+        if (target->getNum() == NUM_STATICRES_Fish)
+            return FARMER_FISHER;
+        return FARMER_MINER;
+    }
+    if (target->getSort() == SORT_Building_Resource && target->getNum() == BUILDING_FARM)
+        return FARMER_FARMER;
+
+    return -1;
+}
+
 bool isFriendlyMissileAfterConversion(Missile* missile, Coordinate* target)
 {
     if (missile == NULL || target == NULL || missile->isAttackerHaveDie() || !target->isPlayerControl())
@@ -170,6 +202,16 @@ int Core_List::addRelation(Coordinate* object1, Coordinate* object2, int eventTy
             //如果满载,返回错误码
             if (f0->getResourceNowHave() >= Double(5))return ACTION_INVALID_FULLY_LOAD;
         }
+        //同类采集目标之间保留背包；即使资源种类相同，来源改变（如农田到浆果）仍清空。
+        if (eventType == CoreEven_Gather && object1->getSort() == SORT_FARMER)
+        {
+            Farmer* farmer = static_cast<Farmer*>(object1);
+            const int newGatherState = gatherSourceState(object2);
+            if (!farmer->get_isEmptyBackpack() && newGatherState >= 0 &&
+                farmer->getState() != newGatherState)
+                farmer->update_resourceClear();
+        }
+
         //为工作者设置交互对象类别属性，主要用于farmer的status判断/Attack...
         bool isSameReprensent;
         if (object1->isPlayerControl() && object2->isPlayerControl())
@@ -421,6 +463,7 @@ void Core_List::suspendRelation(Coordinate* object)
         }
         object->initAction();  //行动全部重置
 
+        relate_AllObject[object].resetGatherTimer();
         relate_AllObject[object].isExist = false;
     }
 }
@@ -527,7 +570,7 @@ void Core_List::manageRelationList()
                     object_PinPoint_Attack(object1,thisRelation.DR_goal,thisRelation.UR_goal);
                     break;
                 case CoreDetail_Gather:
-                    object_Gather(object1, object2);
+                    object_Gather(object1, object2, thisRelation);
                     break;
                 case CoreDetail_ResourceIn:
                     object_ResourceChange(object1, thisRelation);
@@ -572,8 +615,11 @@ void Core_List::manageRelationList()
                     }
                     break;
                 case CoreDetail_Gather:
+                {
                     thisRelation.needResourceBuilding = true;
+                    thisRelation.resetGatherTimer();
                     break;
+                }
                 case CoreDetail_ResourceIn:
                     break;
                 default:
@@ -583,12 +629,24 @@ void Core_List::manageRelationList()
             //状态额外操作
             {
                 //从部分其他的状态需要清空当前资源
-                if(object1->getSort()==SORT_FARMER){
+                if(nowPhaseNum == exePhaseNum && object1->getSort()==SORT_FARMER){
                     switch (thisDetailEven.phaseList[nowPhaseNum]) {
-                    case CoreDetail_Attack:case CoreDetail_PinPoint_Attack:case CoreDetail_UpdateRatio:
+                    case CoreDetail_Attack:
+                    case CoreDetail_PinPoint_Attack:
                         {
-                            Farmer*farmer=static_cast<Farmer*>(object1);
+                            //采集树木时的攻击阶段属于砍伐，不应丢弃已携带的木材。
+                            if (iter->second.relationAct != CoreEven_Gather)
+                            {
+                                Farmer* farmer=static_cast<Farmer*>(object1);
+                                farmer->update_resourceClear();
+                            }
+                            break;
+                        }
+                    case CoreDetail_UpdateRatio:
+                        {
+                            Farmer* farmer=static_cast<Farmer*>(object1);
                             farmer->update_resourceClear();
+                            break;
                         }
                     }
                 }
@@ -630,6 +688,7 @@ void Core_List::manageRelation_deleteGoalOb(Coordinate* goalObject)
             coord->printer_ToMissile((void**)(&missile));
             if (missile)continue;
             iterNow->second.isExist = false;
+            iterNow->second.resetGatherTimer();
             //对于Human类对象,需要对其路径重置
             Human* obj = 0;
             coord->printer_ToHuman((void**)(&obj));
@@ -1010,6 +1069,19 @@ void Core_List::object_Attack(Coordinate* object1, Coordinate* object2)
     object1->printer_ToBloodHaver((void**)&attacker);   //攻击者指针赋值(object1强制转换)
     if (object2) object2->printer_ToBloodHaver((void**)&attackee);   //受攻击者指针赋值(object2强制转换)
     object1->printer_ToMissile((void**)&missile);   //判断obect1是否为投射物
+
+    // 敌方单位进入对玩家的实际攻击阶段时临时显形；建筑一旦攻击玩家则永久保留。
+    // 这样主画面、小地图和用户AI敌军列表会使用同一可见状态。
+    if (object1->isPlayerControl() && object2 != NULL &&
+        object1->getPlayerRepresent() != NOWPLAYERREPRESENT &&
+        object2->getPlayerRepresent() == NOWPLAYERREPRESENT)
+    {
+        if (object1->getSort() == SORT_BUILDING)
+            object1->setExploredPermanently();
+        else
+            object1->visibleSomeTimes();
+    }
+
     bool isEnemyPriestConversion = object2 != NULL &&
         object1->getSort() == SORT_ARMY && object1->getNum() == AT_PRIEST &&
         object1->getPlayerRepresent() != object2->getPlayerRepresent();
@@ -1158,7 +1230,7 @@ void Core_List::object_PinPoint_Attack(Coordinate *object, Double dr, Double ur)
     }
 }
 
-void Core_List::object_Gather(Coordinate* object1, Coordinate* object2)
+void Core_List::object_Gather(Coordinate* object1, Coordinate* object2, relation_Object& relation)
 {
     Farmer* gatherer = (Farmer*)object1;
     Resource* res = NULL;
@@ -1172,6 +1244,8 @@ void Core_List::object_Gather(Coordinate* object1, Coordinate* object2)
         if (!gatherer->isWorking())
         {
             gatherer->setPreWork();
+            if (relation.gatherNextFrame < 0)
+                relation.gatherNextFrame = g_frame + gatherIntervalFrames();
             gatherer->adjustAngle(object2->getDR(), object2->getUR());
             if (gatherer->getResourceSort() != res->get_ResourceSort())
             {
@@ -1179,9 +1253,22 @@ void Core_List::object_Gather(Coordinate* object1, Coordinate* object2)
                 gatherer->update_resourceClear();
             }
         }
-        else if (res->isFarmerGatherable(gatherer) && gatherer->get_isActionEnd())
+        else if (res->isFarmerGatherable(gatherer))
         {
-            res->updateCnt_byGather(gatherer->get_quantityGather());
+            if (relation.gatherNextFrame < 0)
+                relation.gatherNextFrame = g_frame + gatherIntervalFrames();
+
+            if (g_frame < relation.gatherNextFrame)
+                return;
+
+            const Double gatheredAmount =
+                res->updateCnt_byGather(gatherer->get_quantityGather());
+            if (gatheredAmount <= Double::Zero())
+            {
+                relation.resetGatherTimer();
+                return;
+            }
+
             Score& gatherScore = scoreForPlayerRepresent(gatherer->getPlayerRepresent());
 
             //更新首次收集得分
@@ -1219,7 +1306,8 @@ void Core_List::object_Gather(Coordinate* object1, Coordinate* object2)
                 gatherScore.update(_ISGOLD);
             }
 
-            gatherer->update_addResource();
+            gatherer->update_addResource(gatheredAmount);
+            relation.gatherNextFrame = g_frame + gatherIntervalFrames();
         }
     }
 }
