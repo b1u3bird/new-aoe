@@ -836,16 +836,16 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
     // 木材给基础权重持续采集，黄金在青铜时代后也持续采集，避免「缺了才采」的波动。
-    int weight[4] = {8, 4, 0, 0};
+    int weight[4] = {8, 2, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
       weight[0] += 3;
 
     if (info.Wood < 300)
-      weight[1] += 10;
+      weight[1] += 8;
     if (!HasBuilding(BUILDING_STABLE))
-      weight[1] += 5;
+      weight[1] += 3;
 
     // 黄金：后勤/阔剑兵/骑兵需要黄金，青铜时代后持续采集，缺黄金时额外补充。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE)
@@ -1780,8 +1780,8 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   int bowmanTarget = 0;
   int scoutTarget = 0;
   if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
-    armyTarget = 3;
-    bowmanTarget = 3;
+    armyTarget = 5;
+    bowmanTarget = 5;
   } else {
     armyTarget = 5;
     bowmanTarget = 5;
