@@ -2605,7 +2605,8 @@ static const tagBuilding *FindOffensiveTarget()
     }
     for (const tagBuilding &building : info.enemy_buildings)
     {
-        if (building.Blood > 0)
+        // 跳过攻城武器厂，留给祭司转换（转换是胜利条件，避免进攻摧毁它导致悬空指针）。
+        if (building.Blood > 0 && building.Type != BUILDING_SIEGE)
             return &building;
     }
     return nullptr;
