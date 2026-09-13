@@ -663,11 +663,12 @@ static int FindThreatToPriestSN(int priestSN)
     int bestDis2 = 1000000000;
     for (const tagArmy &enemy : info.enemy_armies)
     {
-        if (enemy.Blood <= 0 || enemy.WorkObjectSN != priestSN)
+        if (enemy.Blood <= 0)
             continue;
         int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                              enemy.BlockDR, enemy.BlockUR);
-        if (dis2 < bestDis2)
+        // 检测祭司 6 格内的敌人，派兵主动保护，避免转换时被近身击杀。
+        if (dis2 < 6 * 6 && dis2 < bestDis2)
         {
             bestDis2 = dis2;
             bestSN = enemy.SN;
@@ -2063,7 +2064,7 @@ static void ManagePriest(UsrAI *ai)
     if (conversionTargetAlive)
         return;
 
-    // 只有严格小于两格的敌方单位才会触发撤退。
+    // 扩大撤退触发范围到 5 格，覆盖远程兵，避免祭司接近攻城武器厂时被远程击杀。
     const tagArmy *closeThreat = nullptr;
     int closestDis2 = 1000000000;
     for (const tagArmy &enemy : info.enemy_armies)
@@ -2073,7 +2074,7 @@ static void ManagePriest(UsrAI *ai)
 
         const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                                    enemy.BlockDR, enemy.BlockUR);
-        if (dis2 < 2 * 2 && dis2 < closestDis2)
+        if (dis2 < 5 * 5 && dis2 < closestDis2)
         {
             closeThreat = &enemy;
             closestDis2 = dis2;
