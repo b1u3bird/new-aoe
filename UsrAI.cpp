@@ -596,6 +596,17 @@ static bool HasIncompleteBuilding(int type)
     return false;
 }
 
+// 接口：统计某类建筑的数量（包括在建建筑）。
+// 用途：限制同种建筑数量，例如场上农田不超过三块。
+static int CountBuilding(int type) {
+  int count = 0;
+  for (const tagBuilding &building : info.buildings) {
+    if (building.Type == type && building.Blood > 0)
+      count++;
+  }
+  return count;
+}
+
 static int CountArmyBySort(int sort)
 {
     int count = 0;
@@ -823,8 +834,8 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     int weight[4] = {8, 0, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
-    else if (info.Meat < 1000)
-        weight[0] += 3;
+    else if (info.civilizationStage == CIVILIZATION_TOOLAGE)
+      weight[0] += 3;
 
     // const bool needWoodBuilding =
     //     HasIncompleteBuilding(BUILDING_HOME) ||
@@ -832,17 +843,16 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     //     HasIncompleteBuilding(BUILDING_RANGE) ||
     //     HasIncompleteBuilding(BUILDING_STABLE);
     if (info.Wood < 300)
-        weight[1] += 6;
-
+      weight[1] += 10;
+    if (!HasBuilding(BUILDING_STABLE))
+      weight[1] += 5;
     // const bool needStone = HasIncompleteBuilding(BUILDING_ARROWTOWER);
     // if (needStone && info.Stone < 300)
     //     weight[2] += 5;
 
-    // 工具时代升级、兵种升级和高级兵生产由黄金需求拉动；没有需求时保持零配额。
-    // const bool needGold = info.civilizationStage == CIVILIZATION_TOOLAGE &&
-    //                       (info.Gold < 250 || HasBuilding(BUILDING_MARKET));
-    // if (needGold)
-    //     weight[3] += 3;
+    // 黄金：后勤(180食物+100金)与兵种升级需要黄金，缺黄金时补充采集。
+    if (info.Gold < 100)
+      weight[3] += 6;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
     // if (nearPopulationCap || HasIncompleteBuilding(BUILDING_HOME))
@@ -1633,11 +1643,19 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int scoutCount = CountArmyBySort(AT_SCOUT);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  const int farmerTarget = 10;
-  const int armyTarget = 5;
-  const int bowmanTarget = 5;
-  const int scoutTarget = 3;
+  int farmerTarget = 15;
 
+  int armyTarget;
+  int bowmanTarget;
+  int scoutTarget;
+  if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
+    armyTarget = 3;
+    bowmanTarget = 3;
+  } else {
+    armyTarget = 10;
+    bowmanTarget = 10;
+    scoutTarget = 3;
+  }
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
                        TryProduceFarmer);
   ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
@@ -1691,7 +1709,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 100)
         TryBuild(ai, BUILDING_MARKET);
     } else {
-      if (info.Wood >= 75) {
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < 3) {
         TryBuild(ai, BUILDING_FARM);
       }
     }
@@ -1700,13 +1718,12 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_STABLE);
     }
     if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
-        HasBuilding(BUILDING_RANGE) && HasBuilding(BUILDING_STABLE)) {
+        (HasBuilding(BUILDING_MARKET) + HasBuilding(BUILDING_RANGE) +
+         HasBuilding(BUILDING_STABLE)) >= 2) {
       TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
-
-    ManageWeightedProduction(ai, nearPopulationCap);
     TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
-
+    ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
 }
 
