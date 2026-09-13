@@ -680,8 +680,11 @@ static const tagBuilding *FindEnemySiege(const tagArmy &priest)
 {
     for (const tagBuilding &building : info.enemy_buildings)
     {
-        const int dis2 = BlockDis2(building.BlockDR, building.BlockDR, priest.BlockDR, priest.BlockUR);
-        if (building.Blood > 0 && dis2 < 12 * 12)
+        // 只找攻城武器厂（胜利条件：转换它），修复距离计算的 BlockUR 笔误。
+        if (building.Blood <= 0 || building.Type != BUILDING_SIEGE)
+            continue;
+        const int dis2 = BlockDis2(building.BlockDR, building.BlockUR, priest.BlockDR, priest.BlockUR);
+        if (dis2 < 12 * 12)
             return &building;
     }
     return nullptr;
@@ -1788,17 +1791,17 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int scoutCount = CountArmyBySort(AT_SCOUT);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  int farmerTarget = 20;
+  int farmerTarget = 24;
 
   int armyTarget = 0;
   int bowmanTarget = 0;
   int scoutTarget = 0;
   if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
-    armyTarget = 5;
-    bowmanTarget = 5;
+    armyTarget = 8;
+    bowmanTarget = 8;
   } else {
-    armyTarget = 5;
-    bowmanTarget = 5;
+    armyTarget = 8;
+    bowmanTarget = 8;
     scoutTarget = 3;
   }
   // 敌方阔剑兵近战克制棍棒兵（攻9近防1），转产远程弓兵（阔剑兵远防0）。
