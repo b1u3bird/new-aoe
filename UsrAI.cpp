@@ -685,8 +685,25 @@ static const tagBuilding *FindEnemySiege(const tagArmy &priest)
         if (building.Blood <= 0 || building.Type != BUILDING_SIEGE)
             continue;
         const int dis2 = BlockDis2(building.BlockDR, building.BlockUR, priest.BlockDR, priest.BlockUR);
-        if (dis2 < 12 * 12)
-            return &building;
+        if (dis2 >= 12 * 12)
+            continue;
+        // 攻城武器厂附近 5 格内有敌人则视为不安全，等军队清理后再转换。
+        bool safe = true;
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.Blood <= 0)
+                continue;
+            const int enemyDis2 = BlockDis2(building.BlockDR, building.BlockUR,
+                                            enemy.BlockDR, enemy.BlockUR);
+            if (enemyDis2 < 3 * 3)
+            {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe)
+            continue;
+        return &building;
     }
     return nullptr;
 }
@@ -1883,6 +1900,9 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
     // 工具时代的科技：木材加工（伐木效率 +50%）。
     TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
+    // 驯养动物（农场食物 +75）：4 块以上农场才划算，避免前期浪费食物。
+    if (CountBuilding(BUILDING_FARM) >= 4)
+        TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
     // 青铜时代的兵种科技升级：复合弓兵、阔剑兵、战车（车轮）、后勤。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
       //   TryBuildingAction(ai, BUILDING_RANGE,
