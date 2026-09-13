@@ -717,6 +717,11 @@ static bool IsGatherableResource(const tagResource &resource)
     return resource.Cnt > 0 || resource.Blood > 0;
 }
 
+static bool IsGatherableFarm(const tagBuilding &building) {
+  return building.Type == BUILDING_FARM && building.Percent >= 100 &&
+         building.Blood > 0 && building.Cnt > 0;
+}
+
 static bool HasGatherableResourceType(int bucket)
 {
     for (const tagResource &resource : info.resources)
@@ -724,6 +729,13 @@ static bool HasGatherableResourceType(int bucket)
         if (ResourceBucket(resource.Type) == bucket &&
             IsGatherableResource(resource))
             return true;
+    }
+    // 农场是食物来源，仅对食物 bucket 生效。
+    if (bucket == 0) {
+      for (const tagBuilding &building : info.buildings) {
+        if (IsGatherableFarm(building))
+          return true;
+      }
     }
     return false;
 }
@@ -768,6 +780,14 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
                 break;
             }
         }
+        // 农场属于食物来源，SN 全局唯一，与资源目标不会重复计数。
+        for (const tagBuilding &building : info.buildings) {
+          if (farmer.WorkObjectSN == building.SN &&
+              IsGatherableFarm(building)) {
+            current[0]++;
+            break;
+          }
+        }
     }
 
     // Core 快照尚未建立关系时，用 pending 预占补齐配额统计。
@@ -786,6 +806,13 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
             if (bucket >= 0)
                 current[bucket]++;
             break;
+        }
+        for (const tagBuilding &building : info.buildings) {
+          if (building.SN == it->second.targetSN &&
+              IsGatherableFarm(building)) {
+            current[0]++;
+            break;
+          }
         }
     }
 
@@ -888,14 +915,16 @@ static bool IsAliveFarmerSN(int farmerSN)
     return false;
 }
 
-static bool IsVisibleResourceSN(int resourceSN)
-{
-    for (const tagResource &resource : info.resources)
-    {
-        if (resource.SN == resourceSN)
-            return true;
-    }
-    return false;
+static bool IsVisibleResourceSN(int targetSN) {
+  for (const tagResource &resource : info.resources) {
+    if (resource.SN == targetSN)
+      return true;
+  }
+  for (const tagBuilding &building : info.buildings) {
+    if (building.Type == BUILDING_FARM && building.SN == targetSN)
+      return true;
+  }
+  return false;
 }
 
 static void RecordResourceAttemptFailure(int resourceSN)
@@ -1129,6 +1158,42 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
             bestScore = score;
             bestSN = resource.SN;
         }
+    }
+
+    // 农场是食物来源，与野果/瞪羚/大象同 bucket 竞争，按同一打分公式择优。
+    if (desiredBucket == 0) {
+      for (const tagBuilding &building : info.buildings) {
+        if (!IsGatherableFarm(building))
+          continue;
+
+        map<int, ResourceAttemptState>::const_iterator attemptIt =
+            resourceAttemptState.find(building.SN);
+        if (attemptIt != resourceAttemptState.end() &&
+            g_frame < attemptIt->second.cooldownUntilFrame)
+          continue;
+
+        const int workers = resourceWorkers[building.SN];
+        if (workers >= ResourceHardCapacity(0))
+          continue;
+
+        if (IsFarmerClusterCrowded(building.BlockDR, building.BlockUR,
+                                   farmer.SN))
+          continue;
+
+        const int distance = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                       building.BlockDR, building.BlockUR);
+        const int softCapacity = 4;
+        const int crowdPenalty = workers >= softCapacity
+                                     ? (workers - softCapacity + 1) * 80
+                                     : workers * 12;
+        const int remainingPenalty = building.Cnt < 100 ? 100 : 0;
+        const int score = distance + crowdPenalty + remainingPenalty -
+                          (current[0] > 0 ? 0 : 2);
+        if (score < bestScore) {
+          bestScore = score;
+          bestSN = building.SN;
+        }
+      }
     }
     return bestSN;
 }
@@ -1550,63 +1615,50 @@ static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
 
-// static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap)
-// {
-//     const int enemyCount = CountEnemyArmy();
-//     const int farmerCount = static_cast<int>(info.farmers.size());
-//     const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
-//     const int bowmanCount = CountArmyBySort(AT_BOWMAN);
-//     const int scoutCount = CountArmyBySort(AT_SCOUT);
+static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
+  const int enemyCount = CountEnemyArmy();
+  const int farmerCount = static_cast<int>(info.farmers.size());
+  const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
+  const int bowmanCount = CountArmyBySort(AT_BOWMAN);
+  const int scoutCount = CountArmyBySort(AT_SCOUT);
 
-//     // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
-//     const int farmerTarget = 10 + min(6, enemyCount / 3);
-//     const int armyTarget = 6 + min(10, enemyCount);
-//     const int bowmanTarget = max(3, enemyCount / 2);
-//     const int scoutTarget = 3;
+  // 经济目标随敌方可见兵力上升，避免军队扩张时农民数量停滞。
+  const int farmerTarget = 10 + min(6, enemyCount / 3);
+  const int armyTarget = 6 + min(10, enemyCount);
+  const int bowmanTarget = max(3, enemyCount / 2);
+  const int scoutTarget = 3;
 
-//     const int farmerWeight = CalculateProductionWeight(
-//         farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
-//         farmerCount < 8 ? 35 : 8, enemyCount / 4);
-//     const int soldierWeight = CalculateProductionWeight(
-//         clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget,
-//         18, enemyCount);
-//     const int bowmanWeight = CalculateProductionWeight(
-//         bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget,
-//         12, enemyCount / 2);
-//     const int scoutWeight = CalculateProductionWeight(
-//         scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
-//         g_frame >= 26000 ? 10 : 4, enemyCount / 3);
+  const int farmerWeight = CalculateProductionWeight(
+      farmerCount, ProductionPendingCount(farmerOrderId), farmerTarget,
+      farmerCount < 8 ? 35 : 8, enemyCount / 4);
+  const int soldierWeight = CalculateProductionWeight(
+      clubmanCount, ProductionPendingCount(soldierOrderId), armyTarget, 18,
+      enemyCount);
+  const int bowmanWeight = CalculateProductionWeight(
+      bowmanCount, ProductionPendingCount(rangeOrderId), bowmanTarget, 12,
+      enemyCount / 2);
+  const int scoutWeight = CalculateProductionWeight(
+      scoutCount, ProductionPendingCount(stableOrderId), scoutTarget,
+      g_frame >= 26000 ? 10 : 4, enemyCount / 3);
 
-//     if (HasProductionCapacity(BUILDING_CENTER, farmerOrderId,
-//                               nearPopulationCap) &&
-//         info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0))
-//     {
-//         TryProduceFarmer(ai, nearPopulationCap);
-//     }
+  if (info.Meat >= 50 && IsProductionSlotSelected(farmerWeight, 0)) {
+    TryProduceFarmer(ai, nearPopulationCap);
+  }
 
-//     if (HasProductionCapacity(BUILDING_ARMYCAMP, soldierOrderId,
-//                               nearPopulationCap) &&
-//         info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25))
-//     {
-//         TryProduceSoldier(ai, nearPopulationCap);
-//     }
+  if (info.Meat >= 50 && IsProductionSlotSelected(soldierWeight, 25)) {
+    TryProduceSoldier(ai, nearPopulationCap);
+  }
 
-//     if (HasProductionCapacity(BUILDING_RANGE, rangeOrderId,
-//                               nearPopulationCap) &&
-//         info.Meat >= 40 && info.Wood >= 20 &&
-//         IsProductionSlotSelected(bowmanWeight, 50))
-//     {
-//         TryProduceBowman(ai, nearPopulationCap);
-//     }
+  if (info.Meat >= 40 && info.Wood >= 20 &&
+      IsProductionSlotSelected(bowmanWeight, 50)) {
+    TryProduceBowman(ai, nearPopulationCap);
+  }
 
-//     if (HasProductionCapacity(BUILDING_STABLE, stableOrderId,
-//                               nearPopulationCap) &&
-//         scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
-//         info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75))
-//     {
-//         TryProduceScout(ai, nearPopulationCap);
-//     }
-// }
+  if (scoutCount + ProductionPendingCount(stableOrderId) < scoutTarget &&
+      info.Meat >= 100 && IsProductionSlotSelected(scoutWeight, 75)) {
+    TryProduceScout(ai, nearPopulationCap);
+  }
+}
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
 static void ManageEconomyAndProduction(UsrAI *ai)
@@ -1642,35 +1694,28 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         if (info.Wood >= 125)
             TryBuild(ai, BUILDING_ARMYCAMP);
     }
-    else if (!HasBuilding(BUILDING_RANGE))
-    {
-        if (info.Wood >= 150)
-            TryBuild(ai, BUILDING_RANGE);
+    if (!HasBuilding(BUILDING_RANGE)) {
+      if (info.Wood >= 150)
+        TryBuild(ai, BUILDING_RANGE);
     }
-    // else if (!HasBuilding(BUILDING_MARKET))
-    // {
-    //     if (info.Wood >= 100)
-    //         TryBuild(ai, BUILDING_MARKET);
-    // }
-    // else if (!HasBuilding(BUILDING_FARM))
-    // {
-    //     if (info.Wood >= 75)
-    //     {
-    //         TryBuild(ai, BUILDING_FARM);
-    //     }
-    // }
-    else if (!HasBuilding(BUILDING_STABLE))
-    {
-        if (info.Wood >= 150)
-            TryBuild(ai, BUILDING_STABLE);
+
+    if (!HasBuilding(BUILDING_MARKET)) {
+      if (info.Wood >= 100)
+        TryBuild(ai, BUILDING_MARKET);
+    } else {
+      if (info.Wood >= 75) {
+        TryBuild(ai, BUILDING_FARM);
+      }
     }
-    // if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
-    //     HasCompletedBuilding(info, BUILDING_RANGE) &&
-    //     HasCompletedBuilding(info, BUILDING_STABLE))
-    // {
-    //     TryBuildingAction(ai, info, BUILDING_CENTER,
-    //                       BUILDING_CENTER_UPGRADE);
-    // }
+    if (!HasBuilding(BUILDING_STABLE)) {
+      if (info.Wood >= 150)
+        TryBuild(ai, BUILDING_STABLE);
+    }
+    if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
+        HasCompletedBuilding(info, BUILDING_RANGE) &&
+        HasCompletedBuilding(info, BUILDING_STABLE)) {
+      TryBuildingAction(ai, info, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
+    }
 
     // ManageWeightedProduction(ai, nearPopulationCap);
     TryBuildingAction(ai, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
@@ -1678,7 +1723,6 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     TryProduceFarmer(ai, nearPopulationCap);
     TryProduceBowman(ai, nearPopulationCap);
     TryProduceSoldier(ai, nearPopulationCap);
-
     TryAssignIdleFarmer(ai);
 }
 
