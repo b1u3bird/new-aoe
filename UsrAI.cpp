@@ -77,6 +77,11 @@ static map<int, int> scoutDangerLastFrame;
 static map<pair<int, int>, int> scoutFrontierVisitFrame;
 // 第三波结束后是否已经进入侦察任务，以及是否发现敌方基地。
 static bool enemyBaseDiscovered = false;
+// 敌方基地信息（供进攻与箭塔朝向复用，需在建造逻辑之前定义）。
+static int enemyBaseSN = -1;
+static int enemyBaseLastSeenFrame = USR_INVALID_FRAME;
+static int enemyBaseBlockDR = -1;
+static int enemyBaseBlockUR = -1;
 // 上次提交经济采集指令的游戏帧。
 static int lastEconomyOrderFrame = USR_INVALID_FRAME;
 // 上次提交建造指令的游戏帧。
@@ -153,6 +158,8 @@ static int offensiveAttackStartFrame = USR_INVALID_FRAME;
 static int priestSafeSinceFrame = USR_INVALID_FRAME;
 // 当前祭司移动指令的异步指令 ID，-1 表示没有等待中的指令。
 static int priestMoveOrderId = -1;
+// 攻击祭司的敌人 SN → 被派去转移其仇恨的诱饵单位 SN（每个威胁各配一个诱饵）。
+static map<int, int> priestDecoyByThreat;
 // 当前祭司撤退或防守目标的地图格坐标。
 static pair<int, int> priestEmergencyTarget = make_pair(-1, -1);
 // 当前祭司撤退或防守目标最后一次更新的游戏帧。
@@ -193,6 +200,15 @@ static int clubmanResult = ACTION_SUCCESS;
 static int armyCampResultFrame = USR_INVALID_FRAME;
 // 棍棒兵生产指令返回结果对应的游戏帧。
 static int clubmanResultFrame = USR_INVALID_FRAME;
+
+// 调试日志：写入 ai_debug.log，用于离线分析 AI 决策与游戏状态。
+static void AiDebugLog(const char *msg) {
+  FILE *f = fopen("ai_debug.log", "a");
+  if (f) {
+    fprintf(f, "%s\n", msg);
+    fclose(f);
+  }
+}
 
 // 接口：计算两个格子坐标的曼哈顿距离。
 // 用途：适合做射程、警戒范围、追击半径等粗略判断。
@@ -878,25 +894,29 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
     // 木材给基础权重持续采集，黄金在青铜时代后也持续采集，避免「缺了才采」的波动。
-    int weight[4] = {12, 3, 0, 0};
+    int weight[4] = {15, 7, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
       weight[0] += 3;
 
-    if (info.Wood < 300)
-      weight[1] += 8;
-    if (!HasBuilding(BUILDING_STABLE))
-      weight[1] += 3;
+    if (info.Wood >= 500) {
+      // 木头充足（>=500）时停止伐木，把农民让给食物/黄金/石头。
+      weight[1] = 0;
+    } else {
+      if (info.Wood < 300)
+        weight[1] += 8;
+      if (!HasBuilding(BUILDING_STABLE))
+        weight[1] += 3;
+    }
 
-    // 黄金：后勤/阔剑兵/骑兵需要黄金，青铜时代后持续采集，缺黄金时额外补充。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE)
-      weight[3] += 4;
+    // 黄金：后勤/阔剑兵需要黄金，缺黄金时补充（采够 100
+    // 就停，避免挤占食物农民）。
     if (info.Gold < 100)
       weight[3] += 6;
 
-    // 石头：造箭塔需要石头（每个 150），箭塔未满 4 个时高权重采石。
-    if (CountBuilding(BUILDING_ARROWTOWER) < 4)
+    // 石头：造箭塔需要石头（每个 150），箭塔未满 3 个时高权重采石。
+    if (CountBuilding(BUILDING_ARROWTOWER) < 3)
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
@@ -1079,6 +1099,7 @@ static void ProcessPendingGatherOrders()
         researchedTechCount = 0;
         clubmanUpgradeOrderId = -1;
         broadswordUpgradeOrderId = -1;
+        priestDecoyByThreat.clear();
     }
     farmerResourceStateFrame = g_frame;
 
@@ -1275,8 +1296,9 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
             g_frame < attemptIt->second.cooldownUntilFrame)
           continue;
 
+        // 每块农田同一时刻只派一个农民：Core 每帧重置地主，其他农民无法采集。
         const int workers = resourceWorkers[building.SN];
-        if (workers >= ResourceHardCapacity(0))
+        if (workers >= 1)
           continue;
 
         if (IsFarmerClusterCrowded(building.BlockDR, building.BlockUR,
@@ -1429,11 +1451,86 @@ static bool IsBuildCandidateUsable(int blockDR, int blockUR, int buildingType)
     return true;
 }
 
+// 返回「我方基地前线」的归一化方向（各轴 -1/0/1），用于让箭塔面向敌人来路。
+// 主依据：市镇中心－房屋连线的延长线上、远离房屋的一端。
+//   房屋由地图固定布置在基地后方（四张地图实测其与敌方方向的夹角均 > 90°），
+//   方向稳定且开局即可用，不依赖侦察；房屋被拆光时回退到敌方位置。
+static pair<int, int> GetEnemyDirection()
+{
+    const tagBuilding *center = FindCenter();
+    if (!center)
+        return make_pair(0, 0);
+
+    int targetDR = -1;
+    int targetUR = -1;
+
+    // 主依据：远离房屋的一端（房屋 → 中心的延长方向 = 前线）。
+    for (const tagBuilding &building : info.buildings)
+    {
+        if (building.Type == BUILDING_HOME && building.Blood > 0)
+        {
+            targetDR = 2 * center->BlockDR - building.BlockDR;
+            targetUR = 2 * center->BlockUR - building.BlockUR;
+            break;
+        }
+    }
+    // 回退：房屋全被摧毁时改用敌方位置。
+    if (targetDR == -1)
+    {
+        for (const tagBuilding &building : info.enemy_buildings)
+        {
+            if (building.Blood > 0)
+            {
+                targetDR = building.BlockDR;
+                targetUR = building.BlockUR;
+                break;
+            }
+        }
+    }
+    if (targetDR == -1 && enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0)
+    {
+        targetDR = enemyBaseBlockDR;
+        targetUR = enemyBaseBlockUR;
+    }
+    if (targetDR == -1)
+        return make_pair(0, 0);
+
+    const int dx = targetDR - center->BlockDR;
+    const int dy = targetUR - center->BlockUR;
+    return make_pair(dx > 0 ? 1 : (dx < 0 ? -1 : 0),
+                     dy > 0 ? 1 : (dy < 0 ? -1 : 0));
+}
+
 static pair<int, int> GetBuildCandidate(int buildingType)
 {
     const tagBuilding *center = FindCenter();
     if (!center)
         return make_pair(-1, -1);
+
+    // 箭塔：围绕市镇中心呈三角形（互成 120°）布置，形成中心防守圈。
+    // 敌方波次以追击最近的农民为目标，来向不固定，因此不押注单一方向。
+    if (buildingType == BUILDING_ARROWTOWER)
+    {
+        // [圈层][顶点][xy]：主圈约 9 格，近圈约 7 格，远圈约 12 格。
+        static const int TOWER_RINGS[3][3][2] = {
+            {{0, -9}, {-8, 5}, {8, 5}},
+            {{0, -7}, {-6, 4}, {6, 4}},
+            {{0, -12}, {-10, 7}, {10, 7}}};
+        // 按已有箭塔数量错开起始顶点，保证新塔落在不同方向。
+        const int startVertex = CountBuilding(BUILDING_ARROWTOWER) % 3;
+        for (int ring = 0; ring < 3; ring++)
+        {
+            for (int k = 0; k < 3; k++)
+            {
+                const int v = (startVertex + k) % 3;
+                const int dr = center->BlockDR + TOWER_RINGS[ring][v][0];
+                const int ur = center->BlockUR + TOWER_RINGS[ring][v][1];
+                if (IsBuildCandidateUsable(dr, ur, buildingType))
+                    return make_pair(dr, ur);
+            }
+        }
+        // 三角形位置全部不可用 → 落到通用扫描。
+    }
 
     static const int OFFSETS[][2] = {
         {6, 0}, {0, 6}, {-6, 0}, {0, -6},
@@ -1443,12 +1540,11 @@ static pair<int, int> GetBuildCandidate(int buildingType)
         {13, 7}, {7, 13}, {-13, 7}, {-7, 13}
     };
     const int count = static_cast<int>(sizeof(OFFSETS) / sizeof(OFFSETS[0]));
-    const int radiusAddition = buildingType == BUILDING_ARROWTOWER
-                                   ? USR_ARROWTOWER_BUILD_RADIUS - 10
-                                   : 0;
+    const int radiusAddition = 0;
+
     for (int step = 0; step < count; step++)
     {
-        int index = (buildCandidateIndex + step) % count;
+        const int index = (buildCandidateIndex + step) % count;
         int dr = center->BlockDR + OFFSETS[index][0];
         int ur = center->BlockUR + OFFSETS[index][1];
         if (radiusAddition != 0)
@@ -1650,31 +1746,54 @@ static bool TryResumeIncompleteBuilding(UsrAI *ai)
     return true;
 }
 
+// 每个建筑类型的最近一次建造尝试失败码，供 2000 帧调试日志输出。
+// 1=等待上一条指令结果 2=冷却中 3=找不到建造农民 4=找不到合法位置
+// 100+ret=上次建造返回码
+static int buildFailCodes[16] = {0};
+
 static bool TryBuild(UsrAI *ai, int buildingType)
 {
-    if (buildOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(buildOrderId);
-        if (result == info.ins_ret.end())
-            return false;
-        if (result->second == ACTION_INVALID_POSITION_NOT_FIT ||
-            result->second == ACTION_INVALID_HUMANBUILD_OVERLAP ||
-            result->second == ACTION_INVALID_HUMANBUILD_DIFFERENTHIGH ||
-            result->second == ACTION_INVALID_HUMANBUILD_OVERBORDER ||
-            result->second == ACTION_INVALID_HUMANBUILD_UNEXPLORE)
-            buildCandidateIndex++;
-        buildOrderId = -1;
-        buildOrderType = -1;
-        buildFarmerSN = -1;
+  const int typeIdx =
+      (buildingType >= 0 && buildingType < 16) ? buildingType : 15;
+  buildFailCodes[typeIdx] = 0;
+  if (buildOrderId != -1) {
+    map<int, int>::const_iterator result = info.ins_ret.find(buildOrderId);
+    if (result == info.ins_ret.end()) {
+      buildFailCodes[typeIdx] = 1; // 等待上一个建造指令结果
+      return false;
     }
-    if (g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL)
-        return false;
+    if (result->second == ACTION_INVALID_POSITION_NOT_FIT ||
+        result->second == ACTION_INVALID_HUMANBUILD_OVERLAP ||
+        result->second == ACTION_INVALID_HUMANBUILD_DIFFERENTHIGH ||
+        result->second == ACTION_INVALID_HUMANBUILD_OVERBORDER ||
+        result->second == ACTION_INVALID_HUMANBUILD_UNEXPLORE)
+      buildCandidateIndex++;
+    buildFailCodes[typeIdx] = 100 + result->second; // 上一次建造的返回码
+    {
+      char buf[256];
+      snprintf(buf, sizeof(buf), "[RESULT] f=%d type=%d orderId=%d ret=%d",
+               g_frame, buildOrderType, buildOrderId, result->second);
+      AiDebugLog(buf);
+    }
+    buildOrderId = -1;
+    buildOrderType = -1;
+    buildFarmerSN = -1;
+    return false;
+  }
+  if (g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL) {
+    buildFailCodes[typeIdx] = 2; // 建造冷却中
+    return false;
+  }
     int farmerSN = FindBuilderFarmerSN();
-    if (farmerSN == -1)
-        return false;
+    if (farmerSN == -1) {
+      buildFailCodes[typeIdx] = 3; // 找不到空闲/可中断的建造农民
+      return false;
+    }
     pair<int, int> position = GetBuildCandidate(buildingType);
-    if (position.first == -1)
-        return false;
+    if (position.first == -1) {
+      buildFailCodes[typeIdx] = 4; // 找不到合法建造位置
+      return false;
+    }
     CancelPendingGatherOrder(farmerSN);
     buildOrderId = ai->HumanBuild(farmerSN, buildingType, position.first, position.second);
     buildOrderType = buildingType;
@@ -1682,6 +1801,14 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     if (buildingType == BUILDING_ARMYCAMP)
         armyCampOrderId = buildOrderId;
     lastBuildOrderFrame = g_frame;
+    {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "[ORDER] f=%d type=%d pos=(%d,%d) farmer=%d orderId=%d", g_frame,
+               buildingType, position.first, position.second, farmerSN,
+               buildOrderId);
+      AiDebugLog(buf);
+    }
     return true;
 }
 
@@ -1786,11 +1913,10 @@ static bool TryBuildingAction(UsrAI *ai,
 static bool TryProduceFarmer(UsrAI *ai,
                              bool nearPopulationCap)
 {
-    if (static_cast<int>(info.farmers.size()) >= 14 || nearPopulationCap || info.Meat < 50)
-        return false;
+  if (nearPopulationCap || info.Meat < 50)
+    return false;
 
-    return TryBuildingAction(ai, BUILDING_CENTER,
-                             BUILDING_CENTER_CREATEFARMER);
+  return TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_CREATEFARMER);
 }
 
 static bool TryProduceSoldier(UsrAI *ai,
@@ -1817,6 +1943,15 @@ static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
 
   return TryBuildingAction(ai, BUILDING_STABLE, BUILDING_STABLE_CREATE_SCOUT);
 }
+// 训练方阵兵：需要学院（BUILDING_COLLAGE），造价 60 食物 + 40 黄金。
+static bool TryProduceHoplite(UsrAI *ai, bool nearPopulationCap)
+{
+  if (nearPopulationCap || info.Meat < 60 || info.Gold < 40)
+    return false;
+
+  return TryBuildingAction(ai, BUILDING_COLLAGE,
+                           BUILDING_COLLAGE_CREATE_HOPLITE);
+}
 static bool HasProductionCapacity(int buildingType, int orderId,
                                   bool nearPopulationCap)
 {
@@ -1828,6 +1963,7 @@ static bool TryProduceFarmer(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceHoplite(UsrAI *ai, bool nearPopulationCap);
 
 // 生产函数指针类型：与 TryProduceFarmer/Soldier/Bowman/Scout 签名一致。
 typedef bool (*ProduceFunc)(UsrAI *, bool);
@@ -1846,30 +1982,35 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int clubmanCount = CountArmyBySort(AT_CLUBMAN);
   const int bowmanCount = CountArmyBySort(AT_BOWMAN);
   const int scoutCount = CountArmyBySort(AT_SCOUT);
+  const int hopliteCount = CountArmyBySort(AT_HOPLITE);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  int farmerTarget = 28;
+  int farmerTarget = 22;
 
   int armyTarget = 0;
   int bowmanTarget = 0;
   int scoutTarget = 0;
+  int hopliteTarget = 0;
   if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
-    armyTarget = 10;
-    bowmanTarget = 10;
+    // 升级时代之前只生产农民：士兵会消耗食物并拖慢升时代与经济发展。
+    armyTarget = 0;
+    bowmanTarget = 0;
+    scoutTarget = 0;
   } else {
-    armyTarget = 10;
-    bowmanTarget = 10;
+    armyTarget = 15;
+    bowmanTarget = 15;
     scoutTarget = 3;
+    hopliteTarget = 8;  // 方阵兵（血120/攻17/近防5），青铜时代主力
   }
   // 敌方阔剑兵近战克制棍棒兵（攻9近防1），转产远程弓兵（阔剑兵远防0）。
   if (CountEnemyBySort(AT_BROADSWORDSMAN) > 0) {
     armyTarget = 0;
     bowmanTarget += 6;
   }
-  // 所有关键科技研发完成后，兵力生产解锁上限（受人口上限约束）。
+  // 所有关键科技研发完成后，扩充兵力（40 个，足够推平敌方且不耗尽食物）。
   if (researchedTechCount >= TOTAL_REQUIRED_TECH) {
-    armyTarget = 999;
-    bowmanTarget = 999;
+    armyTarget = 20;
+    bowmanTarget = 20;
   }
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
                        TryProduceFarmer);
@@ -1879,7 +2020,79 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
                        TryProduceBowman);
   ProduceIfBelowTarget(ai, nearPopulationCap, scoutCount, scoutTarget,
                        TryProduceScout);
+  ProduceIfBelowTarget(ai, nearPopulationCap, hopliteCount, hopliteTarget,
+                       TryProduceHoplite);
 }
+
+// 检测受损建筑，为每个尚无修复者的建筑派一个空闲农民（Core 按修复比例扣资源）。
+static bool TryRepairDamagedBuilding(UsrAI *ai) {
+  static int lastRepairFrame = USR_INVALID_FRAME;
+  const int repairInterval = 200;
+  if (lastRepairFrame != USR_INVALID_FRAME &&
+      g_frame - lastRepairFrame < repairInterval)
+    return false;
+
+  bool repairedAny = false;
+  set<int> usedFarmers;  // 本轮已分配的农民，避免多个建筑抢同一个农民
+
+  for (const tagBuilding &building : info.buildings) {
+    if (building.Blood <= 0 || building.MaxBlood <= 0 || building.Percent < 100)
+      continue;
+    const int missing = building.MaxBlood - building.Blood;
+    // 受损不足 20% 不修，避免浪费农民采集时间。
+    if (missing * 5 < building.MaxBlood)
+      continue;
+
+    // 该建筑已有农民在修复（含正在赶路的）→ 跳过，避免多人挤同一建筑。
+    bool hasRepairer = false;
+    for (const tagFarmer &farmer : info.farmers) {
+      if (farmer.Blood > 0 && farmer.WorkObjectSN == building.SN) {
+        hasRepairer = true;
+        break;
+      }
+    }
+    if (hasRepairer)
+      continue;
+
+    // 找最近的空闲农民（排除本轮已分配者）。
+    int bestFarmerSN = -1;
+    int bestDis2 = 2000000000;
+    for (const tagFarmer &farmer : info.farmers) {
+      if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER ||
+          farmer.NowState != HUMAN_STATE_IDLE)
+        continue;
+      if (usedFarmers.find(farmer.SN) != usedFarmers.end())
+        continue;
+      const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                 building.BlockDR, building.BlockUR);
+      if (dis2 < bestDis2) {
+        bestDis2 = dis2;
+        bestFarmerSN = farmer.SN;
+      }
+    }
+    if (bestFarmerSN == -1)
+      continue;  // 没有空闲农民，处理下一个建筑
+
+    usedFarmers.insert(bestFarmerSN);
+    CancelPendingGatherOrder(bestFarmerSN);
+    ai->HumanAction(bestFarmerSN, building.SN);
+    farmerLastOrderFrame[bestFarmerSN] = g_frame;
+    repairedAny = true;
+    {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "[REPAIR] f=%d type=%d sn=%d blood=%d/%d farmer=%d", g_frame,
+               building.Type, building.SN, building.Blood, building.MaxBlood,
+               bestFarmerSN);
+      AiDebugLog(buf);
+    }
+  }
+
+  if (repairedAny)
+    lastRepairFrame = g_frame;
+  return repairedAny;
+}
+
 // 接口：推进最短经济、时代与军队生产链。
 // 用途：所有决策均基于可见状态；失败后冷却重试，不依赖作弊资源。
 static void ManageEconomyAndProduction(UsrAI *ai)
@@ -1893,6 +2106,14 @@ static void ManageEconomyAndProduction(UsrAI *ai)
             if (result != info.ins_ret.end() &&
                 result->second == ACTION_INVALID_POSITION_NOT_FIT)
                 buildCandidateIndex++;
+            {
+              char buf[256];
+              snprintf(buf, sizeof(buf),
+                       "[RESET] f=%d type=%d orderId=%d ret=%d", g_frame,
+                       buildOrderType, buildOrderId,
+                       result != info.ins_ret.end() ? result->second : -999);
+              AiDebugLog(buf);
+            }
             buildOrderId = -1;
             buildOrderType = -1;
             buildFarmerSN = -1;
@@ -1903,6 +2124,9 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 防止未完成建筑长期占位却无人继续建造。
     TryResumeIncompleteBuilding(ai);
 
+    // 自动修复受损建筑。
+    TryRepairDamagedBuilding(ai);
+
     const bool nearPopulationCap = info.Human_Num + 1.9 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
         !HasIncompleteBuilding(BUILDING_HOME))
@@ -1910,26 +2134,19 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_HOME);
     }
 
-    // 开局建谷仓（解锁箭塔），再市场/农场，再兵营/靶场，马厩最后。
-    if (!HasBuilding(BUILDING_GRANARY)) {
-      if (info.Wood >= 120)
-        TryBuild(ai, BUILDING_GRANARY);
-    }
+    // 建造顺序必须满足 Core 的前置链（否则 LOCK 会占用建造通道死循环）：
+    // 谷仓 → 兵营 → 市场(需谷仓) → 马厩/靶场(需兵营) → 农场(需市场) →
+    // 箭塔(需谷仓研发)
     if (!HasBuilding(BUILDING_MARKET)) {
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
-    } else {
-      // 农场数量不超过村民数量的四分之一，避免过早扩张。
-      const int villagerCount = static_cast<int>(info.farmers.size());
-      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 4) {
-        TryBuild(ai, BUILDING_FARM);
-      }
     }
-
-    if (!HasBuilding(BUILDING_ARMYCAMP))
-    {
-        if (info.Wood >= 125)
-            TryBuild(ai, BUILDING_ARMYCAMP);
+    if (CountBuilding(BUILDING_ARROWTOWER) < 3 && info.Stone >= 150) {
+      TryBuild(ai, BUILDING_ARROWTOWER);
+    }
+    if (!HasBuilding(BUILDING_ARMYCAMP)) {
+      if (info.Wood >= 125)
+        TryBuild(ai, BUILDING_ARMYCAMP);
     }
     if (!HasBuilding(BUILDING_RANGE)) {
       if (info.Wood >= 150)
@@ -1939,10 +2156,22 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_STABLE);
     }
-    // 箭塔防守：最多造四个箭塔（箭塔科技研发后 Core 才允许建造）。
-    if (CountBuilding(BUILDING_ARROWTOWER) < 4 && info.Stone >= 150) {
-      TryBuild(ai, BUILDING_ARROWTOWER);
+    // 学院：青铜时代且马厩已建成后建造（用于训练方阵兵）。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
+        HasBuilding(BUILDING_STABLE)) {
+      if (info.Wood >= 180)
+        TryBuild(ai, BUILDING_COLLAGE);
     }
+    // 农场只在马厩/靶场建成后建：否则木头会被农场（75木）持续消耗，
+    // 永远攒不够马厩/靶场（各150木），导致时代无法升级。
+    if (HasBuilding(BUILDING_MARKET)) {
+      // 农场数量不超过村民数量的三分之一，避免过早扩张。
+      const int villagerCount = static_cast<int>(info.farmers.size());
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 5) {
+        TryBuild(ai, BUILDING_FARM);
+      }
+    }
+
     // 在离交付建筑较远的资源群旁建仓库/谷仓，缩短交付往返。
     TryBuildReturnDepot(ai);
     if (info.civilizationStage == CIVILIZATION_TOOLAGE && info.Meat >= 800 &&
@@ -1952,9 +2181,11 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     }
     // 谷仓研发箭塔（解锁箭塔建造）。
     TryBuildingAction(ai, BUILDING_GRANARY, BUILDING_GRANARY_ARROWTOWER);
-    ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP, BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
-    // 工具时代的科技：木材加工（伐木效率 +50%）。
-    TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
+    // 建成市场后优先研发木材加工（伐木效率 +50%），加快木头积累。
+    if (HasBuilding(BUILDING_MARKET))
+      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
+    ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
+                 BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
     // 驯养动物（农场食物 +75）：4 块以上农场才划算，避免前期浪费食物。
     if (CountBuilding(BUILDING_FARM) >= 4)
         TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
@@ -2021,6 +2252,173 @@ static pair<double, double> GetPriestEmergencyPoint(
     // 地图边界或地形没有合法反方向格时，保持当前位置，避免向敌人方向乱走。
     return make_pair((priest.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
                      (priest.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+}
+
+// 返回正在攻击祭司的敌人 SN（敌方单位关系目标指向祭司）。
+static int FindEnemyTargetingPriestSN(int priestSN) {
+  for (const tagArmy &enemy : info.enemy_armies) {
+    if (enemy.Blood > 0 && enemy.WorkObjectSN == priestSN)
+      return enemy.SN;
+  }
+  return -1;
+}
+
+// 判断指定单位（士兵或农民）是否存活。
+static bool IsUnitAlive(int sn) {
+  for (const tagArmy &army : info.armies)
+    if (army.SN == sn && army.Blood > 0)
+      return true;
+  for (const tagFarmer &farmer : info.farmers)
+    if (farmer.SN == sn && farmer.Blood > 0)
+      return true;
+  return false;
+}
+
+// 返回指定单位当前的行动目标 SN（-1 表示无）。
+static int GetUnitWorkTargetSN(int sn) {
+  for (const tagArmy &army : info.armies)
+    if (army.SN == sn)
+      return army.WorkObjectSN;
+  for (const tagFarmer &farmer : info.farmers)
+    if (farmer.SN == sn)
+      return farmer.WorkObjectSN;
+  return -1;
+}
+
+// 敌人攻击祭司时，为每个威胁敌人各派一个单位（优先士兵，其次农民）转移仇恨。
+static void AssignPriestDecoy(UsrAI *ai) {
+  const tagArmy *priest = FindPriest();
+  if (priest == nullptr) {
+    priestDecoyByThreat.clear();
+    return;
+  }
+
+  // 收集当前正在攻击祭司的敌人。
+  set<int> threats;
+  for (const tagArmy &enemy : info.enemy_armies) {
+    if (enemy.Blood > 0 && enemy.WorkObjectSN == priest->SN)
+      threats.insert(enemy.SN);
+  }
+
+  // 清理已失效的记录：威胁消失或诱饵阵亡。
+  for (map<int, int>::iterator it = priestDecoyByThreat.begin();
+       it != priestDecoyByThreat.end();) {
+    if (threats.find(it->first) == threats.end() || !IsUnitAlive(it->second))
+      it = priestDecoyByThreat.erase(it);
+    else
+      ++it;
+  }
+
+  // 已派出的诱饵继续攻击各自对应的敌人。
+  set<int> usedDecoys;
+  for (map<int, int>::iterator it = priestDecoyByThreat.begin();
+       it != priestDecoyByThreat.end(); ++it) {
+    usedDecoys.insert(it->second);
+    if (GetUnitWorkTargetSN(it->second) != it->first)
+      ai->HumanAction(it->second, it->first);
+  }
+
+  // 为每个尚无诱饵的威胁敌人分配一个新诱饵。
+  for (set<int>::const_iterator tit = threats.begin(); tit != threats.end();
+       ++tit) {
+    if (priestDecoyByThreat.find(*tit) != priestDecoyByThreat.end())
+      continue;
+
+    int bestSN = -1;
+    int bestDis2 = 2000000000;
+    // 优先士兵（排除祭司与侦察兵），避免重复使用已有诱饵。
+    for (const tagArmy &army : info.armies) {
+      if (army.Blood <= 0 || army.Sort == AT_PRIEST || army.Sort == AT_SCOUT)
+        continue;
+      if (usedDecoys.find(army.SN) != usedDecoys.end())
+        continue;
+      const int dis2 = BlockDis2(army.BlockDR, army.BlockUR, priest->BlockDR,
+                                 priest->BlockUR);
+      if (dis2 < bestDis2) {
+        bestDis2 = dis2;
+        bestSN = army.SN;
+      }
+    }
+    // 其次农民。
+    if (bestSN == -1) {
+      for (const tagFarmer &farmer : info.farmers) {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+          continue;
+        if (usedDecoys.find(farmer.SN) != usedDecoys.end())
+          continue;
+        const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR,
+                                   priest->BlockDR, priest->BlockUR);
+        if (dis2 < bestDis2) {
+          bestDis2 = dis2;
+          bestSN = farmer.SN;
+        }
+      }
+    }
+    if (bestSN == -1)
+      break; // 没有可用单位，剩余威胁暂不处理
+
+    usedDecoys.insert(bestSN);
+    priestDecoyByThreat[*tit] = bestSN;
+    CancelPendingGatherOrder(bestSN);
+    ai->HumanAction(bestSN, *tit);
+    {
+      char buf[256];
+      snprintf(buf, sizeof(buf), "[DECOY] f=%d decoy=%d threat=%d priest=%d",
+               g_frame, bestSN, *tit, priest->SN);
+      AiDebugLog(buf);
+    }
+  }
+}
+
+// 前向声明：治疗按兵种优先级选择目标，需要用到该函数（定义在下方）。
+static int PriestConversionPriority(int armySort);
+
+// 祭司在安全状态下治疗受伤友军：士兵按兵种优先级优先，同级再按受伤程度；
+// 农民优先级最低，仅在无士兵受伤时才治疗。忽略自身与侦察兵。
+static bool TryPriestHeal(UsrAI *ai, const tagArmy &priest) {
+  int bestSN = -1;
+  int bestPriority = -1;
+  double bestRatio = 0.95; // 只治疗血量低于 95% 的单位
+  for (const tagArmy &ally : info.armies) {
+    if (ally.SN == priest.SN || ally.Blood <= 0 || ally.MaxBlood <= 0)
+      continue;
+    const double ratio = double(ally.Blood) / double(ally.MaxBlood);
+    if (ratio >= 0.95)
+      continue;
+    const int priority = PriestConversionPriority(ally.Sort);
+    // 兵种优先级更高者优先；同一优先级时受伤更重者优先。
+    if (priority > bestPriority ||
+        (priority == bestPriority && ratio < bestRatio)) {
+      bestPriority = priority;
+      bestRatio = ratio;
+      bestSN = ally.SN;
+    }
+  }
+  // 农民视为最低优先级：仅在没有受伤士兵时才治疗农民。
+  if (bestSN == -1) {
+    for (const tagFarmer &farmer : info.farmers) {
+      if (farmer.Blood <= 0 || farmer.MaxBlood <= 0)
+        continue;
+      const double ratio = double(farmer.Blood) / double(farmer.MaxBlood);
+      if (ratio < bestRatio) {
+        bestRatio = ratio;
+        bestSN = farmer.SN;
+      }
+    }
+  }
+  if (bestSN == -1)
+    return false;
+  if (priest.WorkObjectSN == bestSN)
+    return true; // 已在治疗该目标
+  ai->HumanAction(priest.SN, bestSN);
+  {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "[HEAL] f=%d priest=%d target=%d ratio=%.2f priority=%d", g_frame,
+             priest.SN, bestSN, bestRatio, bestPriority);
+    AiDebugLog(buf);
+  }
+  return true;
 }
 
 // 接口：祭司安全与最终转换状态机。
@@ -2176,22 +2574,27 @@ static void ManagePriest(UsrAI *ai)
         }
         return;
     }
-    if(g_frame>=40000)return;
     // 安全后不再追加移动，避免移动指令反复中止转换关系。
     priestDangerTargetSN = -1;
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
-    if (priest->ConvertCooldown > 0 || priestMoveOrderId != -1) // ||g_frame - lastPriestOrderFrame < USR_PRIEST_ORDER_INTERVAL
-        return;
 
+    // 祭司攻击距离 12 格（远程施法），Core 会让它在射程边缘施法，无需贴身；
+    // 生存由撤退逻辑（5 格内出现敌人即撤）与诱饵机制保障。
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
     if (!armyTarget && g_frame >= 30000)
         buildingTarget = FindEnemySiege(*priest);
-
     const int targetSN = armyTarget ? armyTarget->SN : (buildingTarget ? buildingTarget->SN : -1);
-    if (targetSN == -1)
-        return;
+
+    // 有可转化目标且不在冷却时转化；否则（无目标或冷却中）治疗受伤友军。
+    if (targetSN == -1 || priest->ConvertCooldown > 0 ||
+        priestMoveOrderId != -1)
+    {
+      TryPriestHeal(ai, *priest);
+      return;
+    }
+    // 后期依然保留转化技能（不再设置时间截止）。
 
     // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
     if (priest->WorkObjectSN == targetSN)
@@ -2355,15 +2758,16 @@ static void DispatchScouts(UsrAI *ai)
     const int scoutSafeRadius = 6;
     const int scoutWaypointCount = 8;
     const int scoutMargin = 10;
+    // 巡逻点避开左下角（敌方基地方向），只探索我方基地周边与地图中部，避免过早遭遇敌人。
     static const int scoutWaypoints[][2] = {
-        {scoutMargin, scoutMargin},
-        {MAP_L / 2, scoutMargin},
-        {MAP_L - scoutMargin - 1, scoutMargin},
-        {MAP_L - scoutMargin - 1, MAP_U / 2},
-        {MAP_L - scoutMargin - 1, MAP_U - scoutMargin - 1},
-        {MAP_L / 2, MAP_U - scoutMargin - 1},
-        {scoutMargin, MAP_U - scoutMargin - 1},
-        {scoutMargin, MAP_U / 2}};
+        {MAP_L - scoutMargin - 1, scoutMargin},             // 右上角
+        {MAP_L / 2, scoutMargin},                           // 上边中点
+        {MAP_L / 2, MAP_U / 3},                             // 中上
+        {MAP_L - scoutMargin - 1, MAP_U / 2},               // 右边中点
+        {MAP_L / 2, MAP_U / 2},                             // 地图中心
+        {MAP_L - scoutMargin - 1, MAP_U - scoutMargin - 1}, // 右下角
+        {MAP_L / 2, MAP_U - scoutMargin - 1},               // 下边中点
+        {MAP_L * 3 / 4, MAP_U / 3}};                        // 右上偏中
 
     set<int> liveScouts;
     for (const tagArmy &army : info.armies)
@@ -2641,10 +3045,6 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR)
     return false;
 }
 
-static int enemyBaseSN = -1;
-static int enemyBaseLastSeenFrame = USR_INVALID_FRAME;
-static int enemyBaseBlockDR = -1;
-static int enemyBaseBlockUR = -1;
 static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 
 static void UpdateEnemyBaseDiscovery()
@@ -2666,25 +3066,51 @@ static void UpdateEnemyBaseDiscovery()
     }
 }
 
-static const tagBuilding *FindOffensiveTarget()
-{
-    for (const tagBuilding &building : info.enemy_buildings)
-    {
-        if (building.Blood > 0 && building.SN == enemyBaseSN)
-            return &building;
+// 进攻目标
+// SN：优先敌方市镇中心，基地摧毁后转为攻城武器厂附近的防守兵（护送祭司）。
+static int FindOffensiveTargetSN() {
+  // 1. 敌方市镇中心（推平基地）。
+  for (const tagBuilding &building : info.enemy_buildings) {
+    if (building.Blood > 0 && building.Type == BUILDING_CENTER)
+      return building.SN;
+  }
+  // 2. 敌方基地（enemyBaseSN，若仍存活且不是攻城武器厂）。
+  for (const tagBuilding &building : info.enemy_buildings) {
+    if (building.Blood > 0 && building.SN == enemyBaseSN &&
+        building.Type != BUILDING_SIEGE)
+      return building.SN;
+  }
+  // 3. 基地摧毁后，清理攻城武器厂附近的防守兵，护送祭司转换。
+  int siegeDR = -1, siegeUR = -1;
+  for (const tagBuilding &building : info.enemy_buildings) {
+    if (building.Blood > 0 && building.Type == BUILDING_SIEGE) {
+      siegeDR = building.BlockDR;
+      siegeUR = building.BlockUR;
+      break;
     }
-    for (const tagBuilding &building : info.enemy_buildings)
-    {
-        if (building.Blood > 0 && building.Type == BUILDING_CENTER)
-            return &building;
+  }
+  if (siegeDR != -1) {
+    int bestSN = -1;
+    int bestDis2 = 1000000000;
+    for (const tagArmy &enemy : info.enemy_armies) {
+      if (enemy.Blood <= 0)
+        continue;
+      const int dis2 =
+          BlockDis2(siegeDR, siegeUR, enemy.BlockDR, enemy.BlockUR);
+      if (dis2 < 8 * 8 && dis2 < bestDis2) {
+        bestDis2 = dis2;
+        bestSN = enemy.SN;
+      }
     }
-    for (const tagBuilding &building : info.enemy_buildings)
-    {
-        // 跳过攻城武器厂，留给祭司转换（转换是胜利条件，避免进攻摧毁它导致悬空指针）。
-        if (building.Blood > 0 && building.Type != BUILDING_SIEGE)
-            return &building;
-    }
-    return nullptr;
+    if (bestSN != -1)
+      return bestSN;
+  }
+  // 4. 其余敌方建筑（跳过攻城武器厂，留给祭司）。
+  for (const tagBuilding &building : info.enemy_buildings) {
+    if (building.Blood > 0 && building.Type != BUILDING_SIEGE)
+      return building.SN;
+  }
+  return -1;
 }
 
 static bool IsOffensiveArmy(const tagArmy &army)
@@ -2696,50 +3122,48 @@ static bool IsOffensiveArmy(const tagArmy &army)
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
-    if (researchedTechCount < TOTAL_REQUIRED_TECH)
-        return;  // 所有关键科技研发完成后才开始进攻
+  // 升时代前不进攻；升时代后需等关键兵种科技研发完成。
+  if (info.civilizationStage == CIVILIZATION_TOOLAGE ||
+      researchedTechCount < TOTAL_REQUIRED_TECH)
+    return;
 
-    // 兵力不足时不进攻，避免送死。
-    const int offensiveArmyCount =
-        CountArmyBySort(AT_CLUBMAN) + CountArmyBySort(AT_BOWMAN) +
-        CountArmyBySort(AT_BROADSWORDSMAN) + CountArmyBySort(AT_COMPOSITE_BOWMAN);
-    if (offensiveArmyCount < 8)
-        return;
+  // 兵力不足时不进攻，避免送死。
+  const int offensiveArmyCount =
+      CountArmyBySort(AT_CLUBMAN) + CountArmyBySort(AT_BOWMAN) +
+      CountArmyBySort(AT_BROADSWORDSMAN) + CountArmyBySort(AT_COMPOSITE_BOWMAN) +
+      CountArmyBySort(AT_HOPLITE);
+  if (offensiveArmyCount < 8)
+    return;
 
-    UpdateEnemyBaseDiscovery();
-    if (!enemyBaseDiscovered)
-        return;
+  UpdateEnemyBaseDiscovery();
+  if (!enemyBaseDiscovered)
+    return;
 
-    const tagBuilding *target = FindOffensiveTarget();
-    const int orderInterval = 60;
-    if (g_frame - offensiveLastOrderFrame < orderInterval)
-        return;
-    offensiveLastOrderFrame = g_frame;
+  const int targetSN = FindOffensiveTargetSN();
+  const int orderInterval = 60;
+  if (g_frame - offensiveLastOrderFrame < orderInterval)
+    return;
+  offensiveLastOrderFrame = g_frame;
 
-    bool issuedAttack = false;
-    for (const tagArmy &army : info.armies)
-    {
-        if (!IsOffensiveArmy(army))
-            continue;
+  bool issuedAttack = false;
+  for (const tagArmy &army : info.armies) {
+    if (!IsOffensiveArmy(army))
+      continue;
 
-        if (target)
-        {
-            if (GetLockedArmyTarget(army.SN) == target->SN)
-                continue;
-            ClearArmyTargetLock(army.SN);
-            currentTarget[army.SN] = target->SN;
-            ai->HumanAction(army.SN, target->SN);
-            issuedAttack = true;
-        }
-        else if (enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0)
-        {
-            // 基地暂时离开视野时，先向最后已知位置推进，等待重新发现。
-            ClearArmyTargetLock(army.SN);
-            ai->HumanMove(army.SN,
-                          (enemyBaseBlockDR + 0.5) * double(BLOCKSIDELENGTH),
-                          (enemyBaseBlockUR + 0.5) * double(BLOCKSIDELENGTH));
-        }
+    if (targetSN != -1) {
+      if (GetLockedArmyTarget(army.SN) == targetSN)
+        continue;
+      ClearArmyTargetLock(army.SN);
+      currentTarget[army.SN] = targetSN;
+      ai->HumanAction(army.SN, targetSN);
+      issuedAttack = true;
+    } else if (enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0) {
+      // 基地暂时离开视野时，先向最后已知位置推进，等待重新发现。
+      ClearArmyTargetLock(army.SN);
+      ai->HumanMove(army.SN, (enemyBaseBlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                    (enemyBaseBlockUR + 0.5) * double(BLOCKSIDELENGTH));
     }
+  }
     if (issuedAttack && !offensiveAttackStarted)
     {
         offensiveAttackStarted = true;
@@ -2856,10 +3280,63 @@ static void AssignArrowTowerTargets(UsrAI *ai)
 void UsrAI::processData()
 {
     info = getInfo();
+    // 定期写入调试日志，便于离线分析 AI 状态（每 2000 帧一次）。
+    static int lastAiDebugFrame = 0;
+    if (g_frame - lastAiDebugFrame >= 2000) {
+      lastAiDebugFrame = g_frame;
+      char buf[512];
+      int stoneRes = 0;
+      for (const tagResource &r : info.resources)
+        if (ResourceBucket(r.Type) == 2 && IsGatherableResource(r))
+          stoneRes++;
+      snprintf(
+          buf, sizeof(buf),
+          "[AI] f=%d food=%d wood=%d stone=%d gold=%d farmers=%d scout=%d "
+          "army=%d "
+          "civ=%d tech=%d tower=%d farm=%d market=%d stable=%d range=%d "
+          "camp=%d "
+          "stoneRes=%d enemyB=%d enemyA=%d baseKnown=%d",
+          g_frame, (int)info.Meat, (int)info.Wood, info.Stone, info.Gold,
+          (int)info.farmers.size(), CountArmyBySort(AT_SCOUT),
+          CountArmyBySort(AT_CLUBMAN) + CountArmyBySort(AT_BOWMAN) +
+              CountArmyBySort(AT_BROADSWORDSMAN) +
+              CountArmyBySort(AT_COMPOSITE_BOWMAN) + CountArmyBySort(AT_HOPLITE),
+          info.civilizationStage, researchedTechCount,
+          CountBuilding(BUILDING_ARROWTOWER), CountBuilding(BUILDING_FARM),
+          (int)HasBuilding(BUILDING_MARKET), (int)HasBuilding(BUILDING_STABLE),
+          (int)HasBuilding(BUILDING_RANGE), (int)HasBuilding(BUILDING_ARMYCAMP),
+          stoneRes, (int)info.enemy_buildings.size(),
+          (int)info.enemy_armies.size(), (int)enemyBaseDiscovered);
+      AiDebugLog(buf);
+      int incomplete = 0;
+      for (const tagBuilding &b : info.buildings)
+        if (b.Blood > 0 && b.Percent < 100)
+          incomplete++;
+      int priestAlive = 0;
+      int centerAlive = 0;
+      for (const tagArmy &a : info.armies)
+        if (a.Sort == AT_PRIEST && a.Blood > 0)
+          priestAlive++;
+      for (const tagBuilding &b : info.buildings)
+        if (b.Type == BUILDING_CENTER && b.Blood > 0)
+          centerAlive++;
+      snprintf(
+          buf, sizeof(buf),
+          "[BUILD] f=%d pop=%.1f/%d incomplete=%d priest=%d center=%d | "
+          "granary=%d stable=%d market=%d farm=%d camp=%d range=%d tower=%d",
+          g_frame, (double)info.Human_Num, info.Human_MaxNum, incomplete,
+          priestAlive, centerAlive, buildFailCodes[BUILDING_GRANARY],
+          buildFailCodes[BUILDING_STABLE], buildFailCodes[BUILDING_MARKET],
+          buildFailCodes[BUILDING_FARM], buildFailCodes[BUILDING_ARMYCAMP],
+          buildFailCodes[BUILDING_RANGE], buildFailCodes[BUILDING_ARROWTOWER]);
+      AiDebugLog(buf);
+    }
     // 在任何策略读取静态订单状态前处理新对局帧号回退和采集订单结果。
     ProcessPendingGatherOrders();
     CleanDeadOwnerTargetLocks();
     ManagePriest(this);
+    // 临时禁用祭司仇恨转移：验证仅靠箭塔与祭司转化能否撑过三波。
+    // AssignPriestDecoy(this);
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
     ManageOffensiveArmy(this);
