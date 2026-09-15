@@ -190,8 +190,13 @@ static int clubmanUpgradeOrderId = -1;
 static int broadswordUpgradeOrderId = -1;
 // 解锁兵力上限所需研发完成的兵种科技数量（棍棒兵升级、阔剑兵）。
 static const int TOTAL_REQUIRED_TECH = 2;
-// 已成功完成谷仓箭塔研发；当前接口不暴露科技树，按成功返回值缓存。
+// 谷仓「研发:建造箭塔」是否已完成（完成后才允许建造箭塔）。
+// 判断方式：观察到谷仓 Project == BUILDING_GRANARY_ARROWTOWER（研发中），
+// 之后 Project 回到空闲即视为研发完成。
 static bool arrowTowerTechnologyReady = false;
+static bool arrowTowerTechSeenRunning = false;
+// 首次尝试发起箭塔研发的帧，用于长时间未启动时兜底放行。
+static int arrowTowerTechStartFrame = USR_INVALID_FRAME;
 // 最近一次兵营建造指令的返回结果。
 static int armyCampResult = ACTION_SUCCESS;
 // 最近一次棍棒兵生产指令的返回结果。
@@ -915,8 +920,8 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     if (info.Gold < 100)
       weight[3] += 6;
 
-    // 石头：造箭塔需要石头（每个 150），箭塔未满 3 个时高权重采石。
-    if (CountBuilding(BUILDING_ARROWTOWER) < 3)
+    // 石头：造箭塔需要石头（每个 150），箭塔未满 8 个时高权重采石。
+    if (CountBuilding(BUILDING_ARROWTOWER) < 8)
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
@@ -1507,29 +1512,29 @@ static pair<int, int> GetBuildCandidate(int buildingType)
     if (!center)
         return make_pair(-1, -1);
 
-    // 箭塔：围绕市镇中心呈三角形（互成 120°）布置，形成中心防守圈。
-    // 敌方波次以追击最近的农民为目标，来向不固定，因此不押注单一方向。
+    // 箭塔：围绕市镇中心呈环形（8 个方向，45° 间隔）布置，形成防守圈。
+    // 敌方波次以追击祭司/最近的农民为目标，来向不固定，因此均匀覆盖全向。
     if (buildingType == BUILDING_ARROWTOWER)
     {
-        // [圈层][顶点][xy]：主圈约 9 格，近圈约 7 格，远圈约 12 格。
-        static const int TOWER_RINGS[3][3][2] = {
-            {{0, -9}, {-8, 5}, {8, 5}},
-            {{0, -7}, {-6, 4}, {6, 4}},
-            {{0, -12}, {-10, 7}, {10, 7}}};
-        // 按已有箭塔数量错开起始顶点，保证新塔落在不同方向。
-        const int startVertex = CountBuilding(BUILDING_ARROWTOWER) % 3;
+        // [圈层][方向][xy]：主圈约 9 格，近圈约 7 格，远圈约 12 格。
+        static const int TOWER_RINGS[3][8][2] = {
+            {{0, -9}, {6, -6}, {9, 0}, {6, 6}, {0, 9}, {-6, 6}, {-9, 0}, {-6, -6}},
+            {{0, -7}, {5, -5}, {7, 0}, {5, 5}, {0, 7}, {-5, 5}, {-7, 0}, {-5, -5}},
+            {{0, -12}, {8, -8}, {12, 0}, {8, 8}, {0, 12}, {-8, 8}, {-12, 0}, {-8, -8}}};
+        // 按已有箭塔数量错开起始方向，保证新塔依次填满不同方向。
+        const int startDir = CountBuilding(BUILDING_ARROWTOWER) % 8;
         for (int ring = 0; ring < 3; ring++)
         {
-            for (int k = 0; k < 3; k++)
+            for (int k = 0; k < 8; k++)
             {
-                const int v = (startVertex + k) % 3;
+                const int v = (startDir + k) % 8;
                 const int dr = center->BlockDR + TOWER_RINGS[ring][v][0];
                 const int ur = center->BlockUR + TOWER_RINGS[ring][v][1];
                 if (IsBuildCandidateUsable(dr, ur, buildingType))
                     return make_pair(dr, ur);
             }
         }
-        // 三角形位置全部不可用 → 落到通用扫描。
+        // 环形位置全部不可用 → 落到通用扫描。
     }
 
     static const int OFFSETS[][2] = {
@@ -2127,6 +2132,39 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 自动修复受损建筑。
     TryRepairDamagedBuilding(ai);
 
+    // 箭塔科技：必须先完成谷仓的「研发:建造箭塔」才能建造箭塔，
+    // 否则 Core 会以 ACTION_INVALID_HUMANBUILD_LOCK 拒绝，
+    // 而 AI 侧已更新建造冷却，白白阻塞其他建筑 100 帧。
+    // 判定：观察到谷仓 Project 进入该研发 → 标记运行中；之后 Project 离开即视为完成。
+    if (!arrowTowerTechnologyReady)
+    {
+        const tagBuilding *granary = FindBuildingByType(BUILDING_GRANARY, true);
+        if (granary != nullptr)
+        {
+            if (granary->Project == BUILDING_GRANARY_ARROWTOWER)
+            {
+                arrowTowerTechSeenRunning = true;  // 研发进行中
+            }
+            else if (arrowTowerTechSeenRunning)
+            {
+                arrowTowerTechnologyReady = true;  // 研发结束 → 已解锁
+            }
+            else
+            {
+                // 尚未启动：尝试发起研发。
+                TryBuildingAction(ai, BUILDING_GRANARY,
+                                  BUILDING_GRANARY_ARROWTOWER);
+                if (arrowTowerTechStartFrame == USR_INVALID_FRAME)
+                    arrowTowerTechStartFrame = g_frame;
+                else if (g_frame - arrowTowerTechStartFrame >
+                         USR_PRODUCTION_ORDER_TIMEOUT)
+                    // 长时间无法启动（如已解锁或前置不足）→ 兜底放行，
+                    // 交由 Core 自行校验，避免永久不建箭塔。
+                    arrowTowerTechnologyReady = true;
+            }
+        }
+    }
+
     const bool nearPopulationCap = info.Human_Num + 1.9 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
         !HasIncompleteBuilding(BUILDING_HOME))
@@ -2141,7 +2179,10 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
     }
-    if (CountBuilding(BUILDING_ARROWTOWER) < 3 && info.Stone >= 150) {
+    // 箭塔防守：环形布置 8 个箭塔（单塔 DPS 2，需约 7 个才能在
+    // 方阵兵 9 秒击杀祭司前打死它）。须等箭塔科技研发完成后才建造。
+    if (arrowTowerTechnologyReady &&
+        CountBuilding(BUILDING_ARROWTOWER) < 8 && info.Stone >= 150) {
       TryBuild(ai, BUILDING_ARROWTOWER);
     }
     if (!HasBuilding(BUILDING_ARMYCAMP)) {
@@ -2179,8 +2220,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
          HasBuilding(BUILDING_STABLE)) >= 2) {
       TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
-    // 谷仓研发箭塔（解锁箭塔建造）。
-    TryBuildingAction(ai, BUILDING_GRANARY, BUILDING_GRANARY_ARROWTOWER);
+    // 箭塔研发已在建造序列之前处理（见上方 arrowTowerTechnologyReady 逻辑）。
     // 建成市场后优先研发木材加工（伐木效率 +50%），加快木头积累。
     if (HasBuilding(BUILDING_MARKET))
       TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
@@ -2488,6 +2528,24 @@ static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
     return best;
 }
 
+// 返回敌方兵种的攻击射程（单位：地图格）；近战兵种返回 2。
+// 用途：判断攻击祭司的敌人是否已进入其有效射程。
+static int EnemyAttackRange(int armySort)
+{
+    switch (armySort)
+    {
+    case AT_STONE_THROWER:
+        return 10;
+    case AT_COMPOSITE_BOWMAN:
+    case AT_CHARIOT_ARCHER:
+        return 7;
+    case AT_BOWMAN:
+        return 5;
+    default:
+        return 2;  // 近战
+    }
+}
+
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
@@ -2528,20 +2586,24 @@ static void ManagePriest(UsrAI *ai)
             }
         }
     }
+    // 转换进行中保持关系，不追加移动或改派目标，避免打断既有转换。
     if (conversionTargetAlive)
         return;
 
-    // 扩大撤退触发范围到 5 格，覆盖远程兵，避免祭司接近攻城武器厂时被远程击杀。
+    // 撤退：只对「正在攻击祭司」的敌人反应（WorkObjectSN 指向祭司），
+    // 且该敌人已进入自身射程（含 2 格提前量）时才撤；避免被路过或攻击
+    // 其他目标的敌人惊动。
     const tagArmy *closeThreat = nullptr;
     int closestDis2 = 1000000000;
     for (const tagArmy &enemy : info.enemy_armies)
     {
-        if (enemy.Blood <= 0)
-            continue;
+        if (enemy.Blood <= 0 || enemy.WorkObjectSN != priest->SN)
+            continue;  // 未在攻击祭司
 
         const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                                    enemy.BlockDR, enemy.BlockUR);
-        if (dis2 < 5 * 5 && dis2 < closestDis2)
+        const int range = EnemyAttackRange(enemy.Sort) + 2;
+        if (dis2 <= range * range && dis2 < closestDis2)
         {
             closeThreat = &enemy;
             closestDis2 = dis2;
@@ -2574,13 +2636,14 @@ static void ManagePriest(UsrAI *ai)
         }
         return;
     }
+
     // 安全后不再追加移动，避免移动指令反复中止转换关系。
     priestDangerTargetSN = -1;
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
 
     // 祭司攻击距离 12 格（远程施法），Core 会让它在射程边缘施法，无需贴身；
-    // 生存由撤退逻辑（5 格内出现敌人即撤）与诱饵机制保障。
+    // 生存由撤退逻辑（被敌人攻击且进入其射程时撤退）与诱饵机制保障。
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
     if (!armyTarget && g_frame >= 30000)
@@ -3280,6 +3343,32 @@ static void AssignArrowTowerTargets(UsrAI *ai)
 void UsrAI::processData()
 {
     info = getInfo();
+    // 祭司/市镇中心丢失时立即记录（用于定位判负原因）。
+    {
+        static bool hadPriest = false;
+        static bool hadCenter = false;
+        bool hasPriest = false;
+        bool hasCenter = false;
+        for (const tagArmy &a : info.armies)
+            if (a.Sort == AT_PRIEST && a.Blood > 0)
+                hasPriest = true;
+        for (const tagBuilding &b : info.buildings)
+            if (b.Type == BUILDING_CENTER && b.Blood > 0)
+                hasCenter = true;
+        char buf[256];
+        if (hadPriest && !hasPriest)
+        {
+            snprintf(buf, sizeof(buf), "[LOST] f=%d PRIEST_LOST", g_frame);
+            AiDebugLog(buf);
+        }
+        if (hadCenter && !hasCenter)
+        {
+            snprintf(buf, sizeof(buf), "[LOST] f=%d CENTER_LOST", g_frame);
+            AiDebugLog(buf);
+        }
+        hadPriest = hasPriest;
+        hadCenter = hasCenter;
+    }
     // 定期写入调试日志，便于离线分析 AI 状态（每 2000 帧一次）。
     static int lastAiDebugFrame = 0;
     if (g_frame - lastAiDebugFrame >= 2000) {
@@ -3340,7 +3429,7 @@ void UsrAI::processData()
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
     ManageOffensiveArmy(this);
-    // AssignFarmerSelfDefense(this);
+    AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
