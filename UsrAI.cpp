@@ -1990,7 +1990,8 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int hopliteCount = CountArmyBySort(AT_HOPLITE);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  int farmerTarget = 22;
+  // 农民 18 个：人口硬上限 50，留足人口给军队（15 棍棒 + 15 弓兵 + 8 方阵兵）。
+  int farmerTarget = 18;
 
   int armyTarget = 0;
   int bowmanTarget = 0;
@@ -2197,9 +2198,9 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_STABLE);
     }
-    // 学院：青铜时代且马厩已建成后建造（用于训练方阵兵）。
+    // 学院：青铜时代且马厩已建成后建造，只需一座（用于训练方阵兵）。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
-        HasBuilding(BUILDING_STABLE)) {
+        HasBuilding(BUILDING_STABLE) && !HasBuilding(BUILDING_COLLAGE)) {
       if (info.Wood >= 180)
         TryBuild(ai, BUILDING_COLLAGE);
     }
