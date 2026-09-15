@@ -899,7 +899,7 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
 
     // 前期优先保障食物，避免生产和侦察计划因食物短缺停滞。
     // 木材给基础权重持续采集，黄金在青铜时代后也持续采集，避免「缺了才采」的波动。
-    int weight[4] = {15, 7, 0, 0};
+    int weight[4] = {20, 7, 0, 0};
     if (info.Meat < 600)
         weight[0] += 5;
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
@@ -911,17 +911,27 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     } else {
       if (info.Wood < 300)
         weight[1] += 8;
-      if (!HasBuilding(BUILDING_STABLE))
-        weight[1] += 3;
+      // 建房阶段（市场/马厩/靶场/兵营未齐）木头是硬约束：
+      // 这批建筑共需约 575 木，木头不足会导致升时代条件无法凑齐，
+      // 因此额外加权，让伐木优先级高于此阶段的食物积累。
+      if (!HasBuilding(BUILDING_MARKET) || !HasBuilding(BUILDING_STABLE) ||
+          !HasBuilding(BUILDING_RANGE) || !HasBuilding(BUILDING_ARMYCAMP))
+        weight[1] += 8;
     }
+
+    // 核心建筑齐备后全力食物：这一阶段食物是持续消耗（产兵/升时代），
+    // 木头已不再是大头，把农民从伐木转回食物。
+    if (HasBuilding(BUILDING_MARKET) && HasBuilding(BUILDING_STABLE) &&
+        HasBuilding(BUILDING_RANGE))
+      weight[0] += 5;
 
     // 黄金：后勤/阔剑兵需要黄金，缺黄金时补充（采够 100
     // 就停，避免挤占食物农民）。
     if (info.Gold < 100)
       weight[3] += 6;
 
-    // 石头：造箭塔需要石头（每个 150），箭塔未满 8 个时高权重采石。
-    if (CountBuilding(BUILDING_ARROWTOWER) < 8)
+    // 石头：造箭塔需要石头（每个 150），箭塔未满 6 个时高权重采石。
+    if (CountBuilding(BUILDING_ARROWTOWER) < 4)
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
@@ -1512,22 +1522,22 @@ static pair<int, int> GetBuildCandidate(int buildingType)
     if (!center)
         return make_pair(-1, -1);
 
-    // 箭塔：围绕市镇中心呈环形（8 个方向，45° 间隔）布置，形成防守圈。
+    // 箭塔：围绕市镇中心呈四方向（90° 间隔）环形布置，形成防守圈。
     // 敌方波次以追击祭司/最近的农民为目标，来向不固定，因此均匀覆盖全向。
     if (buildingType == BUILDING_ARROWTOWER)
     {
         // [圈层][方向][xy]：主圈约 9 格，近圈约 7 格，远圈约 12 格。
-        static const int TOWER_RINGS[3][8][2] = {
-            {{0, -9}, {6, -6}, {9, 0}, {6, 6}, {0, 9}, {-6, 6}, {-9, 0}, {-6, -6}},
-            {{0, -7}, {5, -5}, {7, 0}, {5, 5}, {0, 7}, {-5, 5}, {-7, 0}, {-5, -5}},
-            {{0, -12}, {8, -8}, {12, 0}, {8, 8}, {0, 12}, {-8, 8}, {-12, 0}, {-8, -8}}};
+        static const int TOWER_RINGS[3][4][2] = {
+            {{0, -9}, {9, 0}, {0, 9}, {-9, 0}},
+            {{0, -7}, {7, 0}, {0, 7}, {-7, 0}},
+            {{0, -12}, {12, 0}, {0, 12}, {-12, 0}}};
         // 按已有箭塔数量错开起始方向，保证新塔依次填满不同方向。
-        const int startDir = CountBuilding(BUILDING_ARROWTOWER) % 8;
+        const int startDir = CountBuilding(BUILDING_ARROWTOWER) % 4;
         for (int ring = 0; ring < 3; ring++)
         {
-            for (int k = 0; k < 8; k++)
+            for (int k = 0; k < 4; k++)
             {
-                const int v = (startDir + k) % 8;
+                const int v = (startDir + k) % 4;
                 const int dr = center->BlockDR + TOWER_RINGS[ring][v][0];
                 const int ur = center->BlockUR + TOWER_RINGS[ring][v][1];
                 if (IsBuildCandidateUsable(dr, ur, buildingType))
@@ -2180,10 +2190,10 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
     }
-    // 箭塔防守：环形布置 8 个箭塔（单塔 DPS 2，需约 7 个才能在
-    // 方阵兵 9 秒击杀祭司前打死它）。须等箭塔科技研发完成后才建造。
+    // 箭塔防守：环形布置 6 个箭塔（六方向 60° 间隔），
+    // 须等箭塔科技研发完成后才建造。
     if (arrowTowerTechnologyReady &&
-        CountBuilding(BUILDING_ARROWTOWER) < 8 && info.Stone >= 150) {
+        CountBuilding(BUILDING_ARROWTOWER) < 4 && info.Stone >= 150) {
       TryBuild(ai, BUILDING_ARROWTOWER);
     }
     if (!HasBuilding(BUILDING_ARMYCAMP)) {
@@ -2209,7 +2219,7 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     if (HasBuilding(BUILDING_MARKET)) {
       // 农场数量不超过村民数量的三分之一，避免过早扩张。
       const int villagerCount = static_cast<int>(info.farmers.size());
-      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 5) {
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 3) {
         TryBuild(ai, BUILDING_FARM);
       }
     }
@@ -2225,8 +2235,12 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 建成市场后优先研发木材加工（伐木效率 +50%），加快木头积累。
     if (HasBuilding(BUILDING_MARKET))
       TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
-    ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
-                 BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
+    // 棍棒兵升级（→刀斧兵）：放到进入青铜时代后再研发，
+    // 工具时代把资源优先用于升时代与建筑。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
+      ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
+                   BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
+    }
     // 驯养动物（农场食物 +75）：4 块以上农场才划算，避免前期浪费食物。
     if (CountBuilding(BUILDING_FARM) >= 4)
         TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
@@ -2531,19 +2545,24 @@ static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
 
 // 返回敌方兵种的攻击射程（单位：地图格）；近战兵种返回 2。
 // 用途：判断攻击祭司的敌人是否已进入其有效射程。
+// 数值取自 config.json 的 DIS_* 配置；多级兵种取较大值以保证安全裕度。
 static int EnemyAttackRange(int armySort)
 {
     switch (armySort)
     {
     case AT_STONE_THROWER:
-        return 10;
-    case AT_COMPOSITE_BOWMAN:
+    case AT_SHIP:
+        return 10;  // DIS_STONE_THROWER / DIS_SHIP
     case AT_CHARIOT_ARCHER:
+    case AT_COMPOSITE_BOWMAN:
+    case AT_IMPROVED:  // 改良弓兵：1 级 6 格、2 级 7 格，取 7
         return 7;
     case AT_BOWMAN:
         return 5;
+    case AT_SLINGER:
+        return 4;   // DIS_SLINGER
     default:
-        return 2;  // 近战
+        return 2;   // 近战（DIS 为 0，留 2 格贴身裕度）
     }
 }
 
@@ -2587,6 +2606,39 @@ static void ManagePriest(UsrAI *ai)
             }
         }
     }
+    // 【诊断】记录祭司周围威胁与拦截原因（节流 100 帧），用于定位"被打不逃"。
+    {
+        static int lastPriestLogFrame = 0;
+        if (g_frame - lastPriestLogFrame >= 100)
+        {
+            lastPriestLogFrame = g_frame;
+            int near10 = 0;
+            int targeting = 0;
+            int minDis = 9999;
+            for (const tagArmy &e : info.enemy_armies)
+            {
+                if (e.Blood <= 0)
+                    continue;
+                const int d = BlockDis(priest->BlockDR, priest->BlockUR,
+                                       e.BlockDR, e.BlockUR);
+                if (d <= 10)
+                    near10++;
+                if (e.WorkObjectSN == priest->SN)
+                    targeting++;
+                if (d < minDis)
+                    minDis = d;
+            }
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "[PRIEST] f=%d hp=%d/%d pos=(%d,%d) near10=%d target=%d "
+                     "minDis=%d convAlive=%d",
+                     g_frame, priest->Blood, priest->MaxBlood, priest->BlockDR,
+                     priest->BlockUR, near10, targeting, minDis,
+                     (int)conversionTargetAlive);
+            AiDebugLog(buf);
+        }
+    }
+
     // 转换进行中保持关系，不追加移动或改派目标，避免打断既有转换。
     if (conversionTargetAlive)
         return;
@@ -2643,21 +2695,33 @@ static void ManagePriest(UsrAI *ai)
     if (priestSafeSinceFrame == USR_INVALID_FRAME)
         priestSafeSinceFrame = g_frame;
 
-    // 祭司攻击距离 12 格（远程施法），Core 会让它在射程边缘施法，无需贴身；
-    // 生存由撤退逻辑（被敌人攻击且进入其射程时撤退）与诱饵机制保障。
+    // 只在视野内没有敌人时才治疗（有敌人时祭司专注转换，保持战斗准备）。
+    bool enemyVisible = false;
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.Blood > 0)
+        {
+            enemyVisible = true;
+            break;
+        }
+    }
+    if (!enemyVisible)
+    {
+        TryPriestHeal(ai, *priest);
+        return;
+    }
+
+    // 有敌人：选择转换目标（攻击距离 12 格，远程施法无需贴身）。
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
     const tagBuilding *buildingTarget = nullptr;
     if (!armyTarget && g_frame >= 30000)
         buildingTarget = FindEnemySiege(*priest);
     const int targetSN = armyTarget ? armyTarget->SN : (buildingTarget ? buildingTarget->SN : -1);
 
-    // 有可转化目标且不在冷却时转化；否则（无目标或冷却中）治疗受伤友军。
+    // 没有可转化目标或转换在冷却中时待命，不改为治疗。
     if (targetSN == -1 || priest->ConvertCooldown > 0 ||
         priestMoveOrderId != -1)
-    {
-      TryPriestHeal(ai, *priest);
-      return;
-    }
+        return;
     // 后期依然保留转化技能（不再设置时间截止）。
 
     // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
@@ -3430,7 +3494,7 @@ void UsrAI::processData()
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
     ManageOffensiveArmy(this);
-    AssignFarmerSelfDefense(this);
+    // AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
