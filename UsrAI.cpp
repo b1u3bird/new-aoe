@@ -34,18 +34,76 @@ static const int USR_BUILD_ORDER_INTERVAL = 100;
 ;
 // 同一生产通道没有收到异步结果时，允许恢复的超时帧数。
 static const int USR_PRODUCTION_ORDER_TIMEOUT = 300;
+// 研发订单回执的兜底超时。正常情况下 Core 在 1 帧内写入 info.ins_ret
+// （Core.cpp:1466 的 insertInsRet 对成功与失败都会写），该超时只是防止
+// 回执意外丢失时通道被永久占住；触发时的重试间隔也由它决定。
+static const int USR_TECH_ORDER_TIMEOUT = 60;
+// 研发下单时保留的食物余量：科技不应把食物吃光而挤掉造兵与造农民。
+static const int USR_TECH_FOOD_RESERVE = 60;
 // 调试面板状态输出间隔，避免逐帧刷屏。
 ;
 // 祭司转换或移动指令的最小发送间隔，单位为游戏帧。
 static const int USR_PRIEST_ORDER_INTERVAL = 20;
 // 祭司危险判定半径，单位为地图格。
 static const int USR_PRIEST_DANGER_RADIUS = 9;
+// 祭司转换中允许放弃转换、优先逃跑的判据：
+// 已进入自身射程的攻击者数量达到该值，或血量不高于该百分比（%）。
+// 祭司全场唯一、近战与远程防御都是 0、受伤后没有任何恢复手段，被打死
+// 即等于输（获胜路径只有它去转换敌方攻城武器厂），所以转换不能无条件优先。
+static const int USR_PRIEST_CONVERSION_BREAK_THREATS = 2;
+static const int USR_PRIEST_CONVERSION_BREAK_HP_PCT = 50;
+// 「正在挨打」状态的保持帧数：最后一次掉血后仍视为危险这么久，
+// 避免伤害间隔较长时状态在危险/安全之间抖动。
+static const int USR_PRIEST_HURT_HOLD_FRAMES = 150;
+// 祭司血量低于该百分比（%）即视为危险状态。
+// 祭司不能自愈（Core 禁止对自己/友军用 HumanAction 建立攻击关系），血量单向
+// 下降，所以"血量已经很低"与"正在掉血"同等危险 —— 只看掉血瞬间会漏掉
+// "血量停在低值、下一帧就可能被打死"的状态。
+static const int USR_PRIEST_LOW_HP_PCT = 40;
+// 祭司治疗目标的最大距离（格，欧氏）。
+// 原实现不限距离：只要图上有伤兵，祭司就会横穿全图去治，这是它长期离开基地的
+// 主要原因（实测某局它跑到离市镇中心 30 格处待机，援军与箭塔都够不到）。
+static const int USR_PRIEST_HEAL_RADIUS = 12;
+// 第三波时间点（enemyai.cpp 的 TAT = 21000）。在此之前，视野内没有敌人时
+// 祭司留在基地：它只有 100 血、近战与远程防御都是 0、且不能自愈，
+// 待在基地的箭塔覆盖圈里最安全。
+static const int USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
+// 总攻阶段起始帧：此后祭司进入「只保存实力」状态 —— 不再转换、不再治疗，
+// 视野内没有敌人时留在基地。
+// 祭司只有 100 血、近战与远程防御都是 0、不能自愈且不可补充（兵种列表里没有
+// 第二个），总攻期间让它待在箭塔覆盖圈里，比跟部队出去换血更稳。
+static const int USR_PRIEST_PASSIVE_FRAME = 30000;
+// 挨打时触发撤退的敌人搜索半径（格，欧氏）。
+// 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
+// （tE2=82 对阈值 81），而锁定祭司的近战兵从 10~20 格外走过来。
+static const int USR_PRIEST_HURT_THREAT_RADIUS = 14;
+// closeThreat 兜底的搜索半径（格，欧氏）。用于「有敌人锁定祭司、但都还没进
+// 各自射程、祭司也尚未掉血」的情形：此时原逻辑算出 closeThreat == nullptr，
+// 撤退点无从计算，导致 mustBreakConversion 成立却走不掉（实测 lock=4 时
+// 祭司仍原地转换 200 帧）。
+// 设上限是因为敌方 AI 选目标不分距离，锁定祭司的敌人可能在 70 格外
+// （实测 tManh=71），为这种远处锁定逃跑没有意义。
+static const int USR_PRIEST_LOCK_THREAT_RADIUS = 30;
+// 祭司撤退指令的强制重发间隔。原先的重发还要求「上一张订单已结算」，
+// 实测该条件会让一次撤退指令下达后 637 帧发不出新指令。
+static const int USR_PRIEST_RETREAT_REISSUE_FRAMES = 100;
+// 祭司距市镇中心多近算「已经在基地范围」，单位：格。
+// 在此范围内不再「退向中心」（那是原地不动），改为绕到中心相对威胁的另一侧。
+static const int USR_PRIEST_HOME_RADIUS = 12;
+// 专职侦测敌方基地的侦察骑兵的生产时间点。
+// 此前（35000 帧起）生产的侦察兵执行「视野内出现敌人即撤回市镇中心」的
+// 保命策略，不承担基地侦测；这一帧之后再补 1 个专门负责侦测敌方基地的。
+static const int USR_SCOUT_RECON_FRAME = 40000;
 // 箭塔建筑候选点相对中心的目标距离，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_RADIUS = 18;
 // 建筑候选点距离地图边界的最小安全边距，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
 // 表示尚未发生过相关事件的哨兵帧值。
 static const int USR_INVALID_FRAME = -1000000000;
+// 人口硬上限（Development.h:134 的 humanNum_Top）。
+// info.Human_MaxNum 导出的是 min(房屋数 × HOUSE_HUMAN_NUM, 该值)，
+// 所以只有房屋补够之后它才可能等于 50。
+static const int USR_HUMAN_NUM_CAP = 50;
 
 // 我方军队 SN 到当前锁定敌方目标 SN 的映射。
 static map<int, int> currentTarget;
@@ -75,6 +133,14 @@ static map<int, int> scoutEmergencyOrderId;
 static map<int, pair<int, int>> scoutEmergencyTarget;
 static map<int, int> scoutDangerLastFrame;
 static map<pair<int, int>, int> scoutFrontierVisitFrame;
+// 侦察骑兵分工：true = 专责侦测敌方基地（遇敌不撤，压向前沿）；
+// false = 谨慎型（勾引敌人后撤回市镇中心，把追兵引进基地火力圈）。
+// 角色在首次看到该侦察兵时按当时帧号确定，之后不再改变。
+static map<int, bool> scoutIsRecon;
+// 谨慎型侦察兵最近一次主动攻击过的敌人 SN。
+// 用途：攻击关系只需建立一次（敌方反击锁只有目标死亡才解除），
+// 记录后避免每帧重复下达攻击指令而挤掉撤回基地的移动指令。
+static map<int, int> scoutLuredTarget;
 // 第三波结束后是否已经进入侦察任务，以及是否发现敌方基地。
 static bool enemyBaseDiscovered = false;
 // 敌方基地信息（供进攻与箭塔朝向复用，需在建造逻辑之前定义）。
@@ -158,6 +224,13 @@ static int offensiveAttackStartFrame = USR_INVALID_FRAME;
 static int priestSafeSinceFrame = USR_INVALID_FRAME;
 // 当前祭司移动指令的异步指令 ID，-1 表示没有等待中的指令。
 static int priestMoveOrderId = -1;
+// 最近一次祭司移动指令的回执码，以及回执帧。
+// 用途：HumanMove 只是把指令入队（AI::AddToIns 同步返回 id），是否真的建立
+// 移动关系要看 Core 的返回码——Core_List::addRelation 在「旧关系存在且
+// respondConduct == false」时返回 ACTION_INVALID_ISNTFREE（Core_List.cpp:332），
+// 此时祭司原地不动，而 AI 侧原本完全看不到。
+static int priestMoveLastRet = -999;
+static int priestMoveLastRetFrame = USR_INVALID_FRAME;
 // 攻击祭司的敌人 SN → 被派去转移其仇恨的诱饵单位 SN（每个威胁各配一个诱饵）。
 static map<int, int> priestDecoyByThreat;
 // 当前祭司撤退或防守目标的地图格坐标。
@@ -168,6 +241,17 @@ static int priestEmergencyTargetFrame = USR_INVALID_FRAME;
 static int priestDangerLastFrame = USR_INVALID_FRAME;
 // 最近一次触发祭司危险状态的敌方单位 SN。
 static int priestDangerTargetSN = -1;
+// 祭司挨打检测：上一次观察到的血量与观察帧。
+static int priestLastBlood = -1;
+static int priestLastBloodFrame = USR_INVALID_FRAME;
+// 最近一次观察到祭司掉血的帧。「正在挨打」= 距该帧不超过保持窗口。
+static int priestHurtLastFrame = USR_INVALID_FRAME;
+// 最近一次农民自毁指令的订单 ID、目标农民 SN、以及发起时该农民的血量。
+// 用途：下单只代表「指令入队」，回执才代表 Core 接受了；靠它把
+// [SACRIFICE-RET] 与 [SACRIFICE] 对上。
+static int sacrificeOrderId = -1;
+static int sacrificeFarmerSN = -1;
+static int sacrificeHpBefore = -1;
 // 下一个建筑候选位置在候选数组中的索引。
 static int buildCandidateIndex = 0;
 // 兵营建造指令的异步指令 ID，-1 表示没有等待中的指令。
@@ -188,8 +272,21 @@ static int researchedTechCount = 0;
 // 各兵种科技的研发订单 ID（-1 表示无 pending）。
 static int clubmanUpgradeOrderId = -1;
 static int broadswordUpgradeOrderId = -1;
-// 解锁兵力上限所需研发完成的兵种科技数量（棍棒兵升级、阔剑兵）。
-static const int TOTAL_REQUIRED_TECH = 2;
+// 研发订单 ID → 下单帧。Core::logActionResult 只把「成功」指令写入
+// info.ins_ret， 被拒绝的指令不会留下任何结果，因此不能仅凭 orderId != -1
+// 判断在途， 必须配合下单帧做超时判定，否则该研发通道会永久卡死。
+static map<int, int> techOrderFrame;
+// 最近一次结算的研发指令结果码与帧号（-1 表示超时判定为被 Core 拒绝）。
+static int lastTechRet = -1;
+static int lastTechFrame = USR_INVALID_FRAME;
+// 仓库三项科技的串行推进游标与在途订单。
+// 同帧并发下单会被 Core 拒绝（见 ResearchTechQueue 注释）。
+static int stockTechCursor = 0;
+static int stockTechOrderId = -1;
+// 解锁兵力上限与总攻所需研发完成的兵种科技数量。
+// 只统计用 ResearchTech 追踪的科技（当前仅「升级为阔剑」——阔剑兵全面
+// 优于斧头兵且更便宜，故跳过「升级为战斧」）。
+static const int TOTAL_REQUIRED_TECH = 1;
 // 谷仓「研发:建造箭塔」是否已完成（完成后才允许建造箭塔）。
 // 判断方式：观察到谷仓 Project == BUILDING_GRANARY_ARROWTOWER（研发中），
 // 之后 Project 回到空闲即视为研发完成。
@@ -197,6 +294,10 @@ static bool arrowTowerTechnologyReady = false;
 static bool arrowTowerTechSeenRunning = false;
 // 首次尝试发起箭塔研发的帧，用于长时间未启动时兜底放行。
 static int arrowTowerTechStartFrame = USR_INVALID_FRAME;
+// 后勤研究（兵营单位人口占用 1 → 0.5）是否已完成。
+// 判定同箭塔研发：观察到兵营 Project 进入该研发，之后离开即视为完成。
+static bool logisticsReady = false;
+static bool logisticsSeenRunning = false;
 // 最近一次兵营建造指令的返回结果。
 static int armyCampResult = ACTION_SUCCESS;
 // 最近一次棍棒兵生产指令的返回结果。
@@ -695,8 +796,14 @@ static int FindThreatToPriestSN(int priestSN)
             continue;
         int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                              enemy.BlockDR, enemy.BlockUR);
-        // 检测祭司 6 格内的敌人，派兵主动保护，避免转换时被近身击杀。
-        if (dis2 < 6 * 6 && dis2 < bestDis2)
+        // 派兵主动保护祭司的触发半径，取 USR_PRIEST_HURT_THREAT_RADIUS（14 格）。
+        // 原先是写死的 6 格，比实际交战距离还小——祭司转换距离 12 格、敌方远程
+        // 射程 7~10 格、骑兵速度是祭司的两倍，等敌人进到 6 格时军队已经来不及
+        // 赶到（实测 priestThreatSN 绝大多数采样都是 -1，全军根本不会来救）。
+        // 代价：祭司附近有敌人时全军会被拉过去，基地正面防守变薄；但祭司是唯一
+        // 的获胜路径且不可补充，这个代价应当付。
+        if (dis2 < USR_PRIEST_HURT_THREAT_RADIUS * USR_PRIEST_HURT_THREAT_RADIUS &&
+            dis2 < bestDis2)
         {
             bestDis2 = dis2;
             bestSN = enemy.SN;
@@ -919,18 +1026,27 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
         weight[1] += 8;
     }
 
+    // 人口接近上限且仍需补房屋时临时加木权：房屋每间 30 木、+4 人口，
+    // 木头不足会导致人口卡死、军队无法扩充（实测人口会停在 28~32）。
+    // 只在真正需要时抬高，平时不干扰食物采集。
+    if (info.Human_Num + 2 >= info.Human_MaxNum &&
+        !HasIncompleteBuilding(BUILDING_HOME))
+      weight[1] += 10;
+
     // 核心建筑齐备后全力食物：这一阶段食物是持续消耗（产兵/升时代），
     // 木头已不再是大头，把农民从伐木转回食物。
     if (HasBuilding(BUILDING_MARKET) && HasBuilding(BUILDING_STABLE) &&
         HasBuilding(BUILDING_RANGE))
       weight[0] += 5;
 
-    // 黄金：后勤/阔剑兵需要黄金，缺黄金时补充（采够 100
-    // 就停，避免挤占食物农民）。
-    if (info.Gold < 100)
+    // 黄金：进入青铜时代后才采集。工具时代没有黄金消耗（金系兵种与科技
+    // 都在青铜时代），提前采金只会挤占升时代所需的食物与木头。
+    // 阈值 500 用于覆盖阔剑兵(15/个 × 12) 与复合弓兵(20/个 × 12) 的持续消耗。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE && info.Gold < 500)
       weight[3] += 6;
 
-    // 石头：造箭塔需要石头（每个 150），箭塔未满 6 个时高权重采石。
+    // 石头：造箭塔需要石头（每个 150），仅在箭塔未满 4 个时高权重采石；
+    // 箭塔建满后石头无其他用途，停止采集把农民让给食物/木头/黄金。
     if (CountBuilding(BUILDING_ARROWTOWER) < 4)
       weight[2] += 12;
 
@@ -1114,6 +1230,23 @@ static void ProcessPendingGatherOrders()
         researchedTechCount = 0;
         clubmanUpgradeOrderId = -1;
         broadswordUpgradeOrderId = -1;
+        techOrderFrame.clear();
+        lastTechRet = -1;
+        lastTechFrame = USR_INVALID_FRAME;
+        stockTechCursor = 0;
+        stockTechOrderId = -1;
+        priestLastBlood = -1;
+        priestLastBloodFrame = USR_INVALID_FRAME;
+        priestHurtLastFrame = USR_INVALID_FRAME;
+        priestEmergencyTarget = make_pair(-1, -1);
+        priestEmergencyTargetFrame = USR_INVALID_FRAME;
+        priestMoveLastRet = -999;
+        priestMoveLastRetFrame = USR_INVALID_FRAME;
+        scoutIsRecon.clear();
+        scoutLuredTarget.clear();
+        sacrificeOrderId = -1;
+        sacrificeFarmerSN = -1;
+        sacrificeHpBefore = -1;
         priestDecoyByThreat.clear();
     }
     farmerResourceStateFrame = g_frame;
@@ -1526,10 +1659,16 @@ static pair<int, int> GetBuildCandidate(int buildingType)
     // 敌方波次以追击祭司/最近的农民为目标，来向不固定，因此均匀覆盖全向。
     if (buildingType == BUILDING_ARROWTOWER)
     {
-        // [圈层][方向][xy]：主圈约 9 格，近圈约 7 格，远圈约 12 格。
+        // [圈层][方向][xy]：近圈 6 格、主圈 9 格、远圈 12 格。
+        //
+        // 近圈放最前且压到 6 格：箭塔射程只有 7 格（DIS_ARROWTOWER），
+        // 建在 9 格处距中心 9 > 7，中心本身反而打不到，中心外半径 2 格内
+        // 成了盲区 —— 而祭司平时就待在中心旁，正好落在盲区里挨打而无人掩护。
+        // 6 格 < 7 格，前 4 座塔（循环从 ring 0 起、每个 ring 先试完四个方向，
+        // 所以最早 4 座都在同一圈）就能把中心和祭司的待机位置罩住。
         static const int TOWER_RINGS[3][4][2] = {
+            {{0, -6}, {6, 0}, {0, 6}, {-6, 0}},
             {{0, -9}, {9, 0}, {0, 9}, {-9, 0}},
-            {{0, -7}, {7, 0}, {0, 7}, {-7, 0}},
             {{0, -12}, {12, 0}, {0, 12}, {-12, 0}}};
         // 按已有箭塔数量错开起始方向，保证新塔依次填满不同方向。
         const int startDir = CountBuilding(BUILDING_ARROWTOWER) % 4;
@@ -1890,17 +2029,41 @@ static void TryBuildReturnDepot(UsrAI *ai)
     lastBuildOrderFrame = g_frame;
 }
 
-// 检查单个科技研发订单结果，研发成功则计数。
-static void CheckTechOrder(int &orderId)
-{
-    if (orderId == -1)
-        return;
-    map<int, int>::const_iterator result = info.ins_ret.find(orderId);
-    if (result == info.ins_ret.end())
-        return;
-    if (result->second == ACTION_SUCCESS)
-        researchedTechCount++;
+// 检查单个科技研发订单结果。
+// 返回值：本次是否收到 ACTION_SUCCESS（供串行游标判断能否推进到下一项）。
+//
+// 关键：Core::logActionResult 在 ret != ACTION_SUCCESS 时直接 return
+// （Core.cpp:933），失败指令不会在 info.ins_ret 留下任何记录。若只判断
+// 「orderId != -1 即在途」，一次被拒绝的下单就会让该研发通道永久阻塞。
+// 因此这里配合 techOrderFrame
+// 做超时判定：超时未见到结果即视为被拒绝并放行重试。
+static bool CheckTechOrder(int &orderId) {
+  if (orderId == -1)
+    return false;
+
+  map<int, int>::const_iterator result = info.ins_ret.find(orderId);
+  if (result != info.ins_ret.end()) {
+    const bool success = result->second == ACTION_SUCCESS;
+    if (success)
+      researchedTechCount++;
+    lastTechRet = result->second;
+    lastTechFrame = g_frame;
+    techOrderFrame.erase(orderId);
     orderId = -1;
+    return success;
+  }
+
+  map<int, int>::const_iterator ordered = techOrderFrame.find(orderId);
+  if (ordered != techOrderFrame.end() &&
+      g_frame - ordered->second < USR_TECH_ORDER_TIMEOUT)
+    return false; // 仍在途，继续等待
+
+  // 超时仍未收到结果 → 判定为被 Core 拒绝（前置/资源/占用不满足）。
+  lastTechRet = -1;
+  lastTechFrame = g_frame;
+  techOrderFrame.erase(orderId);
+  orderId = -1;
+  return false;
 }
 
 // 研发科技：处理旧结果 + 空闲时下单（记录订单 ID 以便追踪研发完成）。
@@ -1913,6 +2076,56 @@ static void ResearchTech(UsrAI *ai, int &orderId, int buildingType, int action)
     if (!building)
         return;
     orderId = ai->BuildingAction(building->SN, action);
+    if (orderId != -1)
+      techOrderFrame[orderId] = g_frame;
+}
+
+// 串行研发：同一建筑上的多项科技必须逐项下单。
+//
+// Core_List::addRelation(object1, evenType, actNum) 要求
+// !relate_AllObject[object1].isExist（Core_List.cpp:416），否则返回
+// ACTION_INVALID_ISNTFREE（Core_List.cpp:447）。而建筑快照的 Project 在
+// 帧内不刷新，所以同帧连发 N 条时 FindReadyBuildingByType 对每次调用都
+// 报告「空闲」，实际只有第一条能建立关系，其余全部被拒绝且结果被丢弃——
+// 表现为「仓库有建筑、资源也够，却始终点不上科技」。
+// cursor 仅在拿到 ACTION_SUCCESS 后前进；被拒绝时停在原项等待重试。
+//
+// techFoodCost / techGoldCost 为各项科技的花费（均可为 NULL 表示不做该项门控）。
+// 传入时在资源不足的情况下不下单：Core 会以 ACTION_INVALID_RESOURCE(20)
+// 拒绝这类指令，虽然能靠超时重试，但与其每 60 帧发一条注定失败的指令，
+// 不如等资源到位再点。食物额外留 USR_TECH_FOOD_RESERVE，避免科技把食物
+// 吃光而挤掉造兵与造农民；黄金不设余量，按实际花费严格门控。
+//
+// 同一个 action 可以在 actions 里出现多次：Core 的科技链每个 action 下挂
+// 若干个节点（如仓库的近战攻击是「工具时代 L1 → 铜器时代 L2」），
+// 再发一次同一 action 就会推进到链上的下一级，这是「进一步研发」的实现方式。
+static void ResearchTechQueue(UsrAI *ai, int buildingType, const int *actions,
+                              const int *techFoodCost, const int *techGoldCost,
+                              int actionCount, int &cursor, int &orderId) {
+  if (orderId != -1) {
+    if (CheckTechOrder(orderId))
+      ++cursor;
+    // 无论成功还是被判失败，本帧都不再下单，下一帧再推进，
+    // 避免在同一帧内重新占用建筑关系表。
+    return;
+  }
+
+  if (cursor >= actionCount)
+    return;
+
+  if (techFoodCost != NULL &&
+      info.Meat < techFoodCost[cursor] + USR_TECH_FOOD_RESERVE)
+    return;
+  if (techGoldCost != NULL && info.Gold < techGoldCost[cursor])
+    return;
+
+  const tagBuilding *building = FindReadyBuildingByType(buildingType);
+  if (!building)
+    return;
+
+  orderId = ai->BuildingAction(building->SN, actions[cursor]);
+  if (orderId != -1)
+    techOrderFrame[orderId] = g_frame;
 }
 
 static bool TryBuildingAction(UsrAI *ai,
@@ -1945,11 +2158,20 @@ static bool TryProduceSoldier(UsrAI *ai,
 
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap)
 {
-    if (nearPopulationCap || info.Meat < 40 || info.Wood < 20)
-        return false;
+  if (nearPopulationCap || info.Meat < 40)
+    return false;
 
+  // 复合弓研发完成后（青铜时代 + 研发窗口）优先产复合弓兵：
+  // 血45/攻5/射程7，全面优于普通弓兵（血35/攻3/射程5），造价 40 食 + 20 金。
+  if (info.civilizationStage != CIVILIZATION_TOOLAGE && g_frame >= 24000 &&
+      info.Gold >= 20)
     return TryBuildingAction(ai, BUILDING_RANGE,
-                             BUILDING_RANGE_CREATE_BOWMAN);
+                             BUILDING_RANGE_CREATE_COMPOSITE_BOWMAN);
+
+  // 科技未就绪时回退普通弓兵（40 食 + 20 木）。
+  if (info.Wood < 20)
+    return false;
+  return TryBuildingAction(ai, BUILDING_RANGE, BUILDING_RANGE_CREATE_BOWMAN);
 }
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
 {
@@ -1957,6 +2179,23 @@ static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap)
     return false;
 
   return TryBuildingAction(ai, BUILDING_STABLE, BUILDING_STABLE_CREATE_SCOUT);
+}
+// 训练阔剑兵：需要「升级为阔剑」科技，造价 35 食物 + 15 黄金。
+// 属性（血70/攻9/近防1）全面优于棍棒兵，且比斧头兵更强更便宜。
+static bool TryProduceBroadsword(UsrAI *ai, bool nearPopulationCap) {
+  if (nearPopulationCap || info.Meat < 35 || info.Gold < 15)
+    return false;
+
+  return TryBuildingAction(ai, BUILDING_ARMYCAMP,
+                           BUILDING_ARMYCAMP_CREATE_BROADSWORD);
+}
+// 训练战车：需要「车轮升级」科技（BUILDING_MARKET_WHEEL_UPGRADE），
+// 造价 40 食物 + 60 木材（不消耗黄金）。速度 4.07，机动性强。
+static bool TryProduceChariot(UsrAI *ai, bool nearPopulationCap) {
+  if (nearPopulationCap || info.Meat < 40 || info.Wood < 60)
+    return false;
+
+  return TryBuildingAction(ai, BUILDING_STABLE, BUILDING_STABLE_CREATE_CHARIOT);
 }
 // 训练方阵兵：需要学院（BUILDING_COLLAGE），造价 60 食物 + 40 黄金。
 static bool TryProduceHoplite(UsrAI *ai, bool nearPopulationCap)
@@ -1979,6 +2218,8 @@ static bool TryProduceSoldier(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceBowman(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceScout(UsrAI *ai, bool nearPopulationCap);
 static bool TryProduceHoplite(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceBroadsword(UsrAI *ai, bool nearPopulationCap);
+static bool TryProduceChariot(UsrAI *ai, bool nearPopulationCap);
 
 // 生产函数指针类型：与 TryProduceFarmer/Soldier/Bowman/Scout 签名一致。
 typedef bool (*ProduceFunc)(UsrAI *, bool);
@@ -1998,46 +2239,96 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   const int bowmanCount = CountArmyBySort(AT_BOWMAN);
   const int scoutCount = CountArmyBySort(AT_SCOUT);
   const int hopliteCount = CountArmyBySort(AT_HOPLITE);
+  const int broadswordCount = CountArmyBySort(AT_BROADSWORDSMAN);
+  const int chariotCount = CountArmyBySort(AT_CHARIOT);
 
   // 每个人种的目标数量；后续可按敌方兵力或时代动态调整。
-  // 农民 18 个：人口硬上限 50，留足人口给军队（15 棍棒 + 15 弓兵 + 8 方阵兵）。
+  // 农民 18 个：人口硬上限 50，留足人口给军队。
   int farmerTarget = 18;
+  // 进入青铜时代后把农民目标压到 5：经济已成型，多余人口全部让给军队。
+  // 这只是「不再补产」——已有农民不会被主动裁掉，只会随战损与
+  // SacrificeExcessFarmers（后勤完成 + 人口顶到 50 后才启动）逐步减少。
+  // 用 != TOOLAGE 而非 == BRONZEAGE，与文件内其它「已升时代」判定保持一致，
+  // 且万一达到铁器时代也不会把目标弹回 18。
+  if (info.civilizationStage != CIVILIZATION_TOOLAGE)
+    farmerTarget = 5;
 
   int armyTarget = 0;
+  int broadswordTarget = 0;
   int bowmanTarget = 0;
   int scoutTarget = 0;
   int hopliteTarget = 0;
+  int chariotTarget = 0;
   if (info.civilizationStage == CIVILIZATION_TOOLAGE) {
     // 升级时代之前只生产农民：士兵会消耗食物并拖慢升时代与经济发展。
     armyTarget = 0;
     bowmanTarget = 0;
     scoutTarget = 0;
   } else {
-    armyTarget = 15;
-    bowmanTarget = 15;
-    scoutTarget = 3;
-    hopliteTarget = 8;  // 方阵兵（血120/攻17/近防5），青铜时代主力
+    // 人口预算：硬上限 50 − 农民 18 = 32 给军队。
+    armyTarget = 12;      // 斧头兵（棍棒兵升级后：血50/攻5），步兵主力
+    broadswordTarget = 0; // 不生产阔剑兵（避免黄金消耗）
+    bowmanTarget = 10;    // 弓兵（远程，克制敌方阔剑兵）
+    // 侦察骑兵：35000 帧后生产 1 个保命型（遇敌即撤回基地，不承担侦测）；
+    // 40000 帧后再补 1 个，由它专职侦测敌方基地（见 DispatchScouts 的角色判定）。
+    scoutTarget = (g_frame >= USR_SCOUT_RECON_FRAME)
+                      ? 2
+                      : ((g_frame >= 35000) ? 1 : 0);
+    // 战车（40食+60木，无金）与少量方阵兵（60食+40金，血120/攻17/近防5）。
+    // 方阵兵作为前排肉盾，只保留 2 个以控制黄金消耗。
+    chariotTarget = 2;
+    hopliteTarget = 2;
   }
   // 敌方阔剑兵近战克制棍棒兵（攻9近防1），转产远程弓兵（阔剑兵远防0）。
   if (CountEnemyBySort(AT_BROADSWORDSMAN) > 0) {
     armyTarget = 0;
     bowmanTarget += 6;
   }
-  // 所有关键科技研发完成后，扩充兵力（40 个，足够推平敌方且不耗尽食物）。
+  // 关键科技研发完成后扩军（仍受人口上限约束，优先高价值兵种）。
   if (researchedTechCount >= TOTAL_REQUIRED_TECH) {
-    armyTarget = 20;
-    bowmanTarget = 20;
+    armyTarget = 16; // 斧头兵扩编
+    broadswordTarget = 0;
+    bowmanTarget = 12;
+    chariotTarget = 4;
+    hopliteTarget = 2;
   }
+  // 「升级为阔剑」科技尚未完成时，阔剑兵无法训练，目标转给棍棒兵兜底，
+  // 避免兵力押注在未解锁的兵种上导致总兵力下降。
+  if (broadswordTarget > 0 && researchedTechCount < TOTAL_REQUIRED_TECH) {
+    armyTarget += broadswordTarget;
+    broadswordTarget = 0;
+  }
+  // 学院未建成时方阵兵无法训练（需要学院），目标转给斧头兵兜底，
+  // 避免兵力押注在尚未解锁的兵种上导致总兵力下降。
+  if (hopliteTarget > 0 && !HasBuilding(BUILDING_COLLAGE)) {
+    armyTarget += hopliteTarget;
+    hopliteTarget = 0;
+  }
+  // 车轮升级需要研发时间（150 食物 + 100 木，40 秒），在此之前战车产不出来；
+  // 用 24000 帧作为研发窗口，窗口内把战车目标转给斧头兵兜底，避免配额空转。
+  if (chariotTarget > 0 && g_frame < 24000) {
+    armyTarget += chariotTarget;
+    chariotTarget = 0;
+  }
+  // 后勤完成后兵营单位人口占用减半（1 → 0.5），斧头兵可养数量翻倍。
+  if (logisticsReady)
+    armyTarget *= 2;
   ProduceIfBelowTarget(ai, nearPopulationCap, farmerCount, farmerTarget,
                        TryProduceFarmer);
-  ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
-                       TryProduceSoldier);
+  // 人口有限，优先生产高价值兵种：方阵兵（血120/攻17）先占人口，
+  // 其次是阔剑兵、弓兵与侦察，最后才是弱小的棍棒兵。
+  ProduceIfBelowTarget(ai, nearPopulationCap, hopliteCount, hopliteTarget,
+                       TryProduceHoplite);
+  ProduceIfBelowTarget(ai, nearPopulationCap, broadswordCount, broadswordTarget,
+                       TryProduceBroadsword);
+  ProduceIfBelowTarget(ai, nearPopulationCap, chariotCount, chariotTarget,
+                       TryProduceChariot);
   ProduceIfBelowTarget(ai, nearPopulationCap, bowmanCount, bowmanTarget,
                        TryProduceBowman);
   ProduceIfBelowTarget(ai, nearPopulationCap, scoutCount, scoutTarget,
                        TryProduceScout);
-  ProduceIfBelowTarget(ai, nearPopulationCap, hopliteCount, hopliteTarget,
-                       TryProduceHoplite);
+  ProduceIfBelowTarget(ai, nearPopulationCap, clubmanCount, armyTarget,
+                       TryProduceSoldier);
 }
 
 // 检测受损建筑，为每个尚无修复者的建筑派一个空闲农民（Core 按修复比例扣资源）。
@@ -2176,11 +2467,14 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         }
     }
 
+    // 人口接近上限时补房屋；上限 12 间（config.h 的「建造房屋(上限:12)」）。
+    // 没有数量上限会导致人口封顶（50 = 12房 + 1中心 ×
+    // 4）后仍持续建房、白扔木头。
     const bool nearPopulationCap = info.Human_Num + 1.9 >= info.Human_MaxNum;
     if (nearPopulationCap && info.Wood >= 30 &&
-        !HasIncompleteBuilding(BUILDING_HOME))
-    {
-        TryBuild(ai, BUILDING_HOME);
+        CountBuilding(BUILDING_HOME) < 12 &&
+        !HasIncompleteBuilding(BUILDING_HOME)) {
+      TryBuild(ai, BUILDING_HOME);
     }
 
     // 建造顺序必须满足 Core 的前置链（否则 LOCK 会占用建造通道死循环）：
@@ -2208,18 +2502,25 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_STABLE);
     }
-    // 学院：青铜时代且马厩已建成后建造，只需一座（用于训练方阵兵）。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
-        HasBuilding(BUILDING_STABLE) && !HasBuilding(BUILDING_COLLAGE)) {
-      if (info.Wood >= 180)
-        TryBuild(ai, BUILDING_COLLAGE);
-    }
+    // 【不再修建】学院：唯一用途是训练方阵兵，但要吃掉 180 木和一座建筑的
+    // 建造时间。停建后 hopliteTarget 会被 ManageWeightedProduction 里的
+    // 「学院未建成时方阵兵无法训练」分支自动转成斧头兵，兵种配额不会空转。
+    // if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
+    //     HasBuilding(BUILDING_STABLE) && !HasBuilding(BUILDING_COLLAGE)) {
+    //   if (info.Wood >= 180)
+    //     TryBuild(ai, BUILDING_COLLAGE);
+    // }
     // 农场只在马厩/靶场建成后建：否则木头会被农场（75木）持续消耗，
     // 永远攒不够马厩/靶场（各150木），导致时代无法升级。
     if (HasBuilding(BUILDING_MARKET)) {
-      // 农场数量不超过村民数量的三分之一，避免过早扩张。
+      // 农场数量上限：
+      //   第三波攻击（f>=21000）之前 = 村民数的三分之一（渐进扩张，不抢木头）；
+      //   第三波之后 = 农民数 - 8（保留 8 个农民负责伐木/采石/采金，
+      //   其余专注食物，此时农场食物已是主要来源）。
       const int villagerCount = static_cast<int>(info.farmers.size());
-      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < villagerCount / 3) {
+      const int farmLimit =
+          (g_frame >= 21000) ? max(0, villagerCount - 8) : villagerCount / 3;
+      if (info.Wood >= 75 && CountBuilding(BUILDING_FARM) < farmLimit) {
         TryBuild(ai, BUILDING_FARM);
       }
     }
@@ -2232,22 +2533,111 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       TryBuildingAction(ai, BUILDING_CENTER, BUILDING_CENTER_UPGRADE);
     }
     // 箭塔研发已在建造序列之前处理（见上方 arrowTowerTechnologyReady 逻辑）。
-    // 建成市场后优先研发木材加工（伐木效率 +50%），加快木头积累。
+    //
+    // 市场科技的调用顺序就是优先级：同一帧内 Core 只接受一条建筑关系
+    // （Core_List::addRelation 要求 !relate_AllObject[build].isExist），
+    // 排在前面的那条才能抢到市场。
+    //
+    // 金矿开采排在最前：黄金是后期瓶颈（方阵兵 40 金/个），采金 +60% 且搬运
+    // +3。 放到最前是为了确保它真的被研发——此前它排在车轮升级与「工艺」之后，
+    // 只要那两项处于可研发状态就永远轮不到它。
+    // 门控仍在第三波（f>=21000 = enemyai.cpp 的 TAT）之后：成本 120 食物 + 100
+    // 木， 前期研发会抽干升时代与建军所需资源（实测会让食物与木头同时归零）。
+    if (HasBuilding(BUILDING_MARKET) && g_frame >= 21000)
+      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_GOLD_UPGRADE);
+    // 车轮升级（战车科技）：解锁战车/战车弓箭手（战车 40 食 + 60 木、无黄金），
+    // 并让村民移速 +30%，采集与搬运同时受益。成本 100 木 + 150 食物。
+    // 排在木材加工之前是安全的：工具时代它因时代不足返回 ACTION_INVALID_
+    // BUILDACT_LOCK，而 Core 的 LOCK 分支在设置建筑关系之前就 return
+    // （Core_List.cpp:427-428），不占用市场，木材加工照常研发；到青铜时代时
+    // 木材加工必然已完成，这里实际只是把「工艺」（木材加工链的第二个节点，
+    // 150 木 + 170 食物）往后排一个 40 秒的研发周期。
+    if (HasBuilding(BUILDING_MARKET) &&
+        info.civilizationStage != CIVILIZATION_TOOLAGE)
+      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WHEEL_UPGRADE);
+    // 木材加工（工具时代，75 木 + 120 食物）→
+    // 工艺（青铜时代，链上第二个节点）。
     if (HasBuilding(BUILDING_MARKET))
       TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
-    // 棍棒兵升级（→刀斧兵）：放到进入青铜时代后再研发，
-    // 工具时代把资源优先用于升时代与建筑。
+    // 升级为复合弓（青铜时代）：解锁复合弓兵（血45/攻5/射程7），
+    // 全面优于普通弓兵且射程与敌方远程单位对等。成本 180 食物 + 100 木。
+    if (HasBuilding(BUILDING_RANGE) &&
+        info.civilizationStage != CIVILIZATION_TOOLAGE)
+      TryBuildingAction(ai, BUILDING_RANGE,
+                        BUILDING_RANGE_UPGRADE_COMPOSITE_BOW);
+    // 棍棒兵升级（→斧头兵）：进入青铜时代后研发（血50/攻5）。
+    // 与「升级为阔剑」并行推进，尽早提升现有棍棒兵的战力。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
       ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
                    BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
     }
-    // 驯养动物（农场食物 +75）：4 块以上农场才划算，避免前期浪费食物。
-    if (CountBuilding(BUILDING_FARM) >= 4)
-        TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
-    // 青铜时代的兵种科技升级：阔剑兵。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
-      ResearchTech(ai, broadswordUpgradeOrderId, BUILDING_ARMYCAMP,
-                   BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
+    // 农田升级链：驯养动物（工具时代，200 食 + 50 木）→ 犁（铜器时代，250 食 +
+    // 75 木）， 两级都让农场储量上限 +75（Development.cpp:310-318，合计
+    // +150）。 整条链推迟到铜器时代之后再开始：
+    //   · 工具时代的市场时间让给木材加工（伐木 +50%），那才是经济瓶颈；
+    //   · 驯养动物的 200 食物会挤占升时代所需的 800 食物。
+    // 4 块以上农场才划算（农场太少回不了本）。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
+        CountBuilding(BUILDING_FARM) >= 4)
+      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
+    // 【跳过】升级为阔剑：改以「斧头兵」（棍棒兵升级，血50/攻5、仅耗食物）
+    // 作为步兵主力，避免阔剑兵的黄金消耗（15 金/个 + 研发 50 金）。
+    // if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
+    //   ResearchTech(ai, broadswordUpgradeOrderId, BUILDING_ARMYCAMP,
+    //                BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
+    // }
+    // 后勤研究（兵营单位人口占用 1 → 0.5）：青铜时代后研发。
+    // 减半后兵营单位（斧头兵）可养数量直接翻倍，是后期爆兵的关键。
+    // 追踪完成状态，供兵力目标翻倍判断使用。
+    if (!logisticsReady) {
+      const tagBuilding *camp = FindBuildingByType(BUILDING_ARMYCAMP, true);
+      if (camp != nullptr) {
+        if (camp->Project == BUILDING_ARMYCAMP_RESEARCH_LOGISTICS)
+          logisticsSeenRunning = true; // 研发进行中
+        else if (logisticsSeenRunning)
+          logisticsReady = true; // 研发结束 → 人口减半已生效
+        else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
+          TryBuildingAction(ai, BUILDING_ARMYCAMP,
+                            BUILDING_ARMYCAMP_RESEARCH_LOGISTICS);
+      }
+    }
+    // 仓库科技，五项逐项串行下单。考察点的链每个 action 下挂两个节点
+    // （Development.cpp:535-559）：工具时代 L1 → 铜器时代 L2；再发一次同一
+    // action 即推进到链上下一级，所以数组里把 USETOOL / DEFENSE_INFANTRY
+    // 各出现两次，第二遍就是「进一步研发」（各再 +2）。
+    //
+    //   1. 近战攻击 +2        100 食
+    //   2. 步兵护甲 +2         75 食
+    //   3. 弓兵护甲 +2        100 食
+    //   4. 近战攻击再 +2      200 食 + 120 金   ← 进一步研发
+    //   5. 步兵护甲再 +2      100 食 +  50 金   ← 进一步研发
+    //
+    // 门控不用固定帧号，改用「已过升时代 + 资源够点下一项」：
+    // 实测食物峰值出现在 f≈12000（600+，此时仍在攒升时代的 800 食物）
+    // 与后期兵力目标饱和之后（700+）；原先写死的 g_frame >= 21000 恰好
+    // 落在升时代扣掉 800 食物之后的最低谷（30~100），第一项就要 100 食物，
+    // 于是整局都点不上（日志中 Core 持续返回 20 = ACTION_INVALID_RESOURCE）。
+    // 要求进入青铜时代，是为了不挤占升时代所需的 800 食物。
+    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
+        HasBuilding(BUILDING_STOCK)) {
+      static const int kStockTechs[5] = {
+          BUILDING_STOCK_UPGRADE_USETOOL,
+          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY,
+          BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER,
+          BUILDING_STOCK_UPGRADE_USETOOL,
+          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY};
+      static const int kStockTechFood[5] = {
+          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
+          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_FOOD,
+          BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
+          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD,
+          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_FOOD};
+      static const int kStockTechGold[5] = {
+          0, 0, 0,
+          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD,
+          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_GOLD};
+      ResearchTechQueue(ai, BUILDING_STOCK, kStockTechs, kStockTechFood,
+                        kStockTechGold, 5, stockTechCursor, stockTechOrderId);
     }
     ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
@@ -2278,30 +2668,86 @@ static pair<double, double> GetPriestEmergencyPoint(
     const tagArmy &priest,
     const tagArmy &threat)
 {
+    // 退向市镇中心，而不是「远离威胁的方向」。
+    //
+    // 原因：祭司移速 2.033，追它的骑兵 / 战车 / 战车弓兵都是 4.066，快一倍，
+    // 单靠"跑"甩不掉任何追兵；唯一有意义的方向是退进基地的箭塔与部队火力圈，
+    // 让追兵在够到祭司之前先承伤。而且 FindThreatToPriestSN 派出的援军也集中在
+    // 中心附近，往地图边缘跑只会把自己和援军越拉越开。
+    // （原版实现 943f7f7 就是朝中心退 1/3 路程。）
+    const tagBuilding *center = FindCenter();
+    if (center != nullptr)
+    {
+        const int homeDis2 = BlockDis2(priest.BlockDR, priest.BlockUR,
+                                       center->BlockDR, center->BlockUR);
+        if (homeDis2 > USR_PRIEST_HOME_RADIUS * USR_PRIEST_HOME_RADIUS)
+        {
+            // 离基地远 → 先回家，进箭塔与援军的火力圈。
+            const int blockDR = max(1, min(MAP_L - 2, center->BlockDR));
+            const int blockUR = max(1, min(MAP_U - 2, center->BlockUR));
+            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+        }
+
+        // 已经在基地范围 → 绕到中心相对威胁的另一侧。
+        // 注意：此处若仍「退向中心」等于原地不动——祭司平时就待在中心旁，
+        // 目标离自己只有 1 格，实测会站着挨打 600 帧（血量 100→0、pos 不变）。
+        // 箭塔建在距中心 6/9/12 格处（GetBuildCandidate 的 TOWER_RINGS）、
+        // 射程 7 格（DIS_ARROWTOWER）。
+        const int dx = center->BlockDR - threat.BlockDR;
+        const int dy = center->BlockUR - threat.BlockUR;
+        const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
+        const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+        const bool useDR = abs(dx) >= abs(dy);
+        static const int kHomeOffsets[] = {18, 15, 12};
+        for (int i = 0; i < 3; ++i)
+        {
+            int blockDR = center->BlockDR;
+            int blockUR = center->BlockUR;
+            if (useDR)
+                blockDR += stepDR * kHomeOffsets[i];
+            else
+                blockUR += stepUR * kHomeOffsets[i];
+            blockDR = max(1, min(MAP_L - 2, blockDR));
+            blockUR = max(1, min(MAP_U - 2, blockUR));
+            if (IsPriestPointUsable(blockDR, blockUR))
+                return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                                 (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+        }
+        // 三个候选都不可用（边界/海洋/建筑占格）时，守在中心。
+        return make_pair((max(1, min(MAP_L - 2, center->BlockDR)) + 0.5) *
+                             double(BLOCKSIDELENGTH),
+                         (max(1, min(MAP_U - 2, center->BlockUR)) + 0.5) *
+                             double(BLOCKSIDELENGTH));
+    }
+
+    // 市镇中心不存在（被摧毁）时，退回「沿反方向拉开距离」的旧逻辑。
     const int dx = priest.BlockDR - threat.BlockDR;
     const int dy = priest.BlockUR - threat.BlockUR;
     const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
     const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
 
     // 沿祭司与威胁的反方向选点；优先走主轴，避免斜向移动重新贴近敌人。
+    // 两个轴共用同一组距离候选。旧版把它写成 {12,0}/{10,0}/… 的二维表，
+    // 而 else 分支取的是第二列，于是 |dx| < |dy|（敌人主要来自 UR 轴）时
+    // 前四个候选的偏移量全是 0，函数首轮就返回祭司当前格 —— 撤退目标即原地，
+    // 祭司站着挨打不移动（日志中表现为血量下降但 pos 完全不变）。
     const bool useDR = abs(dx) >= abs(dy);
-    const int offsets[][2] = {
-        {12, 0}, {10, 0}, {8, 0}, {6, 0}, {0, 12}, {0, 10}, {0, 8}, {0, 6}};
-    const int offsetCount = sizeof(offsets) / sizeof(offsets[0]);
-    for (int i = 0; i < offsetCount; ++i)
-    {
-        int blockDR = priest.BlockDR;
-        int blockUR = priest.BlockUR;
-        if (useDR)
-            blockDR += stepDR * offsets[i][0];
-        else
-            blockUR += stepUR * offsets[i][1];
+    static const int kDistances[] = {12, 10, 8, 6};
+    const int distanceCount = sizeof(kDistances) / sizeof(kDistances[0]);
+    for (int i = 0; i < distanceCount; ++i) {
+      int blockDR = priest.BlockDR;
+      int blockUR = priest.BlockUR;
+      if (useDR)
+        blockDR += stepDR * kDistances[i];
+      else
+        blockUR += stepUR * kDistances[i];
 
-        blockDR = max(1, min(MAP_L - 2, blockDR));
-        blockUR = max(1, min(MAP_U - 2, blockUR));
-        if (IsPriestPointUsable(blockDR, blockUR))
-            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+      blockDR = max(1, min(MAP_L - 2, blockDR));
+      blockUR = max(1, min(MAP_U - 2, blockUR));
+      if (IsPriestPointUsable(blockDR, blockUR))
+        return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                         (blockUR + 0.5) * double(BLOCKSIDELENGTH));
     }
 
     // 地图边界或地形没有合法反方向格时，保持当前位置，避免向敌人方向乱走。
@@ -2431,11 +2877,37 @@ static int PriestConversionPriority(int armySort);
 // 祭司在安全状态下治疗受伤友军：士兵按兵种优先级优先，同级再按受伤程度；
 // 农民优先级最低，仅在无士兵受伤时才治疗。忽略自身与侦察兵。
 static bool TryPriestHeal(UsrAI *ai, const tagArmy &priest) {
+  // ① 正在治疗的友军未满血 → 保持该治疗关系，不切换目标。
+  // 否则会因「别人伤更重」而在伤员之间反复横跳，谁都治不满。
+  if (priest.WorkObjectSN != -1) {
+    const int curSN = priest.WorkObjectSN;
+    for (const tagArmy &ally : info.armies) {
+      if (ally.SN == curSN && ally.Blood > 0 && ally.MaxBlood > 0) {
+        if (ally.Blood < ally.MaxBlood)
+          return true; // 未满血：继续治疗当前目标
+        break;         // 已满血：换下一个伤员
+      }
+    }
+    for (const tagFarmer &farmer : info.farmers) {
+      if (farmer.SN == curSN && farmer.Blood > 0 && farmer.MaxBlood > 0) {
+        if (farmer.Blood < farmer.MaxBlood)
+          return true;
+        break;
+      }
+    }
+  }
+
+  // ② 没有在治疗中（或目标已满血）→ 按兵种优先级挑选新目标。
   int bestSN = -1;
   int bestPriority = -1;
   double bestRatio = 0.95; // 只治疗血量低于 95% 的单位
   for (const tagArmy &ally : info.armies) {
     if (ally.SN == priest.SN || ally.Blood <= 0 || ally.MaxBlood <= 0)
+      continue;
+    // 太远的伤兵不治：Core 的治疗是「走过去建立关系」，跑一趟会把祭司拽离
+    // 基地（实测它因此跑到离中心 30 格处待机，援军与箭塔都够不到）。
+    if (BlockDis2(priest.BlockDR, priest.BlockUR, ally.BlockDR, ally.BlockUR) >
+        USR_PRIEST_HEAL_RADIUS * USR_PRIEST_HEAL_RADIUS)
       continue;
     const double ratio = double(ally.Blood) / double(ally.MaxBlood);
     if (ratio >= 0.95)
@@ -2453,6 +2925,11 @@ static bool TryPriestHeal(UsrAI *ai, const tagArmy &priest) {
   if (bestSN == -1) {
     for (const tagFarmer &farmer : info.farmers) {
       if (farmer.Blood <= 0 || farmer.MaxBlood <= 0)
+        continue;
+      // 同士兵：太远的不治，避免祭司为了一个远处农民横穿全图。
+      if (BlockDis2(priest.BlockDR, priest.BlockUR, farmer.BlockDR,
+                    farmer.BlockUR) >
+          USR_PRIEST_HEAL_RADIUS * USR_PRIEST_HEAL_RADIUS)
         continue;
       const double ratio = double(farmer.Blood) / double(farmer.MaxBlood);
       if (ratio < bestRatio) {
@@ -2578,7 +3055,14 @@ static void ManagePriest(UsrAI *ai)
         if (result != info.ins_ret.end() ||
             g_frame - priestEmergencyTargetFrame >=
                 USR_PRODUCTION_ORDER_TIMEOUT)
+        {
+            // 记录回执码：0 = 移动关系已建立；非 0（尤其 14 = ISNTFREE）
+            // 说明指令被 Core 拒绝，祭司不会移动。
+            priestMoveLastRet =
+                result != info.ins_ret.end() ? result->second : -1;
+            priestMoveLastRetFrame = g_frame;
             priestMoveOrderId = -1;
+        }
     }
 
     // WorkObjectSN 是 Core 当前关系的目标。转换关系从接近阶段开始就不能
@@ -2639,28 +3123,149 @@ static void ManagePriest(UsrAI *ai)
         }
     }
 
-    // 转换进行中保持关系，不追加移动或改派目标，避免打断既有转换。
-    if (conversionTargetAlive)
-        return;
+    // 检测「正在挨打」：血量比上次观察下降即刷新标记。
+    // 撤退触发不再依赖「敌人是否已把祭司设为攻击目标」——实测锁定祭司的
+    // 多是远在 10~20 格外走过来的近战兵（永远不满足射程条件），而真正开枪
+    // 的远程兵恰好卡在射程阈值边缘（tE2=82 对阈值 81），结果祭司一直掉血
+    // 却从不撤退。直接看血量，才是字面意义上的「被打就跑」。
+    if (priestLastBloodFrame != USR_INVALID_FRAME &&
+        priest->Blood < priestLastBlood)
+      priestHurtLastFrame = g_frame;
+    priestLastBlood = priest->Blood;
+    priestLastBloodFrame = g_frame;
+    const bool priestHurt =
+        priestHurtLastFrame != USR_INVALID_FRAME &&
+        g_frame - priestHurtLastFrame <= USR_PRIEST_HURT_HOLD_FRAMES;
+    // 祭司不能自愈，血量单向下降，「血量已经很低」与「正在掉血」同等危险。
+    // 实测：某局祭司在 f=15500 掉到 10 血后 6500 帧没再掉血，priestHurt 恒为 0，
+    // 撤退与派援军全部不触发，它带着 10 血站在离基地 30 格处直到被打死。
+    const bool priestLowHp =
+        priest->MaxBlood > 0 &&
+        priest->Blood * 100 <= priest->MaxBlood * USR_PRIEST_LOW_HP_PCT;
+    // 撤退 / 派援军用的危险判定：正在掉血 或 血量已经很低。
+    // 转换中断（mustBreakConversion）仍只用 priestHurt —— 若把 lowHp 也算进去，
+    // 血量一旦跌破阈值祭司就永久不再转换了。
+    const bool priestInDanger = priestHurt || priestLowHp;
+    // 总攻阶段：祭司只保存实力，停止转换与治疗，无敌人时留在基地。
+    const bool priestPassive = g_frame >= USR_PRIEST_PASSIVE_FRAME;
 
-    // 撤退：只对「正在攻击祭司」的敌人反应（WorkObjectSN 指向祭司），
-    // 且该敌人已进入自身射程（含 2 格提前量）时才撤；避免被路过或攻击
-    // 其他目标的敌人惊动。
+    // 先统计威胁，再决定转换是否让路（见下方转换判定）。
+    // 常规口径：只对「正在攻击祭司」（WorkObjectSN 指向祭司）且已进入其射程
+    // （含 2 格提前量）的敌人反应，避免被路过或攻击其他目标的敌人惊动。
+    // 挨打口径：正在掉血时改看「附近有没有敌人」，不再要求锁定关系与射程。
     const tagArmy *closeThreat = nullptr;
     int closestDis2 = 1000000000;
+    int closeThreatCount = 0;  // 已进入射程且在攻击祭司的敌人数
+    int targetingCount = 0;    // 已把祭司设为攻击目标的敌人数（不论距离）
+    // 最近的「锁定祭司」的敌人（不论它是否已进射程），用于循环后的兜底。
+    const tagArmy *lockThreat = nullptr;
+    int lockThreatDis2 = 1000000000;
+    const int hurtRadius2 =
+        USR_PRIEST_HURT_THREAT_RADIUS * USR_PRIEST_HURT_THREAT_RADIUS;
     for (const tagArmy &enemy : info.enemy_armies)
     {
-        if (enemy.Blood <= 0 || enemy.WorkObjectSN != priest->SN)
-            continue;  // 未在攻击祭司
+        if (enemy.Blood <= 0)
+            continue;
 
         const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
                                    enemy.BlockDR, enemy.BlockUR);
-        const int range = EnemyAttackRange(enemy.Sort) + 2;
-        if (dis2 <= range * range && dis2 < closestDis2)
-        {
-            closeThreat = &enemy;
-            closestDis2 = dis2;
+        if (enemy.WorkObjectSN == priest->SN) {
+          ++targetingCount;
+          if (dis2 < lockThreatDis2) {
+            lockThreatDis2 = dis2;
+            lockThreat = &enemy;
+          }
+          const int range = EnemyAttackRange(enemy.Sort) + 2;
+          if (dis2 <= range * range) {
+            ++closeThreatCount;
+            if (dis2 < closestDis2) {
+              closeThreat = &enemy;
+              closestDis2 = dis2;
+            }
+            continue;
+          }
         }
+        // 处于危险（正在掉血 或 血量已很低）：任何近处敌人都是威胁
+        // （也用作撤退方向的参照）。
+        if (priestInDanger && dis2 <= hurtRadius2 && dis2 < closestDis2) {
+          closeThreat = &enemy;
+          closestDis2 = dis2;
+        }
+    }
+
+    // 兜底：有敌人锁定祭司、但它们都还没进射程，且祭司尚未进入危险状态时，
+    // closeThreat 会是 nullptr。而 mustBreakConversion 用的是 targetingCount
+    // （不论距离），两条口径不一致 —— 结果「该中断却算不出撤退点」，
+    // 转换照旧进行（实测 lock=4 时祭司仍原地转换 200 帧，lock 一路涨到 4）。
+    // 这里用最近的锁定者补上参照物，让中断判据真正生效。
+    // 半径设上限：敌方选目标不分距离，锁定祭司的敌人可能在 70 格外。
+    if (closeThreat == nullptr && lockThreat != nullptr &&
+        lockThreatDis2 <=
+            USR_PRIEST_LOCK_THREAT_RADIUS * USR_PRIEST_LOCK_THREAT_RADIUS) {
+      closeThreat = lockThreat;
+      closestDis2 = lockThreatDis2;
+    }
+
+    // 【诊断】威胁判定明细，用于定位「祭司被打却不撤」。
+    // 取「正在攻击祭司」的敌人中最近的一个，打印其兵种、撤退判定用的射程、
+    // 以及实际距离的两种度量：mvManh 是日志 [PRIEST] minDis 用的曼哈顿距离，
+    // mvE2 是撤退判定用的欧氏距离平方。两者混用是已知隐患，这里一并暴露。
+    // hasThreat/threat 是最终是否找到威胁、以及已进射程的攻击者数量。
+    {
+        static int lastThreatLogFrame = 0;
+        if (g_frame - lastThreatLogFrame >= 100)
+        {
+            lastThreatLogFrame = g_frame;
+            int tSort = -1, tRng = -1, tManh = -1, tE2 = -1;
+            for (const tagArmy &enemy : info.enemy_armies)
+            {
+                if (enemy.Blood <= 0 || enemy.WorkObjectSN != priest->SN)
+                    continue;
+                tSort = enemy.Sort;
+                tRng = EnemyAttackRange(enemy.Sort) + 2;
+                tManh = BlockDis(priest->BlockDR, priest->BlockUR,
+                                 enemy.BlockDR, enemy.BlockUR);
+                tE2 = BlockDis2(priest->BlockDR, priest->BlockUR,
+                                enemy.BlockDR, enemy.BlockUR);
+                break;
+            }
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "[THREAT] f=%d hp=%d hurt=%d low=%d hasThreat=%d threat=%d lock=%d "
+                     "tSort=%d tRng=%d tRngE2=%d tManh=%d tE2=%d conv=%d "
+                     "mvF=%d mvTgt=(%d,%d) mvRet=%d mvRetF=%d wo=%d ns=%d",
+                     g_frame, priest->Blood, (int)priestHurt,
+                     (int)priestLowHp, closeThreat != nullptr, closeThreatCount,
+                     targetingCount, tSort, tRng,
+                     tRng * tRng, tManh, tE2, (int)conversionTargetAlive,
+                     priestEmergencyTargetFrame, priestEmergencyTarget.first,
+                     priestEmergencyTarget.second, priestMoveLastRet,
+                     priestMoveLastRetFrame, priest->WorkObjectSN,
+                     (int)priest->NowState);
+            AiDebugLog(buf);
+        }
+    }
+
+    // 转换进行中默认保持关系、不追加移动或改派目标，避免打断既有转换。
+    // 例外：遭到围攻或血量过低时放弃转换先保命。原先是无条件 return，
+    // 实测会让祭司在转换中站住不动直到被打死
+    // （日志：[PRIEST] hp 100→58→26→0，pos 全程不变）。
+    if (conversionTargetAlive) {
+      // 判据用 targetingCount（有多少敌人已把祭司设为攻击目标），而不是
+      // closeThreatCount（多少敌人已进入各自射程）。远程兵在 9 格外逐步逼近时
+      // closeThreatCount 长期是 0~1，而 targetingCount 已经是 3~5——等够上
+      // 阈值时祭司往往已经掉了 30+ 血（实测 f=13902~14002 这段白白转换了 200 帧）。
+      // 敌人既然锁定了祭司，就是在杀它的路上，不必等它进射程。
+      const bool mustBreakConversion =
+          priestHurt ||
+          targetingCount >= USR_PRIEST_CONVERSION_BREAK_THREATS ||
+          (priest->MaxBlood > 0 &&
+           priest->Blood * 100 <=
+               priest->MaxBlood * USR_PRIEST_CONVERSION_BREAK_HP_PCT);
+      // closeThreat == nullptr 时算不出撤退点（GetPriestEmergencyPoint
+      // 需要威胁对象），只能继续转换。
+      if (!mustBreakConversion || closeThreat == nullptr)
+        return;
     }
 
     if (closeThreat)
@@ -2674,21 +3279,31 @@ static void ManagePriest(UsrAI *ai)
         const pair<int, int> target = make_pair(
             static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
             static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
-        // ||
-        // g_frame - priestEmergencyTargetFrame >=
-        // USR_PRIEST_ORDER_INTERVAL))
-        if (priestMoveOrderId == -1 &&
-            (target != priestEmergencyTarget))
-        {
-            priestMoveOrderId = ai->HumanMove(priest->SN,
-                                              retreatPoint.first,
-                                              retreatPoint.second);
-            priestEmergencyTarget = target;
-            priestEmergencyTargetFrame = g_frame;
-            lastPriestOrderFrame = g_frame;
+        // 撤退点变化时发指令（按 USR_PRIEST_ORDER_INTERVAL 节流）；
+        // 此外每 USR_PRIEST_RETREAT_REISSUE_FRAMES 帧强制重发一次——
+        // 仅靠「点位变化」判断会导致指令下达后若被中断（移动关系被覆盖、
+        // 寻路失败等），AI 不再重发，祭司站在原地挨打。
+        //
+        // 这里刻意不再要求「上一张订单已结算」（原条件含 priestMoveOrderId
+        // == -1）：实测该订单可能长时间不在 info.ins_ret 结算，导致一次撤退
+        // 指令下达后 637 帧都发不出新指令，而祭司正在持续掉血。
+        const int sinceLastOrder = g_frame - priestEmergencyTargetFrame;
+        const bool targetChanged = target != priestEmergencyTarget;
+        if ((targetChanged &&
+             sinceLastOrder >= USR_PRIEST_ORDER_INTERVAL) ||
+            sinceLastOrder >= USR_PRIEST_RETREAT_REISSUE_FRAMES) {
+          priestMoveOrderId = ai->HumanMove(priest->SN, retreatPoint.first,
+                                            retreatPoint.second);
+          priestEmergencyTarget = target;
+          priestEmergencyTargetFrame = g_frame;
+          lastPriestOrderFrame = g_frame;
         }
         return;
     }
+
+    // 无威胁时清除撤退点记录：否则下次遇到同方向的威胁时，算出的撤退点
+    // 与残留记录相同，会因「点位未变化」而不再下达移动指令。
+    priestEmergencyTarget = make_pair(-1, -1);
 
     // 安全后不再追加移动，避免移动指令反复中止转换关系。
     priestDangerTargetSN = -1;
@@ -2707,9 +3322,51 @@ static void ManagePriest(UsrAI *ai)
     }
     if (!enemyVisible)
     {
+        // 第三波之前没有敌人时，祭司留在基地待机。
+        // 它只有 100 血、近战与远程防御都是 0、且不能自愈，待在基地的箭塔
+        // 覆盖圈里最安全；原先它会在无威胁时自由治疗，被远处伤兵一路带离基地
+        // （实测跑到离市镇中心 30 格处待机，援军半径 14 与箭塔 6/9/12 格圈
+        //  都够不到）。
+        if (priestPassive || g_frame < USR_PRIEST_HOLD_HOME_UNTIL_FRAME)
+        {
+            const tagBuilding *home = FindCenter();
+            if (home != nullptr)
+            {
+                const int homeDis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
+                                               home->BlockDR, home->BlockUR);
+                if (homeDis2 >
+                    USR_PRIEST_HOME_RADIUS * USR_PRIEST_HOME_RADIUS)
+                {
+                    // 节流重发：每 USR_PRIEST_ORDER_INTERVAL 帧最多一次，
+                    // 否则每帧重发会不断 suspendRelation + 重新寻路，反而走不动。
+                    if (g_frame - priestEmergencyTargetFrame >=
+                        USR_PRIEST_ORDER_INTERVAL)
+                    {
+                        priestMoveOrderId = ai->HumanMove(
+                            priest->SN,
+                            (home->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                            (home->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+                        priestEmergencyTarget =
+                            make_pair(home->BlockDR, home->BlockUR);
+                        priestEmergencyTargetFrame = g_frame;
+                        lastPriestOrderFrame = g_frame;
+                    }
+                    return;
+                }
+            }
+        }
+        // 总攻阶段治疗也停用：祭司只保存实力，不做任何会被敌人牵制的行动。
+        if (priestPassive)
+            return;
         TryPriestHeal(ai, *priest);
         return;
     }
+
+    // 总攻阶段转换停用：不再出去找转换目标（FindPriestConversionTarget 没有
+    // 距离限制，实测祭司会为此跑到离基地 30~50 格处，被 3 个敌人锁定后既撤
+    // 不回来也打不过）。
+    if (priestPassive)
+        return;
 
     // 有敌人：选择转换目标（攻击距离 12 格，远程施法无需贴身）。
     const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
@@ -2757,10 +3414,18 @@ static bool IsScoutFrontierUsable(int blockDR, int blockUR)
             abs(blockUR - resource.BlockUR) <= 1)
             return false;
     }
+    // 前沿点若紧贴敌方单位则排除，避免侦察骑兵把落点直接选在敌人身上。
+    // 这里刻意只排除 2 格内的敌人：更远的敌意交给 DispatchScouts 里的
+    // FindScoutThreatSN + GetScoutEmergencyPoint 紧急撤离处理，前沿过滤
+    // 不该重复承担安全职责。
+    //
+    // 原先是排除 6 格（dis2 <= 36）。敌方基地周围必然有驻军，于是那片区域的
+    // 前沿点永久不可用，侦察骑兵结构上到不了敌方基地 —— info.enemy_buildings
+    // 因此全程为空，祭司永远没有可转换的攻城武器厂，获胜路径直接断掉。
     for (const tagArmy &enemy : info.enemy_armies)
     {
         if (enemy.Blood > 0 &&
-            BlockDis2(blockDR, blockUR, enemy.BlockDR, enemy.BlockUR) <= 36)
+            BlockDis2(blockDR, blockUR, enemy.BlockDR, enemy.BlockUR) <= 4)
             return false;
     }
     return true;
@@ -2859,22 +3524,23 @@ static pair<double, double> GetScoutEmergencyPoint(const tagArmy &scout,
     const int dy = scout.BlockUR - threatUR;
     const int stepDR = dx == 0 ? 0 : (dx > 0 ? 1 : -1);
     const int stepUR = dy == 0 ? 0 : (dy > 0 ? 1 : -1);
+    // 与 GetPriestEmergencyPoint 同一处缺陷：二维候选表只取单一轴的分量，
+    // |dx| < |dy| 时前四个候选偏移量为 0，撤离点算成原地。改为两轴共用距离表。
     const bool useDR = abs(dx) >= abs(dy);
-    const int offsets[][2] = {{12, 0}, {10, 0}, {8, 0}, {6, 0},
-                              {0, 12}, {0, 10}, {0, 8}, {0, 6}};
-    for (const auto &offset : offsets)
-    {
-        int blockDR = scout.BlockDR;
-        int blockUR = scout.BlockUR;
-        if (useDR)
-            blockDR += stepDR * offset[0];
-        else
-            blockUR += stepUR * offset[1];
-        blockDR = max(1, min(MAP_L - 2, blockDR));
-        blockUR = max(1, min(MAP_U - 2, blockUR));
-        if (IsPriestPointUsable(blockDR, blockUR))
-            return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
-                             (blockUR + 0.5) * double(BLOCKSIDELENGTH));
+    static const int kDistances[] = {12, 10, 8, 6};
+    const int distanceCount = sizeof(kDistances) / sizeof(kDistances[0]);
+    for (int i = 0; i < distanceCount; ++i) {
+      int blockDR = scout.BlockDR;
+      int blockUR = scout.BlockUR;
+      if (useDR)
+        blockDR += stepDR * kDistances[i];
+      else
+        blockUR += stepUR * kDistances[i];
+      blockDR = max(1, min(MAP_L - 2, blockDR));
+      blockUR = max(1, min(MAP_U - 2, blockUR));
+      if (IsPriestPointUsable(blockDR, blockUR))
+        return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
+                         (blockUR + 0.5) * double(BLOCKSIDELENGTH));
     }
     return make_pair((scout.BlockDR + 0.5) * double(BLOCKSIDELENGTH),
                      (scout.BlockUR + 0.5) * double(BLOCKSIDELENGTH));
@@ -2915,6 +3581,8 @@ static void DispatchScouts(UsrAI *ai)
             scoutEmergencyOrderId.erase(it->first);
             scoutEmergencyTarget.erase(it->first);
             scoutDangerLastFrame.erase(it->first);
+            scoutIsRecon.erase(it->first);
+            scoutLuredTarget.erase(it->first);
             it = scoutLastOrderFrame.erase(it);
         }
         else
@@ -2926,7 +3594,78 @@ static void DispatchScouts(UsrAI *ai)
         if (scout.Blood <= 0 || scout.Sort != AT_SCOUT)
             continue;
 
-        const int threatSN = FindScoutThreatSN(scout);
+        // 首次看到该侦察兵时确定角色：在 USR_SCOUT_RECON_FRAME 之后生产
+        // （即首次被看到时帧号已过该点）的那个负责侦测敌方基地。
+        map<int, bool>::iterator roleIt = scoutIsRecon.find(scout.SN);
+        if (roleIt == scoutIsRecon.end())
+            roleIt = scoutIsRecon
+                         .insert(make_pair(scout.SN,
+                                           g_frame >= USR_SCOUT_RECON_FRAME))
+                         .first;
+        const bool isRecon = roleIt->second;
+
+        // 【谨慎型专用】勾引 + 撤回基地。
+        // 用途：先在视野内挑一个最近的敌人打一下，建立「我在打它」的关系，
+        // 敌方 AI 的 FindThreatToArmy 会据此把它锁定为反击目标
+        // （waveRetaliationTarget），而该锁定按 enemyai.cpp:1142-1148 的规则
+        // 「只有目标死亡才解锁」——所以之后撤回基地，敌人仍会一路追来，
+        // 被基地的箭塔与部队消灭。
+        //
+        // 注意：必须先建立攻击关系再撤。只跑不打的话敌人不会追，因为
+        // FindThreatToArmy 看的是 enemyArmy.WorkObjectSN == 自己，与距离无关；
+        // 单纯移动不会产生这个关系。
+        // 攻击关系只需建立一次：敌人一旦锁定，后续移动指令覆盖掉攻击关系
+        // 也不影响已经产生的锁定。
+        // 专职侦测的那个（isRecon）不执行本条，否则它会在敌方基地外围被驻军
+        // 反复逼退，永远推进不到基地（见下方对紧急撤离的同样处理）。
+        if (!isRecon) {
+            const tagBuilding *home = FindCenter();
+
+            // 挑视野内最近的敌人作为勾引对象。
+            int lureSN = -1;
+            int lureDis2 = 1000000000;
+            for (const tagArmy &enemy : info.enemy_armies) {
+                if (enemy.Blood <= 0)
+                    continue;
+                const int dis2 = BlockDis2(scout.BlockDR, scout.BlockUR,
+                                           enemy.BlockDR, enemy.BlockUR);
+                if (dis2 < lureDis2) {
+                    lureDis2 = dis2;
+                    lureSN = enemy.SN;
+                }
+            }
+
+            if (lureSN != -1 && home != nullptr) {
+                // 还没对这个敌人建立过攻击关系 → 先打它，本帧不移动，
+                // 让攻击关系完整存在一帧，确保敌方 AI 能观察到。
+                if (scoutLuredTarget[scout.SN] != lureSN) {
+                    ai->HumanAction(scout.SN, lureSN);
+                    scoutLuredTarget[scout.SN] = lureSN;
+                    continue;
+                }
+
+                // 关系已建立 → 撤回市镇中心，把追兵引进火力圈。
+                const pair<int, int> homeBlock =
+                    make_pair(home->BlockDR, home->BlockUR);
+                const map<int, pair<int, int>>::const_iterator targetIt =
+                    scoutEmergencyTarget.find(scout.SN);
+                if (targetIt == scoutEmergencyTarget.end() ||
+                    targetIt->second != homeBlock ||
+                    g_frame - scoutDangerLastFrame[scout.SN] >=
+                        scoutEmergencyOrderInterval) {
+                    scoutEmergencyOrderId[scout.SN] = ai->HumanMove(
+                        scout.SN, (home->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                        (home->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+                    scoutEmergencyTarget[scout.SN] = homeBlock;
+                    scoutDangerLastFrame[scout.SN] = g_frame;
+                }
+                continue;
+            }
+        }
+
+        // 紧急撤离只对谨慎型生效。专职侦测的那个一旦在敌基地外围（9 格内有驻军）
+        // 就被逼退，同样推进不到基地——它的任务是探明基地，代价可以接受。
+        const int threatSN = isRecon ? -1 : FindScoutThreatSN(scout);
         int threatDR = -1;
         int threatUR = -1;
         if (threatSN != -1 &&
@@ -3250,6 +3989,11 @@ static bool IsOffensiveArmy(const tagArmy &army)
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
+  // 总攻时机：至少等到 38000 帧（约 25 分钟）之后，给经济、科技与兵力
+  // 充分的积累时间；此前只防守，避免以弱击强被敌方大量守军歼灭。
+  if (g_frame < 38000)
+    return;
+
   // 升时代前不进攻；升时代后需等关键兵种科技研发完成。
   if (info.civilizationStage == CIVILIZATION_TOOLAGE ||
       researchedTechCount < TOTAL_REQUIRED_TECH)
@@ -3405,6 +4149,106 @@ static void AssignArrowTowerTargets(UsrAI *ai)
     }
 }
 
+// 资源富余时派多余农民攻击敌人送死，为军队腾出人口。
+// 说明：Core 禁止友军互攻（含自伤，见 Core.cpp 的 addRelation 分支），
+// 因此只能通过攻击敌方单位/建筑实现「送死」。
+static void SacrificeExcessFarmers(UsrAI *ai) {
+  // 结算上一张自毁指令的回执（下单后的下一帧打印），用于确认农民真的死了。
+  // 原先的 [SACRIFICE] 是在 HumanAction 之后立刻写的，只表示「指令已入队」，
+  // 无法区分「已生效」与「被 Core 拒绝」——实测 4600 帧内触发 5 次而
+  // farmers 始终是 18，两种情况都解释得通，必须看回执才能定性。
+  // 回执码：0 = 成功；16 = ACTION_INVALID_NULLWORKER；25 = ACTION_INVALID_SN。
+  if (sacrificeOrderId != -1) {
+    map<int, int>::const_iterator result = info.ins_ret.find(sacrificeOrderId);
+    if (result != info.ins_ret.end()) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "[SACRIFICE-RET] f=%d farmer=%d hpBefore=%d ret=%d retF=%d",
+               g_frame, sacrificeFarmerSN, sacrificeHpBefore, result->second,
+               g_frame);
+      AiDebugLog(buf);
+      sacrificeOrderId = -1;
+    }
+  }
+
+  // 节流：每 300 帧最多送一个，避免农民集体冲出基地。
+  static int lastSacrificeFrame = USR_INVALID_FRAME;
+  if (lastSacrificeFrame != USR_INVALID_FRAME &&
+      g_frame - lastSacrificeFrame < 300)
+    return;
+
+  // 仅后期触发：已升时代 + 核心建筑齐备（经济已成型，少几个农民不影响）
+  // + 人口已满（军队无法继续生产，需要腾出人口）。
+  // 注：不用「资源存量」判断——AI 的资源始终在被消耗，存量永远不高。
+  if (info.civilizationStage == CIVILIZATION_TOOLAGE)
+    return;
+  if (!HasBuilding(BUILDING_STABLE) || !HasBuilding(BUILDING_RANGE))
+    return;
+  // 后勤未完成前不送死农民：该科技把兵营单位的人口占用从 1 降到 0.5，
+  // 相当于凭空多出一倍的兵营容量。没点它就先腾人口，等于用农民的采集力
+  // 去换本来靠科技免费就能拿到的容量。
+  // logisticsReady 由 ManageEconomyAndProduction 当帧更新，本函数在其之后
+  // 调用，所以读到的是当前状态。
+  if (!logisticsReady)
+    return;
+  // 只在人口顶到硬上限 50 之后才腾人口。
+  // info.Human_MaxNum = min(房屋数 × 4, 50)，不足 50 说明房屋还没补够，
+  // 此时该去补房屋而不是送死农民——否则会在 42/44 这类低上限时就开杀，
+  // 白白损失采集力。
+  if (info.Human_MaxNum < USR_HUMAN_NUM_CAP)
+    return;
+  // 未满员时不腾人口（+2 是「再放一个单位都放不下」的余量）。
+  if (info.Human_Num + 2 < info.Human_MaxNum)
+    return;
+
+  int farmerCount = 0;
+  for (const tagFarmer &farmer : info.farmers) {
+    if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER)
+      farmerCount++;
+  }
+  if (farmerCount <= 5) // 保留 5 个农民维持采集
+    return;
+
+  const tagBuilding *center = FindBuildingByType(BUILDING_CENTER, true);
+  if (center == nullptr)
+    return;
+
+  // 选离基地最近的农民去送死（最不干扰远端采集）。
+  int farmerSN = -1;
+  int farmerHp = -1;
+  int bestDis2 = 1000000000;
+  for (const tagFarmer &farmer : info.farmers) {
+    if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+      continue;
+    const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR, center->BlockDR,
+                               center->BlockUR);
+    if (dis2 < bestDis2) {
+      bestDis2 = dis2;
+      farmerSN = farmer.SN;
+      farmerHp = farmer.Blood;
+    }
+  }
+  if (farmerSN == -1)
+    return;
+
+  // 直接自毁：HumanAction(farmerSN, farmerSN) 命中 Core 的自毁分支
+  // （handleFarmerAction 的 `if (self == obj)`，Core.cpp:993-1001），
+  // 由 deleteSelf 扣掉全部血量并走统一的销毁流程。
+  // 旧实现要先去 30 格内找一个敌方单位当目标，敌人不在基地附近时就
+  // 完全不会触发；自毁则与敌人位置无关，人口满时必定能腾出人口。
+  CancelPendingGatherOrder(farmerSN);
+  sacrificeOrderId = ai->HumanAction(farmerSN, farmerSN);
+  sacrificeFarmerSN = farmerSN;
+  sacrificeHpBefore = farmerHp;
+  lastSacrificeFrame = g_frame;
+  {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "[SACRIFICE] f=%d farmer=%d selfDelete=1",
+             g_frame, farmerSN);
+    AiDebugLog(buf);
+  }
+}
+
 void UsrAI::processData()
 {
     info = getInfo();
@@ -3484,6 +4328,58 @@ void UsrAI::processData()
           buildFailCodes[BUILDING_FARM], buildFailCodes[BUILDING_ARMYCAMP],
           buildFailCodes[BUILDING_RANGE], buildFailCodes[BUILDING_ARROWTOWER]);
       AiDebugLog(buf);
+      // 诊断：定位「有建筑、有资源却点不了科技」。
+      // 逐类打印第一座该建筑的血量/完成度/当前项目，以及是否存在
+      // FindReadyBuildingByType 认可的空闲实例（h=存在 pct=完成度
+      // proj=当前项目 free=就绪）。再附上仓库串行研发的游标与最近结果码：
+      // ret=-1 表示该次下单被 Core 拒绝（超时未回结果）。
+      {
+        static const int kResearchTypes[4] = {BUILDING_STOCK, BUILDING_MARKET,
+                                              BUILDING_GRANARY,
+                                              BUILDING_ARMYCAMP};
+        char detail[512];
+        int used = 0;
+        for (int t = 0; t < 4; t++) {
+          const tagBuilding *first = NULL;
+          bool free = false;
+          for (const tagBuilding &b : info.buildings) {
+            if (b.Type != kResearchTypes[t] || b.Blood <= 0)
+              continue;
+            if (first == NULL)
+              first = &b;
+            if (b.Percent >= 100 && b.Project == ACT_NULL) {
+              free = true;
+              break;
+            }
+          }
+          if (used < (int)sizeof(detail) - 64) {
+            used += snprintf(
+                detail + used, sizeof(detail) - used,
+                " %d[h=%d pct=%d proj=%d free=%d]", kResearchTypes[t],
+                first != NULL ? 1 : 0, first != NULL ? (int)first->Percent : -1,
+                first != NULL ? (int)first->Project : -9999, free ? 1 : 0);
+          }
+        }
+        // 与 ManageEconomyAndProduction 里的 kStockTechFood 保持同一顺序，
+        // 最后两项是铜器时代的「进一步研发」，还需黄金。
+        static const int kStockFood[5] = {
+            BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
+            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_FOOD,
+            BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
+            BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD,
+            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_FOOD};
+        static const int kStockGold[5] = {
+            0, 0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD,
+            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_GOLD};
+        snprintf(buf, sizeof(buf),
+                 "[TECH] f=%d food=%d gold=%d need=%d/%d%s stockCur=%d "
+                 "stockPend=%d ret=%d retF=%d",
+                 g_frame, (int)info.Meat, info.Gold,
+                 stockTechCursor < 5 ? kStockFood[stockTechCursor] : 0,
+                 stockTechCursor < 5 ? kStockGold[stockTechCursor] : 0, detail,
+                 stockTechCursor, stockTechOrderId, lastTechRet, lastTechFrame);
+        AiDebugLog(buf);
+      }
     }
     // 在任何策略读取静态订单状态前处理新对局帧号回退和采集订单结果。
     ProcessPendingGatherOrders();
@@ -3493,8 +4389,10 @@ void UsrAI::processData()
     // AssignPriestDecoy(this);
     ManageEconomyAndProduction(this);
     AssignFieldSelfDefense(this);
-    ManageOffensiveArmy(this);
+    // 【暂时注释】总攻：观察纯防守下的表现
+    // ManageOffensiveArmy(this);
     // AssignFarmerSelfDefense(this);
+    SacrificeExcessFarmers(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
