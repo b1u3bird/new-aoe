@@ -63,15 +63,18 @@ static const int USR_PRIEST_PASSIVE_FRAME = 30000;
 // 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
 // （tE2=82 对阈值 81），而锁定祭司的近战兵从 10~20 格外走过来。
 static const int USR_PRIEST_HURT_THREAT_RADIUS = 14;
-// 开局绕基地一周：绕行半径（格）与截止帧。
-// 祭司视野 12 格（VISION_PRIEST），绕一圈能把基地周边探开，
-// 也让它开局就贴着箭塔覆盖圈活动，而不是待在中心不动。
-// 截止帧设在第一波（FAT=6000）之后不久，作为"没走完也别再绕"的兜底。
-static const int USR_PRIEST_LAP_RADIUS = 10;
-static const int USR_PRIEST_LAP_UNTIL_FRAME = 8000;
-// 是否已走完一圈；以及当前环点序号（0~7）。
-static bool priestLapDone = false;
-static int priestLapIndex = 0;
+// 祭司开局探路的截止帧。借用侦察骑兵的前沿探索（FindBestScoutFrontier），
+// 走到没有可用前沿、前沿已超出探索半径、或过了这一帧即结束。
+// 截止帧设在第一波（FAT=6000）之后不久，作为"没探完也别再往外跑"的兜底 ——
+// 祭司只有 100 血且防御为 0，不该为探路承担远离基地的风险。
+static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 8000;
+// 祭司探路的前沿点距市镇中心的最大半径（格）。
+// 前沿探索是「就近优先」，正常情况下不会跳到远处；这个上限兜住的是
+// 「近处已探明、最近的前沿点已落到基地之外」的情形 ——
+// 此时宁可不探，也不能让祭司跑出箭塔覆盖圈。
+static const int USR_PRIEST_EXPLORE_RADIUS = 25;
+// 祭司开局探路是否已结束。
+static bool priestExploreDone = false;
 // 祭司撤退指令的强制重发间隔。原先的重发还要求「上一张订单已结算」，
 // 实测该条件会让一次撤退指令下达后 637 帧发不出新指令。
 static const int USR_PRIEST_RETREAT_REISSUE_FRAMES = 100;
@@ -95,6 +98,12 @@ static const int USR_ARROWTOWER_TARGET = 6;
 static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
 // 表示尚未发生过相关事件的哨兵帧值。
 static const int USR_INVALID_FRAME = -1000000000;
+// 建筑研发「已结束」判定的防抖窗口：观察到 Project 离开研发项后连续空闲这么多帧，
+// 才认定研发真的完成。研发被中断（suspendRelation）时 Project 会短暂回到 0，
+// 窗口太短会把中断误判成完成 —— 实测就是因此让 wheelTechReady 提前变真，
+// 之后 AI 一直发战车弓兵订单而 Core 一直以 ACTION_INVALID_BUILDACT_LOCK 拒绝，
+// 整局产不出一个战车弓兵。
+static const int USR_MARKET_IDLE_FRAMES = 300;
 // 人口硬上限（Development.h:134 的 humanNum_Top）。
 // info.Human_MaxNum 导出的是 min(房屋数 × HOUSE_HUMAN_NUM, 该值)，
 // 所以只有房屋补够之后它才可能等于 50。
@@ -288,17 +297,22 @@ static int arrowTowerTechStartFrame = USR_INVALID_FRAME;
 // 判定同箭塔研发：观察到兵营 Project 进入该研发，之后离开即视为完成。
 static bool logisticsReady = false;
 static bool logisticsSeenRunning = false;
-// 车轮升级（解锁战车与战车弓兵）是否已完成。判定方式同上：观察到市场
-// Project 进入该研发、之后离开即视为完成。
-// 用途：TryProduceChariotArcher 在科技未就绪时直接放弃，避免每帧向 Core
-// 发一条注定被 ACTION_INVALID_BUILDACT_LOCK 拒绝的指令。
+// 市场三条研发链各自的完成标记。判定方式同后勤：观察到市场 Project 进入该研发、
+// 之后连续空闲 USR_MARKET_IDLE_FRAMES 帧视为完成（见 TrackMarketResearch）。
+//
+// 为什么是三个而不是一个：Core::deduplicateInstructions（Core.cpp:1221-1237）在
+// 每帧处理指令前按 SN 去重，且是覆盖语义（uniqueInstructions[cur.SN] = cur），
+// 保留【最后】入队的一条。三条市场研发用的是同一个市场的 SN，所以同一帧只能
+// 下发一条 —— 这三个标记就是三级优先级逐级放行的依据。
+//
+// wheelTechReady 另有一个用途：TryProduceChariotArcher 在科技未就绪时直接放弃，
+// 避免每帧向 Core 发一条注定被 ACTION_INVALID_BUILDACT_LOCK 拒绝的指令。
 static bool wheelTechReady = false;
-static bool wheelSeenRunning = false;
-// 市场离开「车轮研发」后持续空闲的起始帧。用于防抖：研发被中断（suspendRelation）
-// 时 Project 会短暂回到 0，只看「离开即视为完成」会把中断误判成完成，
-// 于是 AI 一直发战车弓兵订单而 Core 一直以 LOCK 拒绝（实测就是这样：
-// wheelTechReady 提前变真，整局一个战车弓兵都产不出来）。
-static int wheelIdleSinceFrame = USR_INVALID_FRAME;
+static bool woodTechReady = false;
+static bool farmTechReady = false;
+// 市场当前正在研发的项，以及它离开该项后持续空闲的起始帧。
+static int marketBusyAction = ACT_NULL;
+static int marketIdleSinceFrame = USR_INVALID_FRAME;
 // 最近一次战车弓兵生产指令的订单 ID 与回执码（0=成功；12=LOCK 表示前置未满足）。
 static int chariotArcherOrderId = -1;
 static int chariotArcherRet = -999;
@@ -1240,14 +1254,15 @@ static void ProcessPendingGatherOrders()
         stockTechCursor = 0;
         stockTechOrderId = -1;
         wheelTechReady = false;
-        wheelSeenRunning = false;
-        wheelIdleSinceFrame = USR_INVALID_FRAME;
+        woodTechReady = false;
+        farmTechReady = false;
+        marketBusyAction = ACT_NULL;
+        marketIdleSinceFrame = USR_INVALID_FRAME;
         chariotArcherOrderId = -1;
         chariotArcherRet = -999;
         priestEmergencyTarget = make_pair(-1, -1);
         priestEmergencyTargetFrame = USR_INVALID_FRAME;
-        priestLapDone = false;
-        priestLapIndex = 0;
+        priestExploreDone = false;
         priestMoveLastRet = -999;
         priestMoveLastRetFrame = USR_INVALID_FRAME;
         scoutIsRecon.clear();
@@ -2141,14 +2156,55 @@ static void ResearchTechQueue(UsrAI *ai, int buildingType, const int *actions,
     techOrderFrame[orderId] = g_frame;
 }
 
+// 对指定类型的建筑下发一条研发 / 升级指令。返回值只表示「找到了空闲建筑」，
+// 不代表 Core 接受了这条指令 —— BuildingAction 只是把指令入队，接受与否要等
+// 下一帧从建筑 Project 上观察（Core 对前置不满足的订单会静默拒绝）。
 static bool TryBuildingAction(UsrAI *ai,
                               int buildingType, int action)
 {
     const tagBuilding *building = FindReadyBuildingByType(buildingType);
     if (!building)
         return false;
-    const int orderId = ai->BuildingAction(building->SN, action);
+    ai->BuildingAction(building->SN, action);
     return true;
+}
+
+// 追踪市场当前研发项的完成情况：Project 进入某项研发即记录该项，离开后连续空闲
+// USR_MARKET_IDLE_FRAMES 帧则判定研发结束，给对应的完成标记上锁。
+//
+// 市场是串行的（同一时刻只可能有一项研发），所以用一个「当前研发项」就能同时
+// 追踪车轮 / 木材加工 / 农田三条链，不必写三份重复的状态机。
+//
+// 为什么不在下发时判断成败：市场同一帧只能收到一条研发指令（Core 按 SN 去重），
+// 而下发是发后不管的，唯一可靠的反馈就是建筑 Project。
+static void TrackMarketResearch(const tagBuilding *market)
+{
+  if (market == nullptr)
+    return;
+  if (market->Project != ACT_NULL)
+  {
+    marketBusyAction = market->Project; // 研发进行中：记住研发项
+    marketIdleSinceFrame = USR_INVALID_FRAME;
+    return;
+  }
+  if (marketBusyAction == ACT_NULL)
+    return; // 还没观察到任何研发，无从判定
+  if (marketIdleSinceFrame == USR_INVALID_FRAME)
+  {
+    marketIdleSinceFrame = g_frame; // 刚离开研发项：开始防抖计时
+    return;
+  }
+  if (g_frame - marketIdleSinceFrame < USR_MARKET_IDLE_FRAMES)
+    return;
+  // 确认研发结束：给对应链上锁，让位给下一优先级
+  if (marketBusyAction == BUILDING_MARKET_WHEEL_UPGRADE)
+    wheelTechReady = true;
+  else if (marketBusyAction == BUILDING_MARKET_WOOD_UPGRADE)
+    woodTechReady = true;
+  else if (marketBusyAction == BUILDING_MARKET_FARM_UPGRADE)
+    farmTechReady = true;
+  marketBusyAction = ACT_NULL;
+  marketIdleSinceFrame = USR_INVALID_FRAME;
 }
 
 static bool TryProduceFarmer(UsrAI *ai,
@@ -2633,9 +2689,20 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     }
     // 箭塔研发已在建造序列之前处理（见上方 arrowTowerTechnologyReady 逻辑）。
     //
-    // 市场科技的调用顺序就是优先级：同一帧内 Core 只接受一条建筑关系
-    // （Core_List::addRelation 要求 !relate_AllObject[build].isExist），
-    // 排在前面的那条才能抢到市场。
+    // ===== 市场研发：同一帧只下发一条，按 车轮升级 → 木材加工 → 农田升级 放行 =====
+    //
+    // 【为什么必须互斥】Core::deduplicateInstructions（Core.cpp:1221-1237）在每帧
+    // 处理指令之前按 SN 去重，且是覆盖语义：
+    //     uniqueInstructions[cur.SN] = cur;   // 同一 SN 只保留【最后】入队的一条
+    // 下面三条研发用的都是同一个市场的 SN，所以同一帧里排最后的那个才生效。
+    // 原先写成三个独立 if 时，排在最后的农田升级把车轮升级和木材加工一起挤掉 ——
+    // 实测整局日志中市场 Project 只出现过 6(WOOD) 和 8(FARM)，10(WHEEL) 一次都没有，
+    // wheelTechReady 永远是假，[CARCHER] 全程 wheel=0，一个战车弓兵都产不出来。
+    // 作为对照：仓库（单一队列）的 13/14/15 三个科技、兵营的 18/20 都研发成功了。
+    //
+    // 【为什么需要完成标记】TryBuildingAction 是发后不管的（返回值只表示「找到了
+    // 空闲建筑」），看不到 Core 是否接受，所以不能靠「发过一次就往下走」，
+    // 只能让 TrackMarketResearch 观察 Project 给每条链上锁，再逐级放行。
     //
     // 【暂停】金矿开采：成本 120 食物 + 100 木，与车轮升级抢同一批资源，
     // 而当前兵种配比（战车弓兵 40食+70木 / 弓兵 40食+20木 / 战车 40食+60木）
@@ -2643,40 +2710,37 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 将来若恢复金系兵种（方阵兵/阔剑兵/骑兵）或金系科技，再把这段打开。
     // if (HasBuilding(BUILDING_MARKET) && g_frame >= 21000)
     //   TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_GOLD_UPGRADE);
+    //
     // 车轮升级（战车科技）：解锁战车/战车弓箭手（战车 40 食 + 60 木、无黄金），
     // 并让村民移速 +30%，采集与搬运同时受益。成本 100 木 + 150 食物。
-    // 排在木材加工之前是安全的：工具时代它因时代不足返回 ACTION_INVALID_
-    // BUILDACT_LOCK，而 Core 的 LOCK 分支在设置建筑关系之前就 return
-    // （Core_List.cpp:427-428），不占用市场，木材加工照常研发；到青铜时代时
-    // 木材加工必然已完成，这里实际只是把「工艺」（木材加工链的第二个节点，
-    // 150 木 + 170 食物）往后排一个 40 秒的研发周期。
-    // 追踪车轮升级是否完成（供 TryProduceChariotArcher 门控）：
-    // 观察到市场 Project 进入该研发 → 标记运行中；之后 Project 离开即视为完成。
-    // 与 logisticsReady / arrowTowerTechnologyReady 同一判定模式。
-    // 防抖：研发被中断时 Project 会短暂回到 0，必须确认市场「持续空闲」才算完成。
-    // 只用「离开即完成」会让 wheelTechReady 提前变真，之后战车弓兵订单被 Core
-    // 持续以 ACTION_INVALID_BUILDACT_LOCK 拒绝，而 TryBuildingAction 不看回执、
-    // 静默失败（实测整局产不出一个战车弓兵）。
-    if (!wheelTechReady && HasBuilding(BUILDING_MARKET)) {
+    // 优先级最高 —— 它直接决定战车 / 战车弓兵能否出场。
+    //
+    // 木材加工（工具时代，75 木 + 120 食物）→ 工艺（青铜时代，链上第二个节点）。
+    // 工具时代车轮因时代不足会被 Core 以 ACTION_INVALID_BUILDACT_LOCK 拒绝
+    // （Core_List.cpp:427-428 在设置建筑关系之前就 return，不占用市场），
+    // 此时市场空闲自然落到木材加工，与原先的行为一致。
+    //
+    // 农田升级链（驯养动物 → 犁）见下方说明。
+    if (HasBuilding(BUILDING_MARKET)) {
       const tagBuilding *market = FindBuildingByType(BUILDING_MARKET, true);
       if (market != nullptr) {
-        if (market->Project == BUILDING_MARKET_WHEEL_UPGRADE) {
-          wheelSeenRunning = true;
-          wheelIdleSinceFrame = USR_INVALID_FRAME;
-        } else if (wheelSeenRunning) {
-          if (wheelIdleSinceFrame == USR_INVALID_FRAME)
-            wheelIdleSinceFrame = g_frame;
-          else if (g_frame - wheelIdleSinceFrame >= 300)
-            wheelTechReady = true;  // 连续空闲 300 帧，判定研发已结束
-        } else if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
-          TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WHEEL_UPGRADE);
+        TrackMarketResearch(market); // 先更新完成标记，再决定发哪一条
+        if (market->Project == ACT_NULL) {
+          if (!wheelTechReady &&
+              info.civilizationStage != CIVILIZATION_TOOLAGE)
+            TryBuildingAction(ai, BUILDING_MARKET,
+                              BUILDING_MARKET_WHEEL_UPGRADE);
+          else if (!woodTechReady)
+            TryBuildingAction(ai, BUILDING_MARKET,
+                              BUILDING_MARKET_WOOD_UPGRADE);
+          else if (!farmTechReady &&
+                   info.civilizationStage != CIVILIZATION_TOOLAGE &&
+                   CountBuilding(BUILDING_FARM) >= 4)
+            TryBuildingAction(ai, BUILDING_MARKET,
+                              BUILDING_MARKET_FARM_UPGRADE);
         }
       }
     }
-    // 木材加工（工具时代，75 木 + 120 食物）→
-    // 工艺（青铜时代，链上第二个节点）。
-    if (HasBuilding(BUILDING_MARKET))
-      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_WOOD_UPGRADE);
     // 升级为复合弓（青铜时代）：解锁复合弓兵（血45/攻5/射程7），
     // 全面优于普通弓兵且射程与敌方远程单位对等。成本 180 食物 + 100 木。
     if (HasBuilding(BUILDING_RANGE) &&
@@ -2695,9 +2759,8 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     //   · 工具时代的市场时间让给木材加工（伐木 +50%），那才是经济瓶颈；
     //   · 驯养动物的 200 食物会挤占升时代所需的 800 食物。
     // 4 块以上农场才划算（农场太少回不了本）。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
-        CountBuilding(BUILDING_FARM) >= 4)
-      TryBuildingAction(ai, BUILDING_MARKET, BUILDING_MARKET_FARM_UPGRADE);
+    // 下发点在上方的市场研发互斥链里 —— 这里不能再发一条，否则会和车轮升级
+    // 争用同一个市场 SN，重新触发「排最后的覆盖排前面的」那个 bug。
     // 【跳过】升级为阔剑：改以「斧头兵」（棍棒兵升级，血50/攻5、仅耗食物）
     // 作为步兵主力，避免阔剑兵的黄金消耗（15 金/个 + 研发 50 金）。
     // if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
@@ -3364,29 +3427,43 @@ static void ManagePriest(UsrAI *ai)
     }
     if (!enemyVisible)
     {
-        // 开局绕基地一周：按环上 8 个点依次移动，走完一圈即结束。
-        // 放在「无敌人」分支里，所以有敌人时仍按威胁逻辑处理，不会为了绕圈挨打。
-        if (!priestLapDone && g_frame < USR_PRIEST_LAP_UNTIL_FRAME)
+        // 开局探路：借用侦察骑兵的前沿探索（FindBestScoutFrontier）。
+        //
+        // 原先用「绕市镇中心半径 10 格的 8 个固定环点」，那个方案的两个问题：
+        //   ① 覆盖只有半径 10 格，对 100×100 的地图几乎没有意义；
+        //   ② 完全不理会地形与已探索区域，可能反复走已探明的地方、
+        //      也可能被海洋/建筑挡住而原地打转。
+        // 侦察骑兵的探索是按「已探明陆地 + 邻接未探明」找前沿点，
+        // 并按「距自己越近越好、最近访问过的点扣分」排序 —— 这正是"探路"该有的样子。
+        // 复用同一套前沿判定（IsScoutFrontierUsable 已排除建筑、资源与紧贴的敌人）。
+        //
+        // 放在「无敌人」分支里：有敌人时仍走威胁/转换逻辑，不会为了探路挨打。
+        if (!priestExploreDone && g_frame < USR_PRIEST_EXPLORE_UNTIL_FRAME)
         {
-            const tagBuilding *lapCenter = FindCenter();
-            if (lapCenter != nullptr)
+            int tx = -1;
+            int ty = -1;
+            const bool hasFrontier = FindBestScoutFrontier(*priest, tx, ty);
+            if (hasFrontier)
             {
-                static const int kLap8[8][2] = {{1, 0},  {1, 1},  {0, 1},  {-1, 1},
-                                                {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
-                int tx = lapCenter->BlockDR +
-                         kLap8[priestLapIndex][0] * USR_PRIEST_LAP_RADIUS;
-                int ty = lapCenter->BlockUR +
-                         kLap8[priestLapIndex][1] * USR_PRIEST_LAP_RADIUS;
                 tx = max(1, min(MAP_L - 2, tx));
                 ty = max(1, min(MAP_U - 2, ty));
+            }
+            // 距离兜底：最近的前沿点都已超出探索半径，说明近处已探明得差不多，
+            // 此时不再为探路把祭司送出箭塔覆盖圈。
+            const tagBuilding *home = FindCenter();
+            const bool tooFar = hasFrontier && home != nullptr &&
+                                BlockDis(home->BlockDR, home->BlockUR, tx, ty) >
+                                    USR_PRIEST_EXPLORE_RADIUS;
+            if (!hasFrontier || tooFar)
+            {
+                priestExploreDone = true;  // 周边已探明（或只剩远处）→ 结束探路
+            }
+            else
+            {
                 if (BlockDis(priest->BlockDR, priest->BlockUR, tx, ty) <= 2)
-                {
-                    priestLapIndex = (priestLapIndex + 1) % 8;
-                    if (priestLapIndex == 0)
-                        priestLapDone = true;  // 一整圈走完
-                }
-                else if (g_frame - priestEmergencyTargetFrame >=
-                         USR_PRIEST_ORDER_INTERVAL)
+                    return;  // 已到前沿点：下一帧会自动选新的前沿
+                if (g_frame - priestEmergencyTargetFrame >=
+                    USR_PRIEST_ORDER_INTERVAL)
                 {
                     priestMoveOrderId = ai->HumanMove(
                         priest->SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
@@ -3394,7 +3471,7 @@ static void ManagePriest(UsrAI *ai)
                     priestEmergencyTarget = make_pair(tx, ty);
                     priestEmergencyTargetFrame = g_frame;
                 }
-                return;  // 绕圈期间不做别的事（治疗/留基地）
+                return;  // 探路期间不做别的事（治疗/留基地）
             }
         }
 
