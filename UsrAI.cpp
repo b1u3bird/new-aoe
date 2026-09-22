@@ -44,6 +44,26 @@ static const int USR_TECH_FOOD_RESERVE = 60;
 ;
 // 祭司转换或移动指令的最小发送间隔，单位为游戏帧。
 static const int USR_PRIEST_ORDER_INTERVAL = 20;
+// 判定祭司「卡住」的帧数：目标未变、且祭司自上次下发移动指令后一直没挪窝，
+// 超过这么多帧才重发一次（让它重新寻路）。
+//
+// 为什么不能定期无条件重发：HumanMove 会经由 Core_List::addRelation 先调用
+// suspendRelation（Core_List.cpp:450-469），后者把单位的移动路径 setPath 清空
+// 并 initAction 重置。所以定期重发同一坐标等于每次刚起步就把路径清掉 ——
+// 实测祭司位置从 f=1700 到 f=2800 一直是 (83,21)，一步都迈不出去。
+// 取值要显著大于一次寻路所需时间，避免把正常起步误判成卡住。
+static const int USR_PRIEST_STUCK_FRAMES = 150;
+// 转换结束后的强制撤离窗口（帧）。祭司转换期间会停在原地，而敌方 AI 会把
+// 「WorkObjectSN 指向我」的祭司记进反击锁（enemyai.cpp:1070-1078 判定，
+// :1142-1148 的锁只在目标死亡时解除、且判据排在 FindThreatToArmy 之前）——
+// 也就是说一旦祭司转换过某个单位，那个单位会追祭司追到死，我方士兵打它也不换目标。
+// 所以转换一结束就立刻撤离，趁反击锁的目标（被转换者）刚消失、敌方尚未重新
+// 锁定祭司的窗口离开该区域。
+static const int USR_PRIEST_POST_CONVERSION_RETREAT_FRAMES = 600;
+// 祭司探路的下发间隔，与侦察兵一致（DispatchScouts 里 scoutOrderInterval = 60）。
+// 节流窗口内什么都不做：不做到达判定、不重选、不下发。若每帧都做这些，
+// 目标一变就会重发，而 HumanMove 每次都会清空移动路径，祭司永远走不出去。
+static const int USR_PRIEST_EXPLORE_ORDER_INTERVAL = 60;
 // 祭司危险判定半径，单位为地图格。
 static const int USR_PRIEST_DANGER_RADIUS = 9;
 // 祭司治疗目标的最大距离（格，欧氏）。
@@ -63,37 +83,45 @@ static const int USR_PRIEST_PASSIVE_FRAME = 30000;
 // 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
 // （tE2=82 对阈值 81），而锁定祭司的近战兵从 10~20 格外走过来。
 static const int USR_PRIEST_HURT_THREAT_RADIUS = 14;
-// 祭司开局探路的截止帧。借用侦察骑兵的前沿探索（FindBestScoutFrontier），
-// 走到没有可用前沿、前沿已超出探索半径、或过了这一帧即结束。
-// 截止帧设在第一波（FAT=6000）之后不久，作为"没探完也别再往外跑"的兜底 ——
-// 祭司只有 100 血且防御为 0，不该为探路承担远离基地的风险。
-static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 8000;
 // 祭司探路的前沿点距市镇中心的最大半径（格）。
 // 前沿探索是「就近优先」，正常情况下不会跳到远处；这个上限兜住的是
-// 「近处已探明、最近的前沿点已落到基地之外」的情形 ——
-// 此时宁可不探，也不能让祭司跑出箭塔覆盖圈。
-static const int USR_PRIEST_EXPLORE_RADIUS = 25;
+// 「近处已探明、最近的前沿点已落到基地之外」的情形。
+//
+// 原为 25：实测它会让祭司在基地附近反复打转却找不到食物 —— 食物只靠浆果丛
+// 与瞪羚，而瞪羚群经常落在 25 格之外，此时祭司既看不见它、又不会往远处走，
+// 只能停在基地待命（观感上就是「卡住」，日志里 mvF 停在某一帧后再无新指令）。
+// 放宽到 40 让它够得到常见的兽群距离；再远就不去了，避免为探路承担过大风险。
+static const int USR_PRIEST_EXPLORE_RADIUS = 40;
 // 祭司开局探路是否已结束。
 static bool priestExploreDone = false;
-// 祭司撤退指令的强制重发间隔。原先的重发还要求「上一张订单已结算」，
-// 实测该条件会让一次撤退指令下达后 637 帧发不出新指令。
-static const int USR_PRIEST_RETREAT_REISSUE_FRAMES = 100;
 // 祭司距市镇中心多近算「已经在基地范围」，单位：格。
 // 在此范围内不再「退向中心」（那是原地不动），改为绕到中心相对威胁的另一侧。
 static const int USR_PRIEST_HOME_RADIUS = 12;
+// 第一个侦察骑兵的生产时间点。它执行「视野内出现敌人即撤回市镇中心」的
+// 保命策略，不承担基地侦测（角色判定见 DispatchScouts）。
+static const int USR_SCOUT_FIRST_FRAME = 33000;
 // 专职侦测敌方基地的侦察骑兵的生产时间点。
-// 此前（35000 帧起）生产的侦察兵执行「视野内出现敌人即撤回市镇中心」的
-// 保命策略，不承担基地侦测；这一帧之后再补 1 个专门负责侦测敌方基地的。
-static const int USR_SCOUT_RECON_FRAME = 40000;
+// 在 USR_SCOUT_FIRST_FRAME 之后产出的侦察兵执行「视野内出现敌人即撤回市镇中心」
+// 的保命策略，不承担基地侦测；这一帧之后再补 1 个专门负责侦测敌方基地的。
+static const int USR_SCOUT_RECON_FRAME = 36000;
+// 农民自卫的启动帧。此前的农民遇袭一律靠撤离，不还手 —— 早期被零星骚扰
+// 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
+// 再让农民挨打时就地反击。
+static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // 箭塔建筑候选点相对中心的目标距离，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_RADIUS = 18;
 // 箭塔目标数量。TOWER_RINGS 提供 3 圈 × 4 方向 = 12 个候选位，
 // 建造循环从近圈（6 格）起逐圈填。
-// 原为 4（只填满近圈 4 个方向），提高到 6 会再往主圈（9 格）补 2 个，
-// 把覆盖半径从约 13 格扩到约 16 格。
-// 注意：采石权重的门控也用这个常量（见 CalculateFarmerTargets），
-// 只改建造上限而不改那处，箭塔没建满时就不会继续采石 -> 塔造不出来。
-static const int USR_ARROWTOWER_TARGET = 6;
+// 取 4：刚好填满近圈的 4 个方向，覆盖半径约 13 格。
+// 注意：建造与采石共用 ArrowTowerStillWanted()（见 CalculateFarmerTargets）——
+// 建满 4 座后它返回 false，于是同时停建箭塔、并停止采石把农民让给食物与木头。
+// 只改建造而不改采石的话，塔数永远停在目标值以下，农民会一直采无用的石头。
+static const int USR_ARROWTOWER_TARGET = 4;
+// 箭塔停止建造的帧号：第三波骚扰（enemyai.cpp:45 的 TAT=21000）之后不再建造，
+// 石头与采集力让给兵力与科技。
+// 注意 enemyai.cpp 的 FAT/SAT/TAT 是那个文件内部的宏，UsrAI.cpp 里看不到，
+// 所以这里是独立取值 —— 两处若要调整需要同步。
+static const int USR_ARROWTOWER_STOP_FRAME = 21000;
 // 建筑候选点距离地图边界的最小安全边距，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
 // 表示尚未发生过相关事件的哨兵帧值。
@@ -104,6 +132,18 @@ static const int USR_INVALID_FRAME = -1000000000;
 // 之后 AI 一直发战车弓兵订单而 Core 一直以 ACTION_INVALID_BUILDACT_LOCK 拒绝，
 // 整局产不出一个战车弓兵。
 static const int USR_MARKET_IDLE_FRAMES = 300;
+// 市场研发指令的确认窗口：发出后这么多帧内市场 Project 仍未进入研发，
+// 就判定这条研发不可用（被 Core 以 ACTION_INVALID_BUILDACT_LOCK 拒绝）。
+// 不能用 ins_ret 回执来判定 —— 它只保留最近 100 条（tagGame::update），
+// 而一次研发要跑上千帧，指令的回执早被后续指令挤掉。依赖回执会让状态机
+// 永久卡在「等回执」上：实测表现为车轮研发结束后市场全程空闲，
+// 木材链与农田链再也没被下发过一次。
+static const int USR_MARKET_ORDER_TIMEOUT = 120;
+// 市场研发失败后的冷却帧数。失败往往只是暂时的（资源不足、或研发链这一级
+// 时代未到），所以只冷却一段时间再重试，绝不永久跳过 —— 永久标记会让车轮与
+// 木材加工在食物攒够之后依然永远发不出去：实测早期食物只有 20~85 时被 Core
+// 拒掉，等食物涨到 155，市场已经把它们记成「不可研发」，整局再没试过。
+static const int USR_MARKET_RETRY_COOLDOWN = 600;
 // 人口硬上限（Development.h:134 的 humanNum_Top）。
 // info.Human_MaxNum 导出的是 min(房屋数 × HOUSE_HUMAN_NUM, 该值)，
 // 所以只有房屋补够之后它才可能等于 50。
@@ -241,6 +281,22 @@ static map<int, int> priestDecoyByThreat;
 static pair<int, int> priestEmergencyTarget = make_pair(-1, -1);
 // 当前祭司撤退或防守目标最后一次更新的游戏帧。
 static int priestEmergencyTargetFrame = USR_INVALID_FRAME;
+// 上一次向祭司下发移动指令时它所在的格。用于「卡住」判定：目标没变、
+// 但祭司自那以后一直没挪窝，才说明路径失效、需要重发一次。
+static int priestMoveFromDR = -1;
+static int priestMoveFromUR = -1;
+// 祭司当前的探索目标格（first < 0 表示没有目标）。
+// 与侦察骑兵的 scoutTargetBlock 同理，目标必须持久保存，只在「已到达」
+// （2 格内）或「卡住」时才作废重选 —— 若每帧都用 FindBestScoutFrontier
+// 重新选点，目标会一直在变，祭司永远走不到任何一个前沿点。
+static pair<int, int> priestFrontierTarget = make_pair(-1, -1);
+// 祭司连续走不到前沿点的次数（诊断用）。到达一个点就清零。
+// 注意：它不再触发「结束探路」—— 祭司只在找到瞪羚时才停。
+static int priestFrontierStuckCount = 0;
+// 上一帧祭司是否正在转换。用于检测「转换刚刚结束」这一瞬间。
+static bool priestWasConverting = false;
+// 转换结束后的撤离窗口截止帧。窗口内优先回市镇中心，不再发起新转换。
+static int priestRetreatUntilFrame = USR_INVALID_FRAME;
 // 最近一次检测到祭司危险状态的游戏帧。
 static int priestDangerLastFrame = USR_INVALID_FRAME;
 // 最近一次触发祭司危险状态的敌方单位 SN。
@@ -297,22 +353,23 @@ static int arrowTowerTechStartFrame = USR_INVALID_FRAME;
 // 判定同箭塔研发：观察到兵营 Project 进入该研发，之后离开即视为完成。
 static bool logisticsReady = false;
 static bool logisticsSeenRunning = false;
-// 市场三条研发链各自的完成标记。判定方式同后勤：观察到市场 Project 进入该研发、
-// 之后连续空闲 USR_MARKET_IDLE_FRAMES 帧视为完成（见 TrackMarketResearch）。
-//
-// 为什么是三个而不是一个：Core::deduplicateInstructions（Core.cpp:1221-1237）在
-// 每帧处理指令前按 SN 去重，且是覆盖语义（uniqueInstructions[cur.SN] = cur），
-// 保留【最后】入队的一条。三条市场研发用的是同一个市场的 SN，所以同一帧只能
-// 下发一条 —— 这三个标记就是三级优先级逐级放行的依据。
-//
-// wheelTechReady 另有一个用途：TryProduceChariotArcher 在科技未就绪时直接放弃，
-// 避免每帧向 Core 发一条注定被 ACTION_INVALID_BUILDACT_LOCK 拒绝的指令。
+// 车轮升级（解锁战车与战车弓兵）是否已完成。判定方式同后勤：观察到市场
+// Project 进入该研发、之后连续空闲 USR_MARKET_IDLE_FRAMES 帧视为完成。
+// 用途：TryProduceChariotArcher 在科技未就绪时直接放弃，避免每帧向 Core
+// 发一条注定被 ACTION_INVALID_BUILDACT_LOCK 拒绝的指令。
+// 车轮是单级研发链（Development.cpp:665-671 只有 setHead、没有 push_back），
+// 所以一个布尔量就足以表示「整条链走完」—— 木材 / 农田那两条两级链不行，
+// 见 ManageMarketResearch 的说明。
 static bool wheelTechReady = false;
-static bool woodTechReady = false;
-static bool farmTechReady = false;
-// 市场当前正在研发的项，以及它离开该项后持续空闲的起始帧。
-static int marketBusyAction = ACT_NULL;
-static int marketIdleSinceFrame = USR_INVALID_FRAME;
+static bool wheelSeenRunning = false;
+static int wheelIdleSinceFrame = USR_INVALID_FRAME;
+// 市场研发的下发状态（见 ManageMarketResearch）：
+// marketCooldownUntil[i] 是 kMarketResearch[i] 的下次可尝试帧。失败只冷却、
+// 不永久跳过 —— 原因见 USR_MARKET_RETRY_COOLDOWN 的说明。
+static int marketCooldownUntil[3] = {0, 0, 0};
+static int marketOrderId = -1;
+static int marketOrderSlot = -1;
+static int marketOrderFrame = USR_INVALID_FRAME;
 // 最近一次战车弓兵生产指令的订单 ID 与回执码（0=成功；12=LOCK 表示前置未满足）。
 static int chariotArcherOrderId = -1;
 static int chariotArcherRet = -999;
@@ -757,6 +814,15 @@ static int CountBuilding(int type) {
   return count;
 }
 
+// 箭塔是否还需要建造：未过停建帧，且数量未达目标。
+// 建造点与采石权重必须共用这一个判断 —— 只改建造而不改采石的话，第三波之后
+// 农民会一直采石（塔数永远停在目标值以下），把采集力浪费在没有用途的石头上。
+static bool ArrowTowerStillWanted()
+{
+  return g_frame < USR_ARROWTOWER_STOP_FRAME &&
+         CountBuilding(BUILDING_ARROWTOWER) < USR_ARROWTOWER_TARGET;
+}
+
 static int CountArmyBySort(int sort)
 {
     int count = 0;
@@ -919,6 +985,31 @@ static bool IsGatherableResource(const tagResource &resource)
     return resource.Cnt > 0 || resource.Blood > 0;
 }
 
+// 视野内是否已经出现瞪羚（食物来源之一，见 ResourceBucket）。
+// 用途：祭司探路的终止条件 —— 探路就是为了给农民找到食物，找到了就收工。
+static bool HasVisibleGazelle()
+{
+  for (const tagResource &resource : info.resources) {
+    if (resource.Type == RESOURCE_GAZELLE && resource.Blood > 0)
+      return true;
+  }
+  return false;
+}
+
+// 结束祭司探路并记录原因。
+// 几个退出条件（找到瞪羚 / 没有可用前沿 / 前沿都超出半径 / 连续卡住）
+// 在观感上都是「祭司不动了」，只有这行日志能把它们区分开。
+static void FinishPriestExplore(const char *reason)
+{
+  if (priestExploreDone)
+    return;
+  priestExploreDone = true;
+  char buf[192];
+  snprintf(buf, sizeof(buf), "[PRIEST-EXPLORE] f=%d end reason=%s", g_frame,
+           reason);
+  AiDebugLog(buf);
+}
+
 static bool IsGatherableFarm(const tagBuilding &building) {
   return building.Type == BUILDING_FARM && building.Percent >= 100 &&
          building.Blood > 0 && building.Cnt > 0;
@@ -1030,8 +1121,24 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
       weight[0] += 3;
 
-    if (info.Wood >= 500) {
-      // 木头充足（>=500）时停止伐木，把农民让给食物/黄金/石头。
+    // 靶场建成说明已进入产兵阶段（弓兵与战车弓兵都要靶场）。
+    const bool producingUnits = HasBuilding(BUILDING_RANGE);
+    // 该阶段的木头上限：战车弓兵 70 木/个、目标 25~30 个，光这一项就要
+    // 1750~2100 木，500 的库存撑不住几轮补兵 —— 会变成「采满 → 造兵花光 →
+    // 再采」的震荡，兵员补充断断续续。
+    const int woodStockCap = producingUnits ? 1000 : 500;
+
+    // 铜器时代之前、马厩建成后停止伐木：升铜器时代要攒 800 食物，而这时
+    // 前置建筑（谷仓 / 兵营 / 市场 / 马厩 / 靶场）的木头需求已经满足，
+    // 把农民全部让给食物，缩短升时代的时间。
+    // 用 FindBuildingByType(.., true)（内含 Percent >= 100 判定）而不是
+    // HasBuilding —— 后者只要 Blood > 0 就算数，会把正在盖的马厩当成建好。
+    const bool stopWoodForBronze =
+        info.civilizationStage == CIVILIZATION_TOOLAGE &&
+        FindBuildingByType(BUILDING_STABLE, true) != nullptr;
+
+    if (stopWoodForBronze || info.Wood >= woodStockCap) {
+      // 停止伐木，把农民让给食物/黄金/石头。
       weight[1] = 0;
     } else {
       if (info.Wood < 300)
@@ -1042,6 +1149,11 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
       if (!HasBuilding(BUILDING_MARKET) || !HasBuilding(BUILDING_STABLE) ||
           !HasBuilding(BUILDING_RANGE) || !HasBuilding(BUILDING_ARMYCAMP))
         weight[1] += 8;
+      // 产兵阶段木头是主消耗：战车弓兵 40 食 + 70 木，木头需求高于食物
+      // （目标 25~30 个 = 1750~2100 木）。基础权重 7 远低于食物的 20+，
+      // 不抬高就会让木头成为产兵瓶颈，战车弓兵一直凑不齐。
+      if (producingUnits)
+        weight[1] += 12;
     }
 
     // 人口接近上限且仍需补房屋时临时加木权：房屋每间 30 木、+4 人口，
@@ -1063,9 +1175,10 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     // if (info.civilizationStage != CIVILIZATION_TOOLAGE && info.Gold < 500)
     //   weight[3] += 6;
 
-    // 石头：造箭塔需要石头（每个 150），仅在箭塔未达目标数量时高权重采石；
-    // 箭塔建满后石头无其他用途，停止采集把农民让给食物/木头/黄金。
-    if (CountBuilding(BUILDING_ARROWTOWER) < USR_ARROWTOWER_TARGET)
+    // 石头：造箭塔需要石头（每个 150），仅在箭塔还要建时高权重采石；
+    // 箭塔建满、或过了第三波的停建帧之后石头无其他用途，
+    // 停止采集把农民让给食物/木头/黄金。
+    if (ArrowTowerStillWanted())
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
@@ -1254,14 +1367,24 @@ static void ProcessPendingGatherOrders()
         stockTechCursor = 0;
         stockTechOrderId = -1;
         wheelTechReady = false;
-        woodTechReady = false;
-        farmTechReady = false;
-        marketBusyAction = ACT_NULL;
-        marketIdleSinceFrame = USR_INVALID_FRAME;
+        wheelSeenRunning = false;
+        wheelIdleSinceFrame = USR_INVALID_FRAME;
+        marketCooldownUntil[0] = 0;
+        marketCooldownUntil[1] = 0;
+        marketCooldownUntil[2] = 0;
+        marketOrderId = -1;
+        marketOrderSlot = -1;
+        marketOrderFrame = USR_INVALID_FRAME;
         chariotArcherOrderId = -1;
         chariotArcherRet = -999;
         priestEmergencyTarget = make_pair(-1, -1);
         priestEmergencyTargetFrame = USR_INVALID_FRAME;
+        priestFrontierTarget = make_pair(-1, -1);
+        priestFrontierStuckCount = 0;
+        priestWasConverting = false;
+        priestRetreatUntilFrame = USR_INVALID_FRAME;
+        priestMoveFromDR = -1;
+        priestMoveFromUR = -1;
         priestExploreDone = false;
         priestMoveLastRet = -999;
         priestMoveLastRetFrame = USR_INVALID_FRAME;
@@ -1443,8 +1566,14 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         const int remainingPenalty = resource.Cnt > 0 && resource.Cnt < 100
                                          ? 100
                                          : 0;
-        // 瞪羚需要先击杀（耗时且可能被反击），降低其优先级，优先直接采集的资源。
-        const int huntPenalty = resource.Type == RESOURCE_GAZELLE ? 60 : 0;
+        // 瞪羚要追上才能击杀，而它会逃跑（Animal.cpp:217 的 isMonitorObject），
+        // 比站着不动的浆果丛费时，因此保留一点轻微的代价。
+        // 只给 10：它**不会反击**（AnimalAtk 里瞪羚是 0、阵营 FRIENDLY_FRI，
+        // 见 MainWidget.cpp:2454-2456），而且农民比它快 50%
+        // （HUMAN_SPEED 2.236 vs ANIMAL_SPEED 1.491，config.json:36/38），
+        // 追杀并无风险。原先的 60 相当于把羚羊在打分里推后 60 格，
+        // 结果只要附近有浆果丛就永远轮不到它。
+        const int huntPenalty = resource.Type == RESOURCE_GAZELLE ? 10 : 0;
         const int score = distance + returnDistance + crowdPenalty +
                           remainingPenalty + huntPenalty -
                           (current[bucket] > 0 ? 0 : 2);
@@ -2169,42 +2298,102 @@ static bool TryBuildingAction(UsrAI *ai,
     return true;
 }
 
-// 追踪市场当前研发项的完成情况：Project 进入某项研发即记录该项，离开后连续空闲
-// USR_MARKET_IDLE_FRAMES 帧则判定研发结束，给对应的完成标记上锁。
+// 追踪车轮升级是否完成（供 TryProduceChariotArcher 门控）：观察到市场 Project
+// 进入车轮研发 → 标记运行中；之后连续空闲 USR_MARKET_IDLE_FRAMES 帧 → 判定完成。
+// 防抖是必需的：研发被中断时 Project 会短暂回到 0，误判会让 AI 一直发战车弓兵
+// 订单而 Core 一直以 LOCK 拒绝（实测整局产不出一个战车弓兵）。
+static void TrackWheelResearch(const tagBuilding *market)
+{
+  if (wheelTechReady || market == nullptr)
+    return;
+  if (market->Project == BUILDING_MARKET_WHEEL_UPGRADE)
+  {
+    wheelSeenRunning = true;
+    wheelIdleSinceFrame = USR_INVALID_FRAME;
+    return;
+  }
+  if (!wheelSeenRunning)
+    return;
+  if (wheelIdleSinceFrame == USR_INVALID_FRAME)
+  {
+    wheelIdleSinceFrame = g_frame;
+    return;
+  }
+  if (g_frame - wheelIdleSinceFrame >= USR_MARKET_IDLE_FRAMES)
+    wheelTechReady = true;
+}
+
+// 市场研发的候选，数组顺序即优先级。
+// 伐木科技排在最前：进入青铜时代后它还有第二级（工艺）要研发，而木材是
+// 战车弓兵的主消耗（40 食 + 70 木，目标 25~30 个 = 1750~2100 木），
+// 伐木效率直接决定产兵速度。工具时代车轮被「时代未到」拒绝时，
+// 排第二的它本来就会顶上来，所以这个顺序对工具时代没有影响。
+static const int kMarketResearch[] = {
+    BUILDING_MARKET_WOOD_UPGRADE,  // 木材加工 → 工艺（伐木科技，优先级最高）
+    BUILDING_MARKET_WHEEL_UPGRADE, // 车轮（单级）：解锁战车 / 战车弓兵
+    BUILDING_MARKET_FARM_UPGRADE,  // 驯养动物 → 犁
+};
+static const int kMarketResearchCount =
+    (int)(sizeof(kMarketResearch) / sizeof(kMarketResearch[0]));
+
+// 下发市场研发：每帧最多一条，按优先级挑第一项「当前可研发」的。
 //
-// 市场是串行的（同一时刻只可能有一项研发），所以用一个「当前研发项」就能同时
-// 追踪车轮 / 木材加工 / 农田三条链，不必写三份重复的状态机。
+// 【为什么每帧只能发一条】Core::deduplicateInstructions（Core.cpp:1221-1237）在
+// 每帧处理指令之前按 SN 去重，且是覆盖语义（uniqueInstructions[cur.SN] = cur，
+// 保留【最后】入队的一条）。三条研发用的是同一个市场的 SN，同一帧发三条就只有
+// 最后一条能活 —— 上一版写成三个独立 if，排在最后的农田升级永久盖掉了车轮升级，
+// 实测整局市场 Project 只出现过 6 和 8、10 一次都没有，战车弓兵一个都产不出来。
 //
-// 为什么不在下发时判断成败：市场同一帧只能收到一条研发指令（Core 按 SN 去重），
-// 而下发是发后不管的，唯一可靠的反馈就是建筑 Project。
-static void TrackMarketResearch(const tagBuilding *market)
+// 【为什么用回执而不是完成标记】木材加工与农田升级都是两级链（木材加工→工艺、
+// 驯养动物→犁，Development.cpp:659-690），两级共用同一个 action 编号，AI 从
+// Project 上只能看到「某一级完成了」，分不清是第一级还是第二级，给它们上完成
+// 标记会把第二级永久截断 —— 犁就是这么丢掉的。哪一项当前可研发只有 Core 知道：
+// Core_List.cpp:427 用建筑行动的 isShowAble 过滤，不可研发（时代未到 / 链已走完）
+// 返回 ACTION_INVALID_BUILDACT_LOCK。AI 拿不到 isShowAble（Player* 不暴露给 AI），
+// 但能从回执等价地得到，于是按优先级试、把 LOCK 的项跳过；跨时代时清空标记重试，
+// 这样被「时代未到」挡住的项（如铜器时代的犁）会重新获得机会。
+static void ManageMarketResearch(UsrAI *ai, const tagBuilding *market)
 {
   if (market == nullptr)
     return;
   if (market->Project != ACT_NULL)
   {
-    marketBusyAction = market->Project; // 研发进行中：记住研发项
-    marketIdleSinceFrame = USR_INVALID_FRAME;
+    // 研发正在进行 —— 刚下发的那条被 Core 接受了，清掉待确认状态。
+    marketOrderId = -1;
+    marketOrderSlot = -1;
     return;
   }
-  if (marketBusyAction == ACT_NULL)
-    return; // 还没观察到任何研发，无从判定
-  if (marketIdleSinceFrame == USR_INVALID_FRAME)
+  // 市场空闲：上一条若还没让市场忙起来，等够确认窗口就判定这次没成
+  // （时代未到 / 资源不足 / 链已走完）。只让它冷却一段时间，不永久跳过。
+  // 判据是「市场有没有真的进入研发」而不是回执 —— 理由见 USR_MARKET_ORDER_TIMEOUT。
+  if (marketOrderId != -1)
   {
-    marketIdleSinceFrame = g_frame; // 刚离开研发项：开始防抖计时
+    if (g_frame - marketOrderFrame < USR_MARKET_ORDER_TIMEOUT)
+      return;
+    if (marketOrderSlot >= 0 && marketOrderSlot < 3)
+      marketCooldownUntil[marketOrderSlot] = g_frame + USR_MARKET_RETRY_COOLDOWN;
+    marketOrderId = -1;
+    marketOrderSlot = -1;
+  }
+  for (int i = 0; i < kMarketResearchCount; ++i)
+  {
+    if (g_frame < marketCooldownUntil[i])
+      continue;
+    // 农田链（驯养动物 → 犁）推迟到铜器时代之后再研发：
+    //   · 工具时代的市场时间让给木材加工（伐木 +50%），那才是经济瓶颈；
+    //   · 驯养动物要 200 食物，会挤占升时代所需的 800 食物。
+    // 另外两级都让农场储量 +75，农场太少回不了本（沿用原先的 4 块门槛）。
+    // 这里必须显式判时代：不能指望 Core 拒绝 —— 驯养动物的注册时代是
+    // CIVILIZATION_TOOLAGE（Development.cpp:661），工具时代它本来就被允许。
+    if (kMarketResearch[i] == BUILDING_MARKET_FARM_UPGRADE &&
+        (info.civilizationStage == CIVILIZATION_TOOLAGE ||
+         CountBuilding(BUILDING_FARM) < 4))
+      continue;
+    marketOrderId = ai->BuildingAction(market->SN, kMarketResearch[i]);
+    marketOrderSlot = i;
+    marketOrderFrame = g_frame;
     return;
   }
-  if (g_frame - marketIdleSinceFrame < USR_MARKET_IDLE_FRAMES)
-    return;
-  // 确认研发结束：给对应链上锁，让位给下一优先级
-  if (marketBusyAction == BUILDING_MARKET_WHEEL_UPGRADE)
-    wheelTechReady = true;
-  else if (marketBusyAction == BUILDING_MARKET_WOOD_UPGRADE)
-    woodTechReady = true;
-  else if (marketBusyAction == BUILDING_MARKET_FARM_UPGRADE)
-    farmTechReady = true;
-  marketBusyAction = ACT_NULL;
-  marketIdleSinceFrame = USR_INVALID_FRAME;
 }
 
 static bool TryProduceFarmer(UsrAI *ai,
@@ -2407,11 +2596,12 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   } else {
     bowmanTarget = 5;        // 普通弓兵 5 个（40 食 + 20 木，便宜、前期即可产）
     chariotArcherTarget = 25; // 战车弓兵 25 个（40 食 + 70 木，血70/攻4/射程7/速度4.07）
-    // 侦察骑兵：35000 帧后生产 1 个保命型（遇敌即撤回基地，不承担侦测）；
-    // 40000 帧后再补 1 个，由它专职侦测敌方基地（见 DispatchScouts 的角色判定）。
+    // 侦察骑兵：USR_SCOUT_FIRST_FRAME 后生产 1 个保命型（遇敌即撤回基地，
+    // 不承担侦测）；USR_SCOUT_RECON_FRAME 后再补 1 个，由它专职侦测敌方基地
+    // （见 DispatchScouts 的角色判定）。
     scoutTarget = (g_frame >= USR_SCOUT_RECON_FRAME)
                       ? 2
-                      : ((g_frame >= 35000) ? 1 : 0);
+                      : ((g_frame >= USR_SCOUT_FIRST_FRAME) ? 1 : 0);
     // 战车（40 食 + 60 木）保留 2 个：速度 4.07，可作为前排挡一下远程。
     chariotTarget = 2;
   }
@@ -2440,12 +2630,16 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     armyTarget += hopliteTarget;
     hopliteTarget = 0;
   }
-  // 车轮升级需要研发时间（150 食物 + 100 木，40 秒），在此之前战车产不出来；
-  // 用 24000 帧作为研发窗口，窗口内把战车目标转给斧头兵兜底，避免配额空转。
-  if (chariotTarget > 0 && g_frame < 24000) {
-    armyTarget += chariotTarget;
-    chariotTarget = 0;
-  }
+  // 【取消】原先在车轮升级完成前（g_frame < 24000）把战车配额转给斧头兵兜底。
+  // 这条转移是 armyTarget 唯一的赋值来源，会让上面「不造棍棒兵/斧头兵」的
+  // 设定在 24000 帧前失效：青铜时代后 chariotTarget = 2 转过来，armyTarget
+  // 就变成 2，TryProduceSoldier 随即造出斧头兵（实测 [AI] 里 army 比
+  // bow+carcher+chariot 多 1~2 个，就是它）。现在战车配额宁可空转，
+  // 也不生产任何近战步兵。
+  // if (chariotTarget > 0 && g_frame < 24000) {
+  //   armyTarget += chariotTarget;
+  //   chariotTarget = 0;
+  // }
   // 后勤完成后兵营单位人口占用减半（1 → 0.5），斧头兵可养数量翻倍。
   if (logisticsReady)
     armyTarget *= 2;
@@ -2623,12 +2817,18 @@ static void ManageEconomyAndProduction(UsrAI *ai)
         TryBuild(ai, BUILDING_MARKET);
     }
     // 箭塔防守：围绕市镇中心四方向环形布置（TOWER_RINGS，近圈 6 格起），
-    // 须等箭塔科技研发完成后才建造。
-    if (arrowTowerTechnologyReady &&
-        CountBuilding(BUILDING_ARROWTOWER) < USR_ARROWTOWER_TARGET &&
+    // 须等箭塔科技研发完成后才建造，且第三波骚扰之后不再建造
+    // （USR_ARROWTOWER_STOP_FRAME，与采石权重共用 ArrowTowerStillWanted）。
+    if (arrowTowerTechnologyReady && ArrowTowerStillWanted() &&
         info.Stone >= 150) {
       TryBuild(ai, BUILDING_ARROWTOWER);
     }
+    // 兵营是靶场与马厩的建造前置（马厩 Development.cpp:697、靶场 :727 ——
+    // 两处都用 addPreCondition 挂上 developLab[BUILDING_ARMYCAMP].buildCon，
+    // 而 isShowable 要求前置的 acttimes > 0，即兵营已建成）。所以兵营必须排在
+    // 它们前面，挪到后面会让靶场 / 马厩一直拿到 ACTION_INVALID_HUMANBUILD_LOCK。
+    // 建筑链：谷仓 → 兵营 → 市场(需谷仓) → 马厩/靶场(需兵营) → 农场(需市场) →
+    // 箭塔(需谷仓研发)
     if (!HasBuilding(BUILDING_ARMYCAMP)) {
       if (info.Wood >= 125)
         TryBuild(ai, BUILDING_ARMYCAMP);
@@ -2700,9 +2900,8 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // wheelTechReady 永远是假，[CARCHER] 全程 wheel=0，一个战车弓兵都产不出来。
     // 作为对照：仓库（单一队列）的 13/14/15 三个科技、兵营的 18/20 都研发成功了。
     //
-    // 【为什么需要完成标记】TryBuildingAction 是发后不管的（返回值只表示「找到了
-    // 空闲建筑」），看不到 Core 是否接受，所以不能靠「发过一次就往下走」，
-    // 只能让 TrackMarketResearch 观察 Project 给每条链上锁，再逐级放行。
+    // 【优先级的去处】三条链的下发策略 —— 每帧只发一条、按优先级挑当前可研发的、
+    // 靠回执跳过不可研发的项 —— 集中在 ManageMarketResearch，理由也写在那里。
     //
     // 【暂停】金矿开采：成本 120 食物 + 100 木，与车轮升级抢同一批资源，
     // 而当前兵种配比（战车弓兵 40食+70木 / 弓兵 40食+20木 / 战车 40食+60木）
@@ -2718,41 +2917,33 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 木材加工（工具时代，75 木 + 120 食物）→ 工艺（青铜时代，链上第二个节点）。
     // 工具时代车轮因时代不足会被 Core 以 ACTION_INVALID_BUILDACT_LOCK 拒绝
     // （Core_List.cpp:427-428 在设置建筑关系之前就 return，不占用市场），
-    // 此时市场空闲自然落到木材加工，与原先的行为一致。
+    // 此时按优先级自然落到木材加工，与原先的行为一致。
     //
-    // 农田升级链（驯养动物 → 犁）见下方说明。
+    // 农田升级链（驯养动物@工具时代 → 犁@铜器时代）：两级都让农场储量 +75。
+    // 铜器时代之后由 ManageMarketResearch 自动推进到犁。
     if (HasBuilding(BUILDING_MARKET)) {
       const tagBuilding *market = FindBuildingByType(BUILDING_MARKET, true);
       if (market != nullptr) {
-        TrackMarketResearch(market); // 先更新完成标记，再决定发哪一条
-        if (market->Project == ACT_NULL) {
-          if (!wheelTechReady &&
-              info.civilizationStage != CIVILIZATION_TOOLAGE)
-            TryBuildingAction(ai, BUILDING_MARKET,
-                              BUILDING_MARKET_WHEEL_UPGRADE);
-          else if (!woodTechReady)
-            TryBuildingAction(ai, BUILDING_MARKET,
-                              BUILDING_MARKET_WOOD_UPGRADE);
-          else if (!farmTechReady &&
-                   info.civilizationStage != CIVILIZATION_TOOLAGE &&
-                   CountBuilding(BUILDING_FARM) >= 4)
-            TryBuildingAction(ai, BUILDING_MARKET,
-                              BUILDING_MARKET_FARM_UPGRADE);
-        }
+        TrackWheelResearch(market);       // 车轮完成状态（供战车弓兵门控）
+        ManageMarketResearch(ai, market); // 市场研发下发（每帧最多一条）
       }
     }
-    // 升级为复合弓（青铜时代）：解锁复合弓兵（血45/攻5/射程7），
-    // 全面优于普通弓兵且射程与敌方远程单位对等。成本 180 食物 + 100 木。
-    if (HasBuilding(BUILDING_RANGE) &&
-        info.civilizationStage != CIVILIZATION_TOOLAGE)
-      TryBuildingAction(ai, BUILDING_RANGE,
-                        BUILDING_RANGE_UPGRADE_COMPOSITE_BOW);
-    // 棍棒兵升级（→斧头兵）：进入青铜时代后研发（血50/攻5）。
-    // 与「升级为阔剑」并行推进，尽早提升现有棍棒兵的战力。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
-      ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
-                   BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
-    }
+    // 【取消】升级为复合弓（青铜时代，180 食 + 100 木）：这是靶场
+    // （BUILDING_RANGE）的科技，不是市场的。它解锁复合弓兵，而当前远程主力是
+    // 战车弓兵，普通弓兵只保留 5 个且 TryProduceBowman 固定产普通弓兵
+    // （不会转产复合弓兵）—— 解锁的兵种根本不在生产队列里，研发它只是白占
+    // 靶场一个研发周期，还把食物从升时代与产兵上挤走。
+    // if (HasBuilding(BUILDING_RANGE) &&
+    //     info.civilizationStage != CIVILIZATION_TOOLAGE)
+    //   TryBuildingAction(ai, BUILDING_RANGE,
+    //                     BUILDING_RANGE_UPGRADE_COMPOSITE_BOW);
+    // 【取消】棍棒兵升级（→斧头兵）：兵营单位的配额 armyTarget 已经是 0
+    // （见 ManageWeightedProduction 的兵种配比），一个棍棒兵都不造，
+    // 升级出来的斧头兵自然也没人用，研发它只是白耗食物。
+    // if (info.civilizationStage != CIVILIZATION_TOOLAGE) {
+    //   ResearchTech(ai, clubmanUpgradeOrderId, BUILDING_ARMYCAMP,
+    //                BUILDING_ARMYCAMP_UPGRADE_CLUBMAN);
+    // }
     // 农田升级链：驯养动物（工具时代，200 食 + 50 木）→ 犁（铜器时代，250 食 +
     // 75 木）， 两级都让农场储量上限 +75（Development.cpp:310-318，合计
     // +150）。 整条链推迟到铜器时代之后再开始：
@@ -2767,31 +2958,34 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     //   ResearchTech(ai, broadswordUpgradeOrderId, BUILDING_ARMYCAMP,
     //                BUILDING_ARMYCAMP_UPGRADE_BROADSWORD);
     // }
-    // 后勤研究（兵营单位人口占用 1 → 0.5）：青铜时代后研发。
-    // 减半后兵营单位（斧头兵）可养数量直接翻倍，是后期爆兵的关键。
-    // 追踪完成状态，供兵力目标翻倍判断使用。
-    if (!logisticsReady) {
-      const tagBuilding *camp = FindBuildingByType(BUILDING_ARMYCAMP, true);
-      if (camp != nullptr) {
-        if (camp->Project == BUILDING_ARMYCAMP_RESEARCH_LOGISTICS)
-          logisticsSeenRunning = true; // 研发进行中
-        else if (logisticsSeenRunning)
-          logisticsReady = true; // 研发结束 → 人口减半已生效
-        else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
-          TryBuildingAction(ai, BUILDING_ARMYCAMP,
-                            BUILDING_ARMYCAMP_RESEARCH_LOGISTICS);
-      }
-    }
-    // 仓库科技，五项逐项串行下单。考察点的链每个 action 下挂两个节点
+    // 【取消】后勤研究（兵营单位人口占用 1 → 0.5）：只对兵营单位生效，
+    // 而兵营单位的配额 armyTarget 是 0；它还是唯一消耗黄金的科技，偏偏 AI 的
+    // 采金早已停用（CalculateFarmerTargets 里 weight[3] 归零），研发它等于
+    // 白扔食物与黄金。logisticsReady 因此恒为 false，兵力目标翻倍那处不会再触发。
+    // if (!logisticsReady) {
+    //   const tagBuilding *camp = FindBuildingByType(BUILDING_ARMYCAMP, true);
+    //   if (camp != nullptr) {
+    //     if (camp->Project == BUILDING_ARMYCAMP_RESEARCH_LOGISTICS)
+    //       logisticsSeenRunning = true; // 研发进行中
+    //     else if (logisticsSeenRunning)
+    //       logisticsReady = true; // 研发结束 → 人口减半已生效
+    //     else if (info.civilizationStage != CIVILIZATION_TOOLAGE)
+    //       TryBuildingAction(ai, BUILDING_ARMYCAMP,
+    //                         BUILDING_ARMYCAMP_RESEARCH_LOGISTICS);
+    //   }
+    // }
+    // 仓库科技，三项逐项串行下单。考察点的链每个 action 下挂两个节点
     // （Development.cpp:535-559）：工具时代 L1 → 铜器时代 L2；再发一次同一
-    // action 即推进到链上下一级，所以数组里把 USETOOL / DEFENSE_INFANTRY
-    // 各出现两次，第二遍就是「进一步研发」（各再 +2）。
+    // action 即推进到链上下一级，所以 USETOOL 在数组里出现两次，第二遍就是
+    // 「进一步研发」（再 +2）。
     //
     //   1. 近战攻击 +2        100 食
-    //   2. 步兵护甲 +2         75 食
-    //   3. 弓兵护甲 +2        100 食
-    //   4. 近战攻击再 +2      200 食 + 120 金   ← 进一步研发
-    //   5. 步兵护甲再 +2      100 食 +  50 金   ← 进一步研发
+    //   2. 弓兵护甲 +2        100 食
+    //   3. 近战攻击再 +2      200 食 + 120 金   ← 进一步研发
+    //
+    // 【取消】步兵护甲（DEFENSE_INFANTRY）的两项已移除：当前兵种配比里没有
+    // 任何近战步兵（棍棒兵 / 阔剑兵 / 方阵兵的生产目标都是 0），研发它只会
+    // 白占食物与研发周期。近战攻击（USETOOL）保留 —— 它同时作用于战车。
     //
     // 门控不用固定帧号，改用「已过升时代 + 资源够点下一项」：
     // 实测食物峰值出现在 f≈12000（600+，此时仍在攒升时代的 800 食物）
@@ -2801,24 +2995,18 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 要求进入青铜时代，是为了不挤占升时代所需的 800 食物。
     if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
         HasBuilding(BUILDING_STOCK)) {
-      static const int kStockTechs[5] = {
+      static const int kStockTechs[3] = {
           BUILDING_STOCK_UPGRADE_USETOOL,
-          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY,
           BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER,
-          BUILDING_STOCK_UPGRADE_USETOOL,
-          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY};
-      static const int kStockTechFood[5] = {
+          BUILDING_STOCK_UPGRADE_USETOOL};
+      static const int kStockTechFood[3] = {
           BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
-          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_FOOD,
           BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
-          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD,
-          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_FOOD};
-      static const int kStockTechGold[5] = {
-          0, 0, 0,
-          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD,
-          BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_GOLD};
+          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD};
+      static const int kStockTechGold[3] = {
+          0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD};
       ResearchTechQueue(ai, BUILDING_STOCK, kStockTechs, kStockTechFood,
-                        kStockTechGold, 5, stockTechCursor, stockTechOrderId);
+                        kStockTechGold, 3, stockTechCursor, stockTechOrderId);
     }
     ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
@@ -3172,6 +3360,25 @@ static int EnemyAttackRange(int armySort)
     }
 }
 
+// 是否需要向祭司重发移动指令。
+//
+// 只在两种情况下为真：目标点变了，或者目标没变但祭司确实卡住了。
+// 不能定期无条件重发 —— HumanMove 经由 Core_List::addRelation 会先调用
+// suspendRelation（Core_List.cpp:450-469）清空移动路径并重置行动，
+// 定期重发等于每次刚起步就把路径清掉（详见 USR_PRIEST_STUCK_FRAMES 的说明）。
+static bool ShouldReissuePriestMove(const tagArmy *priest, int tx, int ty)
+{
+  if (priest == nullptr)
+    return false;
+  if (priestEmergencyTarget.first != tx || priestEmergencyTarget.second != ty)
+    return g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL;
+  // 目标没变：只有祭司自上次下发后一直没挪窝，才判定路径失效需要重发
+  if (g_frame - priestEmergencyTargetFrame < USR_PRIEST_STUCK_FRAMES)
+    return false;
+  return priest->BlockDR == priestMoveFromDR &&
+         priest->BlockUR == priestMoveFromUR;
+}
+
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
@@ -3335,8 +3542,48 @@ static void ManagePriest(UsrAI *ai)
     // 转换进行中保持关系，不追加移动或改派目标，避免打断既有转换。
     // （曾有「遭到围攻或血量过低时放弃转换先保命」的中断判据，已按要求移除：
     //   它会让祭司在被打断后反复重来，转换永远完不成。）
+    // 先记录转换状态。必须放在下面那个 return 之前 —— 否则「转换中」这一状态
+    // 永远不会被记下，也就检测不到「转换刚结束」的瞬间。
+    const bool justFinishedConversion =
+        priestWasConverting && !conversionTargetAlive;
+    priestWasConverting = conversionTargetAlive;
+    if (justFinishedConversion)
+        priestRetreatUntilFrame =
+            g_frame + USR_PRIEST_POST_CONVERSION_RETREAT_FRAMES;
+
     if (conversionTargetAlive)
         return;
+
+    // 转换结束后的撤离窗口：优先回市镇中心（箭塔覆盖圈内），期间不发起新转换。
+    // 敌方把转换中的祭司记成了反击锁目标，且那个锁只在目标死亡时解除
+    // （详见 USR_PRIEST_POST_CONVERSION_RETREAT_FRAMES 的说明），
+    // 所以必须趁这个窗口拉开距离，否则会被一路追到底。
+    if (g_frame < priestRetreatUntilFrame)
+    {
+        const tagBuilding *home = FindCenter();
+        if (home == nullptr)
+        {
+            priestRetreatUntilFrame = USR_INVALID_FRAME;  // 找不到中心，放弃撤离
+        }
+        else if (BlockDis(priest->BlockDR, priest->BlockUR, home->BlockDR,
+                          home->BlockUR) <= 2)
+        {
+            priestRetreatUntilFrame = USR_INVALID_FRAME;  // 已到家，恢复正常行为
+        }
+        else if (ShouldReissuePriestMove(priest, home->BlockDR, home->BlockUR))
+        {
+            priestMoveOrderId = ai->HumanMove(
+                priest->SN, (home->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                (home->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+            priestEmergencyTarget = make_pair(home->BlockDR, home->BlockUR);
+            priestEmergencyTargetFrame = g_frame;
+            priestMoveFromDR = priest->BlockDR;
+            priestMoveFromUR = priest->BlockUR;
+            lastPriestOrderFrame = g_frame;
+        }
+        if (g_frame < priestRetreatUntilFrame)
+            return;  // 撤离期间不做转换 / 治疗
+    }
 
     // 【转换优先于撤退】先尝试转换，能转换就转换；不能转换时才撤退。
     //
@@ -3384,23 +3631,20 @@ static void ManagePriest(UsrAI *ai)
         const pair<int, int> target = make_pair(
             static_cast<int>(retreatPoint.first / double(BLOCKSIDELENGTH)),
             static_cast<int>(retreatPoint.second / double(BLOCKSIDELENGTH)));
-        // 撤退点变化时发指令（按 USR_PRIEST_ORDER_INTERVAL 节流）；
-        // 此外每 USR_PRIEST_RETREAT_REISSUE_FRAMES 帧强制重发一次——
-        // 仅靠「点位变化」判断会导致指令下达后若被中断（移动关系被覆盖、
-        // 寻路失败等），AI 不再重发，祭司站在原地挨打。
+        // 撤退点变化时发指令；点位没变但祭司卡住（被挡、寻路失败）也会重发，
+        // 判据统一在 ShouldReissuePriestMove 里 —— 那里同时保证不会因为
+        // 「定期重发」而反复清空移动路径。
         //
         // 这里刻意不再要求「上一张订单已结算」（原条件含 priestMoveOrderId
         // == -1）：实测该订单可能长时间不在 info.ins_ret 结算，导致一次撤退
         // 指令下达后 637 帧都发不出新指令，而祭司正在持续掉血。
-        const int sinceLastOrder = g_frame - priestEmergencyTargetFrame;
-        const bool targetChanged = target != priestEmergencyTarget;
-        if ((targetChanged &&
-             sinceLastOrder >= USR_PRIEST_ORDER_INTERVAL) ||
-            sinceLastOrder >= USR_PRIEST_RETREAT_REISSUE_FRAMES) {
+        if (ShouldReissuePriestMove(priest, target.first, target.second)) {
           priestMoveOrderId = ai->HumanMove(priest->SN, retreatPoint.first,
                                             retreatPoint.second);
           priestEmergencyTarget = target;
           priestEmergencyTargetFrame = g_frame;
+          priestMoveFromDR = priest->BlockDR;
+          priestMoveFromUR = priest->BlockUR;
           lastPriestOrderFrame = g_frame;
         }
         return;
@@ -3438,41 +3682,86 @@ static void ManagePriest(UsrAI *ai)
         // 复用同一套前沿判定（IsScoutFrontierUsable 已排除建筑、资源与紧贴的敌人）。
         //
         // 放在「无敌人」分支里：有敌人时仍走威胁/转换逻辑，不会为了探路挨打。
-        if (!priestExploreDone && g_frame < USR_PRIEST_EXPLORE_UNTIL_FRAME)
+        // 探路：一直走到找到瞪羚为止 —— 探路的目的就是给农民找到食物来源
+        // （食物只靠浆果丛与瞪羚，见 ResourceBucket），找到了就收工，
+        // 不再受固定帧数限制。USR_PRIEST_EXPLORE_RADIUS（不离开基地 40 格）
+        // 与「前沿点走不到就换下一个」仍是兜底，
+        // 避免它无限往外跑或在够不到的点上原地空耗。
+        if (!priestExploreDone && HasVisibleGazelle())
+            FinishPriestExplore("gazelle");  // 找到食物来源，收工
+
+        if (!priestExploreDone)
         {
+            // 有目标时只做「到达 / 卡住」判定，绝不在行进途中重发。
+            // HumanMove 经由 Core_List::addRelation 会先 suspendRelation
+            // （Core_List.cpp:450-469）清空移动路径，定期重发等于每隔一会儿就把
+            // 祭司拽回起点 —— 实测表现为每 2.4 秒重发同一坐标、原地不动。
+            if (priestFrontierTarget.first >= 0)
+            {
+                const int ttx = priestFrontierTarget.first;
+                const int tty = priestFrontierTarget.second;
+                if (BlockDis(priest->BlockDR, priest->BlockUR, ttx, tty) <= 2)
+                {
+                    priestFrontierTarget = make_pair(-1, -1);  // 到达 → 换一个
+                    priestFrontierStuckCount = 0;  // 确实在推进，清空计数
+                }
+                else if (g_frame - priestEmergencyTargetFrame >=
+                             USR_PRIEST_STUCK_FRAMES &&
+                         priest->BlockDR == priestMoveFromDR &&
+                         priest->BlockUR == priestMoveFromUR)
+                {
+                    // 给足整段 USR_PRIEST_STUCK_FRAMES 都没挪窝 → 判定走不到
+                    // （隔着海洋 / 被建筑围住），放弃该点换下一个。用这么长的
+                    // 窗口是为了不把「正常行进」误判成卡住 —— 误判就会重发，
+                    // 重发就会清空路径。
+                    priestFrontierTarget = make_pair(-1, -1);
+                    // 走不到就换下一个点继续试，但**不结束探路** ——
+                    // 祭司只在找到瞪羚时才停（见 FinishPriestExplore 的调用点）。
+                    ++priestFrontierStuckCount;
+                }
+                return;
+            }
+
+            // 没有目标时才选点下发，并按 USR_PRIEST_EXPLORE_ORDER_INTERVAL 节流
+            if (g_frame - priestEmergencyTargetFrame <
+                USR_PRIEST_EXPLORE_ORDER_INTERVAL)
+                return;
+
             int tx = -1;
             int ty = -1;
-            const bool hasFrontier = FindBestScoutFrontier(*priest, tx, ty);
-            if (hasFrontier)
+            if (!FindBestScoutFrontier(*priest, tx, ty))
             {
-                tx = max(1, min(MAP_L - 2, tx));
-                ty = max(1, min(MAP_U - 2, ty));
+                // 暂时没有可用前沿（已探明陆地不再邻接未探明）。不结束探路：
+                // 前沿集合会随已探明区域变化而更新，隔一会儿再看。
+                return;
             }
-            // 距离兜底：最近的前沿点都已超出探索半径，说明近处已探明得差不多，
-            // 此时不再为探路把祭司送出箭塔覆盖圈。
+            tx = max(1, min(MAP_L - 2, tx));
+            ty = max(1, min(MAP_U - 2, ty));
+            // 不离开基地太远：最近的前沿点都已超出探索半径，说明近处已探明
+            // 得差不多，此时不再为探路把祭司送出箭塔覆盖圈。
             const tagBuilding *home = FindCenter();
-            const bool tooFar = hasFrontier && home != nullptr &&
-                                BlockDis(home->BlockDR, home->BlockUR, tx, ty) >
-                                    USR_PRIEST_EXPLORE_RADIUS;
-            if (!hasFrontier || tooFar)
+            if (home != nullptr &&
+                BlockDis(home->BlockDR, home->BlockUR, tx, ty) >
+                    USR_PRIEST_EXPLORE_RADIUS)
             {
-                priestExploreDone = true;  // 周边已探明（或只剩远处）→ 结束探路
+                // 最近的前沿点都超出了探索半径。不结束探路，只是这一轮不去 ——
+                // 祭司只在找到瞪羚时才停；这里既不移动也不清状态，等下一轮。
+                return;
             }
-            else
-            {
-                if (BlockDis(priest->BlockDR, priest->BlockUR, tx, ty) <= 2)
-                    return;  // 已到前沿点：下一帧会自动选新的前沿
-                if (g_frame - priestEmergencyTargetFrame >=
-                    USR_PRIEST_ORDER_INTERVAL)
-                {
-                    priestMoveOrderId = ai->HumanMove(
-                        priest->SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
-                        (ty + 0.5) * double(BLOCKSIDELENGTH));
-                    priestEmergencyTarget = make_pair(tx, ty);
-                    priestEmergencyTargetFrame = g_frame;
-                }
-                return;  // 探路期间不做别的事（治疗/留基地）
-            }
+
+            priestFrontierTarget = make_pair(tx, ty);
+            priestMoveOrderId = ai->HumanMove(
+                priest->SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
+                (ty + 0.5) * double(BLOCKSIDELENGTH));
+            priestEmergencyTarget = priestFrontierTarget;
+            priestEmergencyTargetFrame = g_frame;
+            priestMoveFromDR = priest->BlockDR;
+            priestMoveFromUR = priest->BlockUR;
+            // 与侦察兵一致：记下该前沿点的访问帧，让 FindBestScoutFrontier
+            // 的 recentPenalty（2400 帧内去过的点扣 1800 分）避开刚走过的点。
+            // 不记这一笔，「到达 → 作废 → 重选」会又选回同一个点。
+            scoutFrontierVisitFrame[make_pair(tx, ty)] = g_frame;
+            return;  // 探路期间不做别的事（治疗/留基地）
         }
 
         // 第三波之前没有敌人时，祭司留在基地待机。
@@ -3492,8 +3781,8 @@ static void ManagePriest(UsrAI *ai)
                 {
                     // 节流重发：每 USR_PRIEST_ORDER_INTERVAL 帧最多一次，
                     // 否则每帧重发会不断 suspendRelation + 重新寻路，反而走不动。
-                    if (g_frame - priestEmergencyTargetFrame >=
-                        USR_PRIEST_ORDER_INTERVAL)
+                    if (ShouldReissuePriestMove(priest, home->BlockDR,
+                                                home->BlockUR))
                     {
                         priestMoveOrderId = ai->HumanMove(
                             priest->SN,
@@ -3502,6 +3791,8 @@ static void ManagePriest(UsrAI *ai)
                         priestEmergencyTarget =
                             make_pair(home->BlockDR, home->BlockUR);
                         priestEmergencyTargetFrame = g_frame;
+                        priestMoveFromDR = priest->BlockDR;
+                        priestMoveFromUR = priest->BlockUR;
                         lastPriestOrderFrame = g_frame;
                     }
                     return;
@@ -4502,23 +4793,20 @@ void UsrAI::processData()
                 first != NULL ? (int)first->Project : -9999, free ? 1 : 0);
           }
         }
-        // 与 ManageEconomyAndProduction 里的 kStockTechFood 保持同一顺序，
-        // 最后两项是铜器时代的「进一步研发」，还需黄金。
-        static const int kStockFood[5] = {
+        // 与 ManageEconomyAndProduction 里的 kStockTechFood 保持同一顺序。
+        // 步兵护甲的两项已从研发队列移除，这里同步去掉（否则下标会错位）。
+        static const int kStockFood[3] = {
             BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
-            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_FOOD,
             BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
-            BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD,
-            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_FOOD};
-        static const int kStockGold[5] = {
-            0, 0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD,
-            BUILDING_STOCK_UPGRADE_DEFENSE_INFANTRY_2_GOLD};
+            BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD};
+        static const int kStockGold[3] = {
+            0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD};
         snprintf(buf, sizeof(buf),
                  "[TECH] f=%d food=%d gold=%d need=%d/%d%s stockCur=%d "
                  "stockPend=%d ret=%d retF=%d",
                  g_frame, (int)info.Meat, info.Gold,
-                 stockTechCursor < 5 ? kStockFood[stockTechCursor] : 0,
-                 stockTechCursor < 5 ? kStockGold[stockTechCursor] : 0, detail,
+                 stockTechCursor < 3 ? kStockFood[stockTechCursor] : 0,
+                 stockTechCursor < 3 ? kStockGold[stockTechCursor] : 0, detail,
                  stockTechCursor, stockTechOrderId, lastTechRet, lastTechFrame);
         AiDebugLog(buf);
       }
@@ -4535,6 +4823,11 @@ void UsrAI::processData()
     // ManageOffensiveArmy(this);
     // AssignFarmerSelfDefense(this);
     SacrificeExcessFarmers(this);
+    // 农民自卫：30000 帧后启动（对应「第三波骚扰之后」，enemyai.cpp:45 的
+    // TAT = 21000 已过）。此前农民遇袭一律靠撤离、不还手，避免早期被零星
+    // 骚扰牵着走、把采集力从食物/木头上拽开；进入后期农民挨打时则就地反击。
+    if (g_frame >= USR_FARMER_SELF_DEFENSE_FRAME)
+        AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
 }
