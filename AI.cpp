@@ -7,7 +7,9 @@ AI::~AI() {
     condition.wakeAll();
     wait();
 }
-
+int AI::ActionCancel(int SN){
+    return AI::AddToIns(instruction(INS_CANCEL, SN,0));
+}
 int AI::HumanMove(int SN, double DR0, double UR0){
     return AI::AddToIns(instruction(INS_HUMANMOVE,SN,Double::FromDouble(DR0),Double::FromDouble(UR0)));
 }
@@ -64,7 +66,9 @@ void AI::run() {
             ProcessDataWork = 0;
         }
         //将所有命令放入Ins结构体
-        CommitInstruction();
+        if(!GameReplay){//虽然回放模式不会产生指令，但保险起见还是加一下
+            CommitInstruction();
+        }
         //
         condition.wait(&mutex);
     }

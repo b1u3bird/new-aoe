@@ -14,6 +14,7 @@ using namespace std;
 
 /*************************全局随机数生成器******************/
 Random Rand(119);
+Random RenderRand(120);//渲染使用随机数
 /*************************配置读取量***********************/
 QString ResultLogFile;//实时信息输出日志
 /************************全局初始量************************/
@@ -532,8 +533,8 @@ instruction::instruction(int type,int SN, int obSN , bool twoCoredinate){
     this->SN = SN;
     this->obSN = obSN;
     this->type=type;
-    this->self=g_Object[SN];
-    this->obj=g_Object[obSN];
+    //this->self=g_Object[SN];
+    //this->obj=g_Object[obSN];
 }
 instruction::instruction(int type,int SN,int BL,int BU,int option){
     this->SN = SN;
@@ -546,14 +547,14 @@ instruction::instruction(int type,int SN,int BL,int BU,int option){
 instruction::instruction(int type,int SN,Double L,Double U){
     this->SN = SN;
     this->type=type;
-    this->self=g_Object[SN];
+    //this->self=g_Object[SN];
     this->DR=L;
     this->UR=U;
 }
 instruction::instruction(int type,int SN,int option){
     this->SN = SN;
     this->type=type;
-    this->self=g_Object[SN];
+    //this->self=g_Object[SN];
     this->option=option;
 }
 
@@ -562,6 +563,11 @@ void instruction::Serialize(FArchive *arc)
     arc->Serialize(type);
     arc->Serialize(SN);
     switch (type) {
+    case INS_CANCEL:
+    {
+        //不用管了
+        break;
+    }
     case INS_HUMANMOVE:
     {
         arc->Serialize(DR.raw_);
@@ -717,7 +723,12 @@ void ParseArguments(const QApplication&app){
         QStringList()<<"record",
          "record the instruction"
        );
-    QList<QCommandLineOption>options={option0,option1,option2,option3,option4,option5,option6};
+    QCommandLineOption option7(
+        QStringList()<<"RecordOutputFile",
+         "record the instruction output file",
+        "fileName"
+       );
+    QList<QCommandLineOption>options={option0,option1,option2,option3,option4,option5,option6,option7};
     parser.addOptions(options);
 
     // QCommandLineParser会把缺少值的-map直接当成参数错误并结束程序。
@@ -753,6 +764,11 @@ void ParseArguments(const QApplication&app){
     if(parser.isSet("ResultLogFile")){
         auto value=parser.value("ResultLogFile");
         ResultLogFile=value;
+    }
+    //
+    if(parser.isSet("RecordOutputFile")){
+        auto value=parser.value("RecordOutputFile");
+        RuntimeConfig_setGameRecordFile(value);
     }
     //
     if(parser.isSet("freq")){
@@ -1353,8 +1369,3 @@ void InstructionForSave::Serialize(FArchive *arc)
     arc->Serialize(ins);
 }
 
-bool InstructionForSave::operator< (const InstructionForSave &oth) const
-{
-    if(oth.frame==frame)return ins.id<oth.ins.id;
-    return frame<oth.frame;
-}

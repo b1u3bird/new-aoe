@@ -78,6 +78,7 @@ void Core::gameUpdate()
     interactionList->update();
     //判断是否是第一帧,第一帧需要初始化一些数据
     PostFirstFrameProcess();
+
 }
 void Core::correctMoveObjectTerrain(MoveObject* object)
 {
@@ -1236,6 +1237,36 @@ void Core::deduplicateInstructions(std::queue<instruction>& instructions) {
     }
 }
 
+// 在按 SN 去重前排除科技前置尚未满足的建筑行动。
+// 否则同一建筑后发的未解锁生产指令会覆盖前面的科技研发指令。
+bool Core::preValidateInstruction(instruction& cur, Player* commandPlayer, tagGame* tagAIGame, int playerId)
+{
+    if (cur.type != INS_BUILDINGACTION)
+        return true;
+
+    // option == 0 是停止行动；option == SN 是删除建筑。
+    if (cur.option == 0 || cur.option == cur.SN)
+        return true;
+
+    Coordinate* commandObject = g_Object[cur.SN];
+    if (commandObject == NULL || commandObject->getPlayerRepresent() != playerId)
+        return true; // 交给原有流程返回 SN/归属错误。
+
+    Building* building = NULL;
+    commandObject->printer_ToBuilding((void**)&building);
+    if (building == NULL || !building->isConstructed())
+        return true; // 保留原有的对象类型和未建成错误优先级。
+
+    if (!commandPlayer->get_isBuildActionShowAble(building->getNum(), cur.option))
+    {
+        cur.ret = ACTION_INVALID_BUILDACT_LOCK;
+        tagAIGame->insertInsRet(cur.id, cur);
+        return false;
+    }
+
+    return true;
+}
+
 void Core::PostFirstFrameProcess()
 {
     if(CoreExecuteFrames!=1)return;
@@ -1267,12 +1298,14 @@ void Core::PreFirstFrameProcess()
             GameRecordOrReplayArchive->Serialize(ins);
             GameReplayData.push_back(ins);
         }
-        sort(GameReplayData.begin(),GameReplayData.end());
+        //写入是有序的，所以读出来肯定是有序的
         reverse(GameReplayData.begin(),GameReplayData.end());//倒序
     }else if(GameRecord){
         //计录地图信息
         string mapFile=theMap->GetMapFileName().toStdString();
+        int16_t degree=RuntimeConfig_MapRotationDegrees();
         GameRecordOrReplayArchive->Serialize(mapFile);
+        GameRecordOrReplayArchive->Serialize(degree);//序列化旋转角度
         //打开文件句柄
         GameRecordFileHandle = new QFile(GameRecordFile);
         if (!GameRecordFileHandle->open(QIODevice::WriteOnly))
@@ -1327,6 +1360,7 @@ void Core::ProcessGameRecord(instruction ins,int playerID)
 //后续编写，用于处理AI指令
 void Core::manageOrder(int id)
 {
+
     ins* NowIns;
     tagGame* tagAIGame;
     Player* self = player[id];
@@ -1339,6 +1373,18 @@ void Core::manageOrder(int id)
         tagAIGame = &tagEnemyGame;
     }
     NowIns->lock.lock();
+
+    // 先过滤科技前置未成立的建筑行动，并为它们写入真实返回码。
+    // 被过滤的命令不再参与同 SN 去重，因此不会覆盖前面的科技研发指令。
+    std::queue<instruction> filteredInstructions;
+    while (!NowIns->instructions.empty())
+    {
+        instruction cur = NowIns->instructions.front();
+        NowIns->instructions.pop();
+        if (preValidateInstruction(cur, self, tagAIGame, id))
+            filteredInstructions.push(cur);
+    }
+    NowIns->instructions.swap(filteredInstructions);
     //对NowIns->instructions进行去重，如果两个指令的self相同，保留靠后的
     deduplicateInstructions(NowIns->instructions);
     //获取可以发起指令的所有对象数量(也就是说，就算ai给再多指令，我每一帧只处理ObjCnt这么多指令)
@@ -1347,6 +1393,10 @@ void Core::manageOrder(int id)
     while (!NowIns->instructions.empty() && ObjCnt--) {
         instruction cur = NowIns->instructions.front();
         NowIns->instructions.pop();
+        //
+        cur.self=g_Object[cur.SN];
+        cur.obj=g_Object[cur.obSN];
+        //
         Coordinate* self = cur.self;
         int ret = ACTION_INVALID_SN; // 默认错误码
         //录像
@@ -1465,10 +1515,11 @@ void Core::manageOrder(int id)
         cur.ret = ret;
         tagAIGame->insertInsRet(cur.id, cur);
         if (ret != ACTION_SUCCESS) {
-            qWarning() << id << "号玩家指令：" + cur.id << "执行失败，错误码：" << cur.ret << endl;
+
+            qWarning() << id << "号玩家指令：" << cur.id << "执行失败，错误码：" << cur.ret << endl;
         }
         else {
-            qInfo() << id << "号玩家指令：" + cur.id << "执行成功" << endl;
+            qInfo() << id << "号玩家指令：" <<cur.id << "执行成功" << endl;
         }
     }
     NowIns->instructions=std::queue<instruction>();
@@ -1477,6 +1528,12 @@ void Core::manageOrder(int id)
 
 void Core::ProcessGameReplay()
 {
+    //指令全跑完了，就得退出了
+    if(GameReplayData.size()==0){
+        QMessageBox::information(0, QStringLiteral("回放结束"), "回放结束", QMessageBox::Ok);
+        exit(0);
+    }
+    //
     if(GameReplayData.back().frame<CoreExecuteFrames){
         cerr<<"There is an error that GameReplayData first frame less than current frame!"<<endl;
         exit(0);
@@ -1656,7 +1713,7 @@ void Core::PreProcessDuringExam()
     is_cheatAction=false;
     //输出每帧的实时状态信息
     Player*p=player[NOWPLAYERREPRESENT];
-    ResultLogInfo(0,usrScore.getScore(),p->getWood(),p->getFood(),p->getGold(),p->getScore()).LogOut();
+    ResultLogInfo(0,usrScore.getScore(),p->getWood(),p->getFood(),p->getGold(),p->getStone()).LogOut();
 }
 
 void Core::GameOverHandle()
