@@ -104,8 +104,8 @@ static bool priestLapCaptured = false;
 // 祭司开局探路是否已结束。
 static bool priestExploreDone = false;
 // 祭司「走向敌方攻城武器厂」的停止距离（格）。
-// 要比 FindEnemySiege 里 12 格的转换判定小一些，确保走到位之后那条路径
-// 一定能接手（它的判据是 dis2 < 12*12）。
+// 必须小于引擎的转换距离（config.json 的 DIS_PRIEST = 12），确保
+// ManagePriest 里「到位就地转换」那一判定成立时，祭司一定真的能转换。
 static const int USR_PRIEST_SIEGE_APPROACH_RADIUS = 10;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
@@ -446,8 +446,14 @@ static void LogIdleFarmerStuck(const tagFarmer &farmer, int desiredBucket,
 // 定义在 ManageOffensiveArmy 之前，但 ManageStandoff 要用它。
 static bool IsOffensiveArmy(const tagArmy &army);
 // 定义在 ManageStandoff 一带，但 ManagePriest 要用它们
-// （「没有敌人就去转换攻城武器厂」那一段）。
+// （「敌人打光了就去转换攻城武器厂」那一段）。
+// 【两个判据的分工，不要混用】
+//   HasVisibleEnemyArmy()  —— 此刻视野里有没有敌兵（眼前的危险/该不该接敌）
+//   EnemyArmyStillExists() —— 按敌方开局总量 51 判断「是不是真打光了」
+// 祭司的出门/守家看后者（要等敌人真的清空才去换基地），
+// 总攻与站桩仍看前者（有可见敌兵就先打兵）。
 static bool HasVisibleEnemyArmy();
+static bool EnemyArmyStillExists();
 static const tagBuilding *FindEnemySiegeBuilding();
 ;
 static bool IsAliveFarmerSN(int farmerSN);
@@ -1283,36 +1289,15 @@ static int FindThreatToPriestSN(int priestSN)
     return bestSN;
 }
 
-static const tagBuilding *FindEnemySiege(const tagArmy &priest)
-{
-    for (const tagBuilding &building : info.enemy_buildings)
-    {
-        // 只找攻城武器厂（胜利条件：转换它），修复距离计算的 BlockUR 笔误。
-        if (building.Blood <= 0 || building.Type != BUILDING_SIEGE)
-            continue;
-        const int dis2 = BlockDis2(building.BlockDR, building.BlockUR, priest.BlockDR, priest.BlockUR);
-        if (dis2 >= 12 * 12)
-            continue;
-        // 攻城武器厂附近 5 格内有敌人则视为不安全，等军队清理后再转换。
-        bool safe = true;
-        for (const tagArmy &enemy : info.enemy_armies)
-        {
-            if (enemy.Blood <= 0)
-                continue;
-            const int enemyDis2 = BlockDis2(building.BlockDR, building.BlockUR,
-                                            enemy.BlockDR, enemy.BlockUR);
-            if (enemyDis2 < 2 * 2)
-            {
-                safe = false;
-                break;
-            }
-        }
-        if (!safe)
-            continue;
-        return &building;
-    }
-    return nullptr;
-}
+// 【已删除】FindEnemySiege(const tagArmy&)
+// 它只找「12 格以内、且附近 2 格没有敌人」的敌方攻城武器厂。
+// 它的唯一调用点在 ManagePriest 一个判据自相矛盾的块里，任何帧都执行不到，
+// 所以祭司从来没有下发过一次转换攻城厂的指令（实测整局 0 次）。
+// 现在转换由 ManagePriest 开头的「没有敌人 → 去转换敌方攻城武器厂」一段负责：
+// 它用 FindEnemySiegeBuilding() 找厂（不限距离，靠走过去），
+// 走进 USR_PRIEST_SIEGE_APPROACH_RADIUS(10) 格后直接 HumanAction。
+// 距离上限与「附近没有敌人」两个条件都被新实现覆盖（后者由
+// !HasVisibleEnemyArmy() 覆盖，比原来「2 格内没敌人」更严），故不再保留旧函数。
 
 static int ArmyTargetPriority(const tagArmy &enemy)
 {
@@ -2185,13 +2170,36 @@ static int ResourceHardCapacity(int bucket)
 
 // 返回资源点到最近交付建筑（市镇中心 + 特殊建筑）的距离平方。
 // 特殊建筑：仓库（木头/石头/黄金/猎物食物）或谷仓（农场食物）。
+//
+// 【在建的也算数（原先写了 Percent < 100 就 skip，是个 bug）】
+//
+// 交付建筑一旦下单，它就是「这片资源有交付点」这个事实 —— 规划阶段不该当它
+// 不存在。原来的过滤会造成重复建仓，因为盖一座仓库要几百帧，而选址每
+// USR_BUILD_ORDER_INTERVAL(100) 帧就会重跑一次：
+//
+//   选锚点 → 下单(HumanBuild) → 订单几十帧内结算，只剩 100 帧节流挡着
+//   → 1000 帧后重跑，那座位在建 → Percent<100 被跳过 → 同一个锚点的 dis2
+//     纹丝不动 → 判定「还是太远」→ 在旁边找个空位再盖一座 → 循环
+//
+// 实测 [DEPOT]（同一锚点、同一个 dis2，而建成的数量 have 涨了 1）：
+//   f=6211  dis2=317  have=2 anchor=(10,34)
+//   f=7211  dis2=317  have=3 anchor=(10,34)
+//   f=8211  dis2=866  have=3 anchor=(56,16)
+//   f=9211  dis2=866  have=4 anchor=(56,16)
+// 整局 have 2→3→4→5→6→7，猎场那几座甚至两两只隔 2~4 格。
+//
+// 另一条独立证据：CountBuilding() 只筛 Blood>0，所以它数得到新建的那座；
+// 两个函数唯一的差别就是这个 Percent 过滤 —— 一个数得到、一个数不到，
+// 正好锁死了病因。
+// 唯一的代价：万一某座交付建筑中途没盖成，资源会显得比实际近一点、农民多走
+// 一段。本 AI 不会主动放弃工地，风险可忽略。
 static int FindNearestReturnBuildingDistance(int specialBuilding,
                                              int blockDR, int blockUR)
 {
     int bestDis2 = 1000000000;
     for (const tagBuilding &building : info.buildings)
     {
-        if (building.Blood <= 0 || building.Percent < 100)
+        if (building.Blood <= 0)
             continue;
         if (building.Type != BUILDING_CENTER &&
             building.Type != specialBuilding)
@@ -2202,6 +2210,32 @@ static int FindNearestReturnBuildingDistance(int specialBuilding,
             bestDis2 = dis2;
     }
     return bestDis2;
+}
+
+// 某种资源该送去哪座交付建筑 —— 照抄引擎的 Resource::get_ReturnBuildingType()
+// 与 Building::isMatchResourceType()，不要凭直觉写。
+//
+// 【引擎真值】（这几处是唯一的依据，改动前先回去核对）
+//   StaticRes.cpp:41-44   NUM_STATICRES_Bush  → HUMAN_GRANARYFOOD
+//   Building_Resource.cpp:41  BUILDING_FARM  → HUMAN_GRANARYFOOD
+//   MainWidget.cpp:2450   AnimalResouceSort = {WOOD, STOCKFOOD, ...}
+//                         → 瞪羚/大象/狮子尸体是 HUMAN_STOCKFOOD
+//   Building.cpp:560-570  CENTER 什么都收；STOCK 收 WOOD/GOLD/STONE/STOCKFOOD；
+//                         GRANARY 只收 GRANARYFOOD
+//
+// 【为什么必须按类型区分】浆果丛和农田一样是 GRANARYFOOD —— 仓库根本收不了它，
+// 只能送谷仓或市镇中心。原先这里对所有野生资源一律用 BUILDING_STOCK，于是：
+//   · 选点（FindBestResourceSN）按「到最近仓库/中心的距离」挑浆果丛，而农民实际
+//     要跑去谷仓 —— 两个方向可以差出几十格，AI 以为近的、农民得横穿地图；
+//   · 建仓（TryBuildReturnDepot）看到「浆果丛离仓库很远」就去浆果丛旁边建一座
+//     仓库。仓库对浆果毫无用处，但 AI 自己的评分立刻变「近」了，是个自我强化的
+//     假象 —— 这正是那些堆在野外的仓库的来源之一。
+// 瞪羚尸体是 STOCKFOOD，用仓库是对的，不要一起改掉。
+//
+// CENTER 由 FindNearestReturnBuildingDistance 自己带上（它什么都收），这里不用管。
+static int ReturnBuildingForResource(int resourceType)
+{
+    return resourceType == RESOURCE_BUSH ? BUILDING_GRANARY : BUILDING_STOCK;
 }
 
 // 每帧重建一次猎物群。单链聚类：距离 <= USR_HUNT_CLUSTER_RADIUS 的瞪羚
@@ -2392,8 +2426,12 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         // IsFarmerClusterCrowded（目标 3×3 邻域内 ≥3 个农民就跳过）——
         // 注意原先还有一份 crowdPenalty 轻罚，但它是死代码（见下面的说明）已删，
         // 所以现在完全靠这两道硬闸。
+        // 【交付建筑按资源类型选】浆果丛是 GRANARYFOOD、只能送谷仓，仓库收不了它；
+        // 瞪羚尸体与树/石/金才走仓库。类型用错会让「AI 认为近、农民跑断腿」——
+        // 详见 ReturnBuildingForResource 那张引擎真值表。
         const int returnDistance = FindNearestReturnBuildingDistance(
-            BUILDING_STOCK, resource.BlockDR, resource.BlockUR);
+            ReturnBuildingForResource(resource.Type), resource.BlockDR,
+            resource.BlockUR);
         // 【删除】原先这里还有 crowdPenalty（软上限内 workers*12，超过则
         // (workers-soft+1)*80）。它**从未生效过**：下面的 softCapacity 与上面
         // 1651 行的 ResourceHardCapacity(bucket) 是同一组数（食物 4 / 其它 3），
@@ -3124,12 +3162,17 @@ static void TryBuildReturnDepot(UsrAI *ai)
         {
             if (!IsGatherableResource(resource))
                 continue;
+            // 建哪座交付建筑由资源类型决定：浆果丛要的是【谷仓】。原先一律当成
+            // 仓库，于是会在浆果丛旁边盖一座对它毫无用处的仓库，而 AI 自己的评分
+            // 立刻变「近」、继续往那儿派人 —— 自我强化的假象，也是野外那些多余
+            // 仓库的来源之一。详见 ReturnBuildingForResource 的引擎真值表。
+            const int returnBuilding = ReturnBuildingForResource(resource.Type);
             const int dis2 = FindNearestReturnBuildingDistance(
-                BUILDING_STOCK, resource.BlockDR, resource.BlockUR);
+                returnBuilding, resource.BlockDR, resource.BlockUR);
             if (dis2 > worstReturnDis2)
             {
                 worstReturnDis2 = dis2;
-                worstBuildingType = BUILDING_STOCK;
+                worstBuildingType = returnBuilding;
                 anchorDR = resource.BlockDR;
                 anchorUR = resource.BlockUR;
             }
@@ -4288,21 +4331,35 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 落在升时代扣掉 800 食物之后的最低谷（30~100），第一项就要 100 食物，
     // 于是整局都点不上（日志中 Core 持续返回 20 = ACTION_INVALID_RESOURCE）。
     // 要求进入青铜时代，是为了不挤占升时代所需的 800 食物。
-    if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
-        HasBuilding(BUILDING_STOCK)) {
-      static const int kStockTechs[3] = {
-          BUILDING_STOCK_UPGRADE_USETOOL,
-          BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER,
-          BUILDING_STOCK_UPGRADE_USETOOL};
-      static const int kStockTechFood[3] = {
-          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
-          BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
-          BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD};
-      static const int kStockTechGold[3] = {
-          0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD};
-      ResearchTechQueue(ai, BUILDING_STOCK, kStockTechs, kStockTechFood,
-                        kStockTechGold, 3, stockTechCursor, stockTechOrderId);
-    }
+    // 【取消】仓库的所有科技研发（原三项：近战攻击 +2 / 弓兵护甲 +2 /
+    // 近战攻击再 +2，成本 100~200 食，第三项还要 120 金）。
+    //
+    // 它们加的是【近战攻击】与【弓兵护甲】：
+    //   · 近战攻击（USETOOL）—— 当前配比里唯一的近战单位是 2 辆战车，
+    //     占比不到 5%，为它们花 300 食 + 120 金不划算；
+    //   · 弓兵护甲（DEFENSE_ARCHER）—— 主力是战车弓兵，但远程交火里
+    //     我们靠的是射程与站桩消耗，不是换血。
+    // 而且食物在这套经济里长期紧张（实测 10~790 波动，多数时间在低位），
+    // 这三项会和造兵、升时代直接抢。取消后仓库不再消耗任何资源。
+    //
+    // 注意：保留这段的注释与数组结构是为了将来恢复时能直接对照，
+    // 但【不要再顺手打开】—— 先确认当时的兵种配比里真的有近战单位。
+    //
+    // if (info.civilizationStage != CIVILIZATION_TOOLAGE &&
+    //     HasBuilding(BUILDING_STOCK)) {
+    //   static const int kStockTechs[3] = {
+    //       BUILDING_STOCK_UPGRADE_USETOOL,
+    //       BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER,
+    //       BUILDING_STOCK_UPGRADE_USETOOL};
+    //   static const int kStockTechFood[3] = {
+    //       BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
+    //       BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
+    //       BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_FOOD};
+    //   static const int kStockTechGold[3] = {
+    //       0, 0, BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_2_GOLD};
+    //   ResearchTechQueue(ai, BUILDING_STOCK, kStockTechs, kStockTechFood,
+    //                     kStockTechGold, 3, stockTechCursor, stockTechOrderId);
+    // }
     ManageWeightedProduction(ai, nearPopulationCap);
     TryAssignIdleFarmer(ai);
 }
@@ -4489,6 +4546,22 @@ static int PriestConversionPriority(int armySort);
 // 祭司在安全状态下治疗受伤友军：士兵按兵种优先级优先，同级再按受伤程度；
 // 农民优先级最低，仅在无士兵受伤时才治疗。忽略自身与侦察兵。
 static bool TryPriestHeal(UsrAI *ai, const tagArmy &priest) {
+  // 【USR_PRIEST_PASSIVE_FRAME(30000) 帧之后一律禁用】
+  //
+  // 治疗是 HumanAction：它建立对象关系之后，Core 的流程是「走过去再治疗」，
+  // 也就是这条指令会【把祭司拽到伤员身边】。总攻阶段祭司只保存实力，任何
+  // 会被敌人牵着走的行动都要掐掉。
+  //
+  // 【为什么拦在函数入口，而不是只拦调用点】唯一的调用点在 ManagePriest 的
+  // `!enemyVisible` 分支里，那个分支本身已经有三处 return；将来任何改动都
+  // 可能把治疗重新放出来。规则写在入口，谁调用都绕不过。
+  //
+  // 实测（ai_debug.log）：18500~21000 帧之间祭司在 (77,18)↔(78,18) 之间
+  // 原地摆动 2500 帧，就是这条治疗指令与「守家 12 格」规则互相拉扯 ——
+  // 两者的半径都恰好是 12 格，谁都赢不了，路径每次都被 suspendRelation 清空。
+  if (g_frame >= USR_PRIEST_PASSIVE_FRAME)
+    return false;
+
   // ① 正在治疗的友军未满血 → 保持该治疗关系，不切换目标。
   // 否则会因「别人伤更重」而在伤员之间反复横跳，谁都治不满。
   if (priest.WorkObjectSN != -1) {
@@ -4690,21 +4763,55 @@ static void ManagePriest(UsrAI *ai)
     if (priest == nullptr)
         return;  // 祭司死亡后不再执行祭司逻辑，避免解引用空指针
 
+    // 【先结算上一条订单，再让任何分支去读 priestMoveOrderId】
+    //
+    // 这一段原先在守家规则【之后】—— 也就是所有决策都读完 priestMoveOrderId
+    // 才轮到它清零。而下面「走到攻城厂就地转换」那条分支会立刻 return，永远
+    // 走不到这里，于是 priestMoveOrderId 一旦被赋值就再也不归零：转换指令只
+    // 下发一次，成功还算好，被 Core 拒绝（ret=14 ISNTFREE 之类）就永久卡死。
+    // 结算逻辑必须排在使用之前，这才是「每帧先清账、再做决策」的顺序。
+    // 记录回执码：0 = 关系已建立；非 0 说明指令被 Core 拒绝，祭司不会动。
+    if (priestMoveOrderId != -1)
+    {
+        map<int, int>::const_iterator result = info.ins_ret.find(priestMoveOrderId);
+        if (result != info.ins_ret.end() ||
+            g_frame - priestEmergencyTargetFrame >=
+                USR_PRODUCTION_ORDER_TIMEOUT)
+        {
+            priestMoveLastRet =
+                result != info.ins_ret.end() ? result->second : -1;
+            priestMoveLastRetFrame = g_frame;
+            priestMoveOrderId = -1;
+        }
+    }
+
     // 【没有敌人 → 去转换敌方攻城武器厂（唯一的获胜条件）】
     //
-    // 【为什么需要这一整段】原先【没有任何「走过去」的逻辑】：
-    // FindEnemySiege 的判据里有 `if (dis2 >= 12 * 12) continue`，要求攻城厂
-    // 已经在祭司 12 格以内 —— 所以祭司只有在【偶然晃到旁边】时才会转换它，
-    // 其余时间都在基地附近待命。获胜路径实际上从来没被主动执行过。
+    // 【为什么需要这一整段】这一段原先只做了半件事：把祭司「送出门」，
+    // 却没有「到位后转换」那一步 —— 唯一的转换调用点 FindEnemySiege() 被卡在
+    // 一个判据自相矛盾的块里（详见下面 4789 起的说明），任何帧都执行不到。
+    // 结果就是祭司一路走到厂门口、转身、回家，重来。这里把后半件补上。
     //
     // 【为什么放在最前面】它是获胜路径，优先级高于守家（12 格）与硬圈（50 格）——
     // 那两条都是为了保命，而这里是唯一的取胜手段，不能互相否决。
     //
-    // 【为什么要求「没有敌人」】有敌人在的时候让祭司出门就是送；而且一旦它靠近
-    // 敌方基地，守军进入视野会让这个条件自动失效、它就会退回来，天然自限。
-    // 保留原先的 g_frame >= USR_PRIEST_PASSIVE_FRAME(30000) 门槛：在那之前
-    // 军队还没成型，这时候押上祭司去换基地是亏的。
-    if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !HasVisibleEnemyArmy())
+    // 【为什么要求「敌人打光了」，而不是「视野里没有敌人」】
+    //
+    // 判据是 EnemyArmyStillExists()（按敌方开局总量 51 判断），不是
+    // HasVisibleEnemyArmy()。
+    //
+    // 原先用「视野内没有敌人」，后果是祭司走到一半、远处任何一个敌兵进入视野，
+    // 这个条件立刻失效、它掉到 50 格缰绳被拽回家；等敌人不可见了再出门 ——
+    // 在 130 格的路程上来回摇摆，永远到不了厂门口。
+    //
+    // 用总量判据则相反：只要敌方还有任何兵力（哪怕此刻在迷雾里），祭司就不出门；
+    // 只有「51 个全部见过、且此刻一个都看不见」才认定真打光了、该去换基地了。
+    // 这与「有敌人就不要靠近基地」是同一条策略，只是把「敌人」的口径从
+    // 「此刻看得见的」换成「战略上还活着的」。
+    //
+    // 保留 g_frame >= USR_PRIEST_PASSIVE_FRAME(30000) 门槛：在那之前军队还没成型，
+    // 这时候押上祭司去换基地是亏的。
+    if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !EnemyArmyStillExists())
     {
         const tagBuilding *siegeTarget = FindEnemySiegeBuilding();
         if (siegeTarget != nullptr)
@@ -4716,9 +4823,14 @@ static void ManagePriest(UsrAI *ai)
                 USR_PRIEST_SIEGE_APPROACH_RADIUS *
                     USR_PRIEST_SIEGE_APPROACH_RADIUS)
             {
-                // 还没到 → 走过去。到了 USR_PRIEST_SIEGE_APPROACH_RADIUS 以内
-                // 就不拦，让下面 FindEnemySiege 那条路径正常下发 HumanAction。
-                if (ShouldReissuePriestMove(priest, siegeTarget->BlockDR,
+                // 还没到 → 走过去。
+                //
+                // 【有了转换关系就不能再发移动】WorkObjectSN 已经是这座厂，
+                // 说明转换关系已建立、祭司正在途中；此时再发 HumanMove 会经
+                // Core_List::addRelation → suspendRelation 把关系清掉。实测
+                // 这条 10 格边界会被反复跨越，一跨就互毁，必须在这里让路。
+                if (priest->WorkObjectSN != siegeTarget->SN &&
+                    ShouldReissuePriestMove(priest, siegeTarget->BlockDR,
                                             siegeTarget->BlockUR))
                 {
                     priestMoveOrderId = ai->HumanMove(
@@ -4734,6 +4846,44 @@ static void ManagePriest(UsrAI *ai)
                 }
                 return;
             }
+
+            // 【走到位了 → 就地转换】
+            //
+            // 【为什么必须写在这里】全文件唯一会转换攻城厂的是 FindEnemySiege()，
+            // 而它唯一的调用点在下面那个「有可见敌人」的块里 —— 而那个块的上方
+            // 就有一句 `if (HasVisibleEnemyArmy()) return;`，判据完全相同。于是
+            //   有敌人 → 提前 return，到不了调用点；
+            //   没敌人 → 到了，但 anyEnemyVisible 为假，整块不执行。
+            // 也就是说那行在任何帧都不可达，祭司站在厂门口也不会动手
+            // （实测 baseKnown=1、enemyB=6、祭司距厂 130 格，全程 0 次转换）。
+            // 转换攻城厂是唯一的获胜条件，指令必须在这里下发。
+            //
+            // 距离用 USR_PRIEST_SIEGE_APPROACH_RADIUS(10)，它比引擎的转换距离
+            // （config.json 的 DIS_PRIEST = 12）小 2 格，保证「判定能转换」时
+            // 一定真的在转换距离内。
+            if (priest->ConvertCooldown <= 0 && priestMoveOrderId == -1 &&
+                priest->WorkObjectSN != siegeTarget->SN)
+            {
+                // 已经有关系时不重复下发 —— 重复指令会中止 Core 里的原关系。
+                priestMoveOrderId = ai->HumanAction(priest->SN, siegeTarget->SN);
+                priestEmergencyTargetFrame = g_frame;
+                lastPriestOrderFrame = g_frame;
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "[SIEGECONV] f=%d priest=(%d,%d) siegeSN=%d "
+                         "siegePos=(%d,%d) dis2=%d siegeHP=%d/%d prevRet=%d",
+                         g_frame, priest->BlockDR, priest->BlockUR,
+                         siegeTarget->SN, siegeTarget->BlockDR,
+                         siegeTarget->BlockUR, siegeDis2, siegeTarget->Blood,
+                         siegeTarget->MaxBlood, priestMoveLastRet);
+                AiDebugLog(buf);
+            }
+            // 【无论有没有下发指令都到此为止】
+            // 既然攻城厂已知、视野里又没有敌人，祭司唯一的任务就是转换它。
+            // 不能落到下面的守家(12)/缰绳(50)/治疗逻辑 —— 敌方基地离我方中心
+            // 130 格，一落到缰绳就会被 HumanMove 一路拽回家，形成
+            // 「走到厂门口 → 掉头 → 再走过去」的大范围来回。
+            return;
         }
     }
 
@@ -4768,22 +4918,6 @@ static void ManagePriest(UsrAI *ai)
                 }
                 return;
             }
-        }
-    }
-
-    if (priestMoveOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(priestMoveOrderId);
-        if (result != info.ins_ret.end() ||
-            g_frame - priestEmergencyTargetFrame >=
-                USR_PRODUCTION_ORDER_TIMEOUT)
-        {
-            // 记录回执码：0 = 移动关系已建立；非 0（尤其 14 = ISNTFREE）
-            // 说明指令被 Core 拒绝，祭司不会移动。
-            priestMoveLastRet =
-                result != info.ins_ret.end() ? result->second : -1;
-            priestMoveLastRetFrame = g_frame;
-            priestMoveOrderId = -1;
         }
     }
 
@@ -4998,11 +5132,13 @@ static void ManagePriest(UsrAI *ai)
     // 判据是「超出 USR_PRIEST_HOME_RADIUS(12) 格就回家并 return」：
     // 在圈内时不拦，下面的转换逻辑照常跑（敌人都送到家门口了，转换是获胜路径，
     // 不该关掉）。所以效果是「只转换送上门的，不追出去」。
-    // 【三万帧以后：有敌人就待在家里，什么也不做】
+    // 【三万帧以后：敌方还有兵力就待在家里，什么也不做】
     //
-    // 与上面 4698 行那段是一对，两边合起来才是完整的规则：
-    //     没有敌人 → 去转换敌方攻城武器厂（唯一的获胜路径）
-    //     有敌人   → 待在家里，不转换、不治疗、不追
+    // 与函数开头那段是一对，两边合起来才是完整的规则 —— 判据都是
+    // EnemyArmyStillExists()（按敌方开局总量 51 判「打光了没有」）：
+    //     敌人打光了 → 去转换敌方攻城武器厂（唯一的获胜路径）
+    //     还有兵力   → 待在家里，不转换、不治疗、不追
+    // 两处必须同口径，否则会出现「上面放它出门、这里又拦下来」的互否。
     //
     // 【为什么「在 12 格内」也要 return】原实现只在超出 12 格时 return，
     // 圈内会落到下面的转换逻辑 —— 于是祭司会去追一个转换目标、走出 12 格，
@@ -5033,10 +5169,16 @@ static void ManagePriest(UsrAI *ai)
                 lastPriestOrderFrame = g_frame;
             }
         }
-        // 有敌人 → 到此为止：不转换、不撤退、不治疗。
-        // 没有敌人 → 落到下面（转换攻城厂那段已经在上面前面处理过了，
-        // 这里放行是给「还没侦察到攻城厂」的情况留余地）。
-        if (HasVisibleEnemyArmy())
+        // 敌方还有兵力 → 到此为止：不转换、不撤退、不治疗。
+        // 敌人真的打光了 → 落到下面（转换攻城厂那段在本函数开头已经处理过，
+        // 这里放行是给「还没侦察到攻城厂 / 还没走到」的情况留余地）。
+        //
+        // 【判据用总量，不用视野】理由与上面 4796 那处相同：用视野判据会让祭司
+        // 在 130 格的路程上被「远处敌兵一闪」反复拽回家。总量判据只在敌方真的
+        // 一个不剩时才放它出门。
+        // 注意两处的语义必须一致 —— 一处用视野、一处用总量，会出现「上面放它
+        // 出门、这里又拦下来」的互否。
+        if (EnemyArmyStillExists())
             return;
     }
 
@@ -5057,13 +5199,15 @@ static void ManagePriest(UsrAI *ai)
             }
         }
         if (anyEnemyVisible) {
+            // 【这里只转换敌方部队，不碰建筑】
+            // 原先还有一个 `if (!armyTarget && g_frame >= 30000)
+            // buildingTarget = FindEnemySiege(*priest);` 的分支，但它是死代码：
+            // 外层 `if (anyEnemyVisible)` 与上面的 `if (HasVisibleEnemyArmy())
+            // return;` 判据完全相同，所以「有敌人」时早就 return 了、走不到这里，
+            // 「没敌人」时这个块整体不执行。攻城厂的转换已挪到本函数开头
+            // 「没有敌人 → 去转换敌方攻城武器厂」那一段（见 4774 起）。
             const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
-            const tagBuilding *buildingTarget = nullptr;
-            if (!armyTarget && g_frame >= 30000)
-                buildingTarget = FindEnemySiege(*priest);
-            const int targetSN = armyTarget
-                                     ? armyTarget->SN
-                                     : (buildingTarget ? buildingTarget->SN : -1);
+            const int targetSN = armyTarget ? armyTarget->SN : -1;
             // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
             if (targetSN != -1 && priest->ConvertCooldown <= 0 &&
                 priestMoveOrderId == -1 && priest->WorkObjectSN != targetSN) {
@@ -5288,17 +5432,17 @@ static void ManagePriest(UsrAI *ai)
                 }
             }
         }
-        // 总攻阶段治疗也停用：祭司只保存实力，不做任何会被敌人牵制的行动。
-        if (priestPassive)
-            return;
+        // 总攻阶段（priestPassive）治疗已停用 —— 判据不在这一层，而是在
+        // TryPriestHeal 的函数入口，那里是唯一权威的规则点（见该函数注释）。
+        // 这里不再重复判断，避免两处条件将来各自漂移。
         TryPriestHeal(ai, *priest);
         return;
     }
 
     // 转换全程保留，不因总攻阶段停用。
-    // 转换敌方攻城武器厂是唯一的获胜条件，关掉它就等于关掉获胜路径——
-    // 而且原先挂在上面的 `g_frame >= 30000` 与 priestPassive 的门槛相同，
-    // 两条规则互相抵消，FindEnemySiege 那行从来没有被执行过。
+    // 这里只处理「敌方部队」的转换；敌方攻城武器厂（唯一的获胜条件）已挪到
+    // 本函数开头那段处理 —— 原先挂在上面那个块里的 `g_frame >= 30000` 与
+    // priestPassive 的门槛相同，两条规则互相抵消，那一行从来没有被执行过。
     // 代价：FindPriestConversionTarget 没有距离限制，祭司可能为此跑到离基地
     // 30~50 格处（实测被 3 个敌人锁定后既撤不回来也打不过）。这是已知取舍。
 
@@ -5939,6 +6083,20 @@ static const int USR_ENEMY_ARMY_TOTAL = 51;
 // （累计集合 enemyArmySeenSN 的声明在文件上方 —— 新对局重置块在这之前要清它。）
 //
 // 更新累计集合，返回当前可见的敌军数。
+//
+// 【调用点在 processData 每帧主序列，不在这里自己调】
+//
+// 它原先【只被 EnemyArmyStillExists() 调用】，而 EnemyArmyStillExists() 又只被
+// ManageStandoff 调用 —— 于是「谁见过」这件事被挂在了管理站桩这条【策略】分支
+// 的副作用上。而 ManageStandoff 有自己的前置：FindEnemySiegeBuilding() 非空。
+// 后果是自锁：没侦察到攻城厂 → 一次都不数 → 累计集合永远是空的 → 永远凑不满
+// 51 个 → EnemyArmyStillExists() 永远为真 → ManageStandoff 永远接管 →
+// 底下「拆敌方建筑」的代码永远执行不到；而要不被站桩接管又得先凑满 51 个。
+//
+// 实测（ai_debug.log）：敌方攻城厂直到 f≈41704 才进 info.enemy_buildings，
+// 也就是说整局只有在最后约 3000 帧里才有可能开始积累，而敌方基地在 130 格外。
+//
+// 事实收集与策略判断必须分开：见过谁，每帧无条件地记；该不该推进，另说。
 static int UpdateEnemyArmySeen()
 {
     int visible = 0;
@@ -5954,10 +6112,12 @@ static int UpdateEnemyArmySeen()
 
 // 敌方【战略上】是否还有兵力。用于「守军清完了没有 / 该不该推进」这类判断。
 // 只有「已经见过全部 51 个，且此刻一个都看不见」才算清空。
+//
+// 这里【只读】，不再自己收集 —— 累计集合由 processData 每帧喂（见上）。
+// 之前把 UpdateEnemyArmySeen() 写在这里，是上面那段自锁的根源之一。
 static bool EnemyArmyStillExists()
 {
-    const int visible = UpdateEnemyArmySeen();
-    if (visible > 0)
+    if (HasVisibleEnemyArmy())
         return true;
     return static_cast<int>(enemyArmySeenSN.size()) < USR_ENEMY_ARMY_TOTAL;
 }
@@ -6006,17 +6166,28 @@ static bool ManageStandoff(UsrAI *ai)
     if (siege == nullptr)
         return false; // 还没侦察到攻城武器厂，退回原来的进攻逻辑
 
-    // 【只要还有一名敌人，就不靠近基地】—— 判据是「视野里有没有敌人」，
-    // 不是「锚点附近有几个敌人」。
+    // 【只要视野里还有敌人，就不靠近基地】
     //
-    // 原先是数「锚点 34 格内的敌人数」，少于 3 个就放行去拆建筑。那有两个问题：
-    //   · 敌方守军冲出来到 25 格又折返，它们的坐标会在这条线两侧来回跳，
-    //     计数跟着抖 —— 一抖到 2 就放行，部队立刻往里压，正好撞上回防的守军；
-    //   · 圈外的敌兵（比如另一路来犯的部队）完全不计入，于是「只要还有敌人」
-    //     这条根本不成立。
-    // 改成看 EnemyArmyStillExists()：它用「敌方开局总量 51」把两种「看不见」
-    // 区分开 —— 退到迷雾里（不算清空）vs 真的被打光（才算清空）。
-    if (!EnemyArmyStillExists())
+    // 判据是【当前视野】，与 ManageOffensiveArmy 下面那句 `if (HasVisibleEnemyArmy())`
+    // 同口径 —— 两处必须一致，否则会出现「这里放行、下面又拦下」的互否。
+    // 战线上的分工（见文件上方那两个前向声明的说明）：
+    //     总攻 / 站桩 —— 看视野：有敌兵就先打兵，一个都看不见就推进拆建筑
+    //     祭司        —— 看总量：敌方真打光了才出门去转换攻城厂
+    //
+    // 【为什么不再用 EnemyArmyStillExists()】它要求「敌方开局 51 个全部至少见过
+    // 一次、且此刻一个都看不见」才返回 false。而敌方基地在地图对角（实测曼哈顿
+    // 130 格），基地守军从不出门 —— 那 51 个里永远有一部分待在迷雾里，累计集合
+    // 凑不满 → EnemyArmyStillExists() 恒为真 → 本函数【每一帧】都 return true
+    // → ManageOffensiveArmy 下面「全体打目标建筑」那段永远执行不到。
+    // 实测：整局 `enemyB` 最大到 6（敌方建筑全被侦察到）、`baseKnown=1`，士兵却
+    // 一次都没碰过敌方建筑。
+    //
+    // 【代价，必须知道】HasVisibleEnemyArmy() 是全局视野判断：敌方守军退到迷雾里
+    // 就会让它翻假，部队于是往里压、可能撞上回防的守军。这正是当初把它换成
+    // 「总量」判据的理由（更早还有一版是数「锚点 34 格内的敌人数」，同样会抖）。
+    // 取舍是【能不能拆掉基地】优先于【少送几波】—— 总量判据更保守，但它让获胜
+    // 路径永远不启动，等于没有。
+    if (!HasVisibleEnemyArmy())
         return false;
 
     const int orderInterval = 60;
@@ -6162,9 +6333,16 @@ static void ManageOffensiveArmy(UsrAI *ai)
   if (g_frame < USR_OFFENSIVE_FRAME)
     return;
 
-  // 升时代前不进攻；升时代后需等关键兵种科技研发完成。
-  if (info.civilizationStage == CIVILIZATION_TOOLAGE ||
-      researchedTechCount < TOTAL_REQUIRED_TECH)
+  // 升时代前不进攻；升时代后需等【关键兵种科技】完成 —— 也就是车轮科技，
+  // 它是战车弓兵解锁的前置（同一道门也用在 TryProduceChariotArcher）。
+  //
+  // 【为什么不用 researchedTechCount】它只在 CheckTechOrder() 里自增，而
+  // CheckTechOrder 的调用者只有 ResearchTech（全文件无人调用）与
+  // ResearchTechQueue（唯一调用者是仓库科技队列）。仓库科技取消之后它恒为 0，
+  // `0 < TOTAL_REQUIRED_TECH(1)` 恒成立 —— 这道门会把整个进攻分支永久关死：
+  // 士兵一局都不会碰敌方建筑，而且 UpdateEnemyBaseDiscovery() 排在这个 return
+  // 之后也永远不执行，日志里表现为 `tech=0` 与 `baseKnown=0` 同时出现。
+  if (info.civilizationStage == CIVILIZATION_TOOLAGE || !wheelTechReady)
     return;
 
   // 兵力不足时不进攻，避免送死。
@@ -6185,9 +6363,12 @@ static void ManageOffensiveArmy(UsrAI *ai)
   if (!enemyBaseDiscovered)
     return;
 
-  // 站桩阶段：守军还没被消耗完之前，只把部队摆在敌方攻城武器厂外围的站位圈上，
+  // 站桩阶段：视野里还有敌兵时，只把部队摆在敌方攻城武器厂外围的站位圈上，
   // 不直接冲基地。返回 true 表示本帧由它接管（机制详见 ManageStandoff）。
-  // 守军被打薄之后它返回 false，落到下面原来的「全体打目标建筑」。
+  // 视野里一个敌兵都看不见时它返回 false，落到下面「全体打目标建筑」。
+  //
+  // 判据与下面那句 `if (HasVisibleEnemyArmy())` 同口径（都是视野）——
+  // 这样「站桩接管」与「打兵优先」不会互相否定。详见 ManageStandoff 的说明。
   if (ManageStandoff(ai))
     return;
 
@@ -6681,6 +6862,15 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
 void UsrAI::processData()
 {
     info = getInfo();
+
+    // 【每帧无条件累计「敌方哪些单位见过」】
+    //
+    // 这只是一条事实记录：见过谁就记谁。它原先被塞在 ManageStandoff 里当
+    // 副作用，于是被「有没有侦察到攻城厂」这个策略条件挡在门外，导致累计集合
+    // 长期是空的（详见 UpdateEnemyArmySeen 的注释）。事实收集不该有前置条件，
+    // 放主序列最前面，下游所有判断读到的都是本帧最新的集合。
+    UpdateEnemyArmySeen();
+
     // 祭司/市镇中心丢失时立即记录（用于定位判负原因）。
     {
         static bool hadPriest = false;
@@ -6825,7 +7015,10 @@ void UsrAI::processData()
           }
         }
         // 与 ManageEconomyAndProduction 里的 kStockTechFood 保持同一顺序。
-        // 步兵护甲的两项已从研发队列移除，这里同步去掉（否则下标会错位）。
+        //
+        // 【本行已失效】仓库的所有科技研发已在 ManageEconomyAndProduction 里取消，
+        // 所以 stockCur / stockPend 会一直是 0 / -1，need= 也永远是 0。
+        // 数组留着只为将来恢复时能直接对照；不要据此判断「仓库研发卡住了」。
         static const int kStockFood[3] = {
             BUILDING_STOCK_UPGRADE_CLOSER_ATTACK_FOOD,
             BUILDING_STOCK_UPGRADE_DEFENSE_ARCHER_FOOD,
