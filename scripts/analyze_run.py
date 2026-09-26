@@ -37,8 +37,9 @@ def main() -> int:
             cur["last"] = frame
             cur["lines"].append(raw.rstrip())
 
-    header = "%-5s %-8s %-8s %-8s %-9s %-9s %s" % (
-        "局", "终帧", "阵亡帧", "阵亡血", "mvTgt种类", "mvTgt切换", "祭司移动格数(累计曼哈顿)")
+    header = "%-5s %-8s %-8s %-8s %-9s %-9s %-9s %s" % (
+        "局", "终帧", "阵亡帧", "阵亡血", "mvTgt采样", "mvTgt种类", "mvTgt切换",
+        "祭司移动格数(累计曼哈顿)")
     print(header)
     print("-" * len(header))
 
@@ -60,20 +61,34 @@ def main() -> int:
             if ln.startswith("[THREAT]"):
                 m = re.search(r"mvTgt=\((-?\d+),(-?\d+)\)", ln)
                 if m:
-                    targets.append((m.group(1), m.group(2)))
+                    t = (m.group(1), m.group(2))
+                    # 【滤掉 (-1,-1)】ManagePriest 在没有威胁的每一帧都把
+                    # priestEmergencyTarget 清成 (-1,-1)，而日志每 100 帧才采样一次——
+                    # 采样到的 (-1,-1) 绝大多数表示「此刻没有威胁」，不表示
+                    # 「撤退目标变了」。不滤掉的话「种类/切换」里绝大部分是
+                    # (-1,-1) 与真值之间的往返，抖动次数会被虚报好几倍。
+                    # （那个每帧重置本身就是个待修的缺陷：它让「回家」每 20 帧
+                    #  重发一次 HumanMove，把路径每次刚起步就清掉。）
+                    if t != ("-1", "-1"):
+                        targets.append(t)
             elif ln.startswith("[PRIEST]"):
                 m = re.search(r"pos=\((\d+),(\d+)\)", ln)
                 if m:
                     positions.append((int(m.group(1)), int(m.group(2))))
 
+        # 【为什么要单列采样数】滤波之后的 种类/切换 才有意义，但样本太少时
+        # 它们也不可信（比如整局只采到 1 个点，「切换」必然是 0）。
+        # 把有效采样数一并打出来，便于判断这两个数该不该采信。
+        samples = len(targets)
         distinct = len(set(targets))
         switches = sum(1 for a, b in zip(targets, targets[1:]) if a != b)
         travel = sum(
             abs(b[0] - a[0]) + abs(b[1] - a[1])
             for a, b in zip(positions, positions[1:])
         )
-        print("%-5d %-8d %-8s %-8s %-9d %-9d %d" % (
-            i + 1, seg["last"], death_frame, death_hp, distinct, switches, travel))
+        print("%-5d %-8d %-8s %-8s %-9d %-9d %-9d %d" % (
+            i + 1, seg["last"], death_frame, death_hp, samples, distinct,
+            switches, travel))
     return 0
 
 

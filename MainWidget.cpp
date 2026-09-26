@@ -2633,6 +2633,19 @@ void MainWidget::FrameUpdate()
     else if (mapmoveFrequency == 8) {
         if (gameframe % 3 == 0 || pause) paintUpdate();
     }
+    // 【16 倍速：每 20 帧刷一次画面】
+    //
+    // 为什么是 20：定时器间隔 = TimePerFrame / mapmoveFrequency = 40/16 = 2ms，
+    // 也就是每秒跑 500 帧。每 20 帧刷一次 → 500/20 = 25 次/秒 ——
+    // 和正常速度（mapmoveFrequency = 1 时 40ms 一帧、每帧都刷）的刷新率【完全一样】。
+    // 这样渲染开销和平时相同，不会因为刷得太勤反而把模拟拖慢。
+    //
+    // 上面 4 倍用 %2、8 倍用 %3，换算成刷新率分别是 1000/10/2=50 和 1000/5/3≈67 次/秒
+    // —— 都比正常速度更密。16 倍如果照那个趋势加密，渲染会变成瓶颈，所以这里
+    // 刻意取 20 让它回到 25 次/秒。
+    else if (mapmoveFrequency == 16) {
+        if (gameframe % 20 == 0 || pause) paintUpdate();
+    }
     else if(!IsExamining||!OffScreen){//这种情况下可能是考核模式下开启得超高速倍速
             qDebug() << "Speed setting error";
 

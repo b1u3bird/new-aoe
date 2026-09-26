@@ -104,8 +104,8 @@ static bool priestLapCaptured = false;
 // 祭司开局探路是否已结束。
 static bool priestExploreDone = false;
 // 祭司「走向敌方攻城武器厂」的停止距离（格）。
-// 必须小于引擎的转换距离（config.json 的 DIS_PRIEST = 12），确保
-// ManagePriest 里「到位就地转换」那一判定成立时，祭司一定真的能转换。
+// 要比 FindEnemySiege 里 12 格的转换判定小一些，确保走到位之后那条路径
+// 一定能接手（它的判据是 dis2 < 12*12）。
 static const int USR_PRIEST_SIEGE_APPROACH_RADIUS = 10;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
@@ -116,34 +116,57 @@ static const int USR_PRIEST_SIEGE_APPROACH_RADIUS = 10;
 //   · 选取目标时不做这个距离限制：祭司本来就需要先走过去再转换，
 //     按 12 格过滤会把「主动接近」这条路整个废掉。
 static const int USR_PRIEST_CONVERTING_RADIUS = 12;
-// 祭司的活动范围：距市镇中心超过这么多格就强制回家。
+// 祭司的位置约束：不得进入【敌方基地】周围 USR_PRIEST_ENEMY_BASE_KEEPOUT 格以内。
 //
-// 祭司只有 100 血、近战与远程防御都是 0、不可补充，走太远既没有箭塔掩护、
-// 也脱离部队支援。实测它死在 (78,73) —— 离基地很远，最后 4 个敌人贴到 1 格
-// 围杀，而它全程 IDLE 站着不动。
+// 【取代了原先的两条】祭司原来有两条以【我方市镇中心】为参照的位置规则：
+//   · USR_PRIEST_LEASH_RADIUS = 50 —— 离中心超过 50 格就拉回来（活动缰绳）
+//   · USR_PRIEST_HOME_RADIUS = 12  —— 离中心超过 12 格就「回家」（守家）
+// 两条都已删除，改成以【敌方基地】为参照的一条红线：有敌人时不许靠近敌方基地，
+// 其余地方可以自由活动。
 //
-// 【与获胜条件冲突，必须知道】获胜要求把祭司送到敌方攻城武器厂去转换它。
-// 如果那座厂在 50 格之外，这个硬圈会让 AI 永远赢不了。所以下面刻意给
-// 「已建立转换关系」（WorkObjectSN != -1，即正在转换或正要赶往目标）开了豁免 ——
-// 只有真正在外面「游荡」时才被拉回来。
-static const int USR_PRIEST_LEASH_RADIUS = 50;
+// 【为什么必须连缰绳一起去掉】敌方基地离我方中心约 130 格（四张图的曼哈顿距离
+// 122~140，见 EstimateEnemySiegeAnchor 的实测）。只要缰绳还在（把祭司拴在中心
+// 50 格内），祭司离敌方基地就永远 ≥80 格，这条 32 格红线一次都不会触发 ——
+// 等于没改。所以两条必须一起去掉。
+//
+// 【与「去转换攻城厂」的关系】转换要求走到厂 10 格内，与 32 格红线直接矛盾。
+// 解法是红线【只挂在「有可见敌人」上】：敌人还在时祭司远离敌方基地，
+// 敌人清空了才放它去转换（那条路本来就排在上面、会先 return）。
+static const int USR_PRIEST_ENEMY_BASE_KEEPOUT = 32;
+// 祭司遇袭时的撤退距离（格）：退到「市镇中心背离威胁那一侧」这么多格处。
+// 见 GetPriestEmergencyPoint —— 旧公式的实际位移只有 4 格，等于没退。
+// 取 14：大于箭塔射程（7）的两倍，退出去之后追兵要重新跑一段；也不至于远到
+// 脱离基地的掩护范围。
+static const int USR_PRIEST_RETREAT_DISTANCE = 14;
 // 祭司【开局探路】的半径上限（格，相对市镇中心）：只探这个范围内的前沿点，
-// 探完就收工回家。
+// 探完就收工。
 //
-// 前沿集合（已探明陆地且邻接未探明）随探索不断外扩、几乎永不为空，所以
-// 必须有这个上限 —— 没有它探路永远不会结束，祭司就被永久扣在探路分支里、
-// 回不了基地（这正是它的历史故障）。
-// 实现上是「分层推进」：走完一圈 → 前沿外扩一圈 → 再抓一圈，直到最近的前沿点
-// 落到这个半径之外为止。
-static const int USR_PRIEST_EXPLORE_RADIUS = 50;
-// 祭司探路的【时间】截止帧：到这个帧无论如何收工，哪怕 50 格还没探完。
+// 【50 → 120】原值 50 探不到敌方基地 —— 实测四张图上敌方基地离我方中心
+// 曼哈顿 122~140 格（欧氏 91~104），所以 50 格的探路半径意味着
+// FindEnemySiegeBuilding() 整局都是 nullptr（实测 `enemyB` 最多到 1），
+// 站桩圈和祭司的出门段全部卡死在那上面。
+// 120 覆盖整张图：四张图的中心都在角落一侧，到最远角落的欧氏距离最大约 110。
+//
+// 前沿集合（已探明陆地且邻接未探明）随探索不断外扩，所以必须有这个上限 ——
+// 没有它探路永远不会结束，祭司被永久扣在探路分支里回不了基地（历史故障）。
+// 实现是「分层推进」：走完一圈 → 前沿外扩一圈 → 再抓一圈，直到半径之外没有
+// 前沿点为止。
+static const int USR_PRIEST_EXPLORE_RADIUS = 120;
+// 祭司探路的【时间】截止帧：到这个帧无论如何收工（回基地），哪怕半径还没探完。
 // 与半径上限是并列的两个出口，谁先满足用谁。
-// 祭司只有 100 血、近战/远程防御都是 0、不可补充，而三波骚扰从 FAT=6000 就
-// 开始了 —— 让它在那之前回基地，比多探几格重要。
+//
+// 【为什么是 5000、不能放宽】祭司只有 100 血、近战/远程防御都是 0、不可补充，
+// 而三波骚扰从 FAT=6000 就开始了 —— 让它在那之前回基地，比多探几格重要。
+//
+// 【与半径的关系，必须知道】5000 帧最多只够探 50~60 格（祭司移动约 1 格 / 12 帧，
+// 而且探路走的是「前沿环」不是直线）。所以：
+//   · USR_PRIEST_EXPLORE_RADIUS 放宽到 120 只是【解除了半径这个提前收工的出口】，
+//     让祭司把 5000 帧用满、走到时间上限才回，而不是探完 50 格就停；
+//   · 它【不会】让祭司真的走到 120 格 —— 那是时间上限在管。
+// 想靠祭司找到 130 格外的敌方基地是不现实的，那件事归侦察骑兵。
 static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
-// 祭司距市镇中心多近算「已经在基地范围」，单位：格。
-// 在此范围内不再「退向中心」（那是原地不动），改为绕到中心相对威胁的另一侧。
-static const int USR_PRIEST_HOME_RADIUS = 12;
+// 【已删除】USR_PRIEST_HOME_RADIUS = 12（「离市镇中心超过 12 格就回家」的守家规则）。
+// 按需求改成以敌方基地为参照的 USR_PRIEST_ENEMY_BASE_KEEPOUT，见文件上方。
 // 第一个侦察骑兵的生产时间点。它执行「视野内出现敌人即撤回市镇中心」的
 // 保命策略，不承担基地侦测（角色判定见 DispatchScouts）。
 // 原为 33000，按要求提前到 30000（= 祭司进入「保存实力」阶段的时间点）。
@@ -185,9 +208,8 @@ static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 static const int USR_FARMER_PRIEST_HELP_RADIUS = 8;
 // 箭塔建筑候选点相对中心的目标距离，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_RADIUS = 18;
-// 箭塔目标数量。TOWER_RINGS 提供 3 圈 × 4 方向 = 12 个候选位，
-// 建造循环从近圈（6 格）起逐圈填。
-// 取 4：刚好填满近圈的 4 个方向，覆盖半径约 13 格。
+// 箭塔目标数量。取 4 对应「三圈 × 四方向」里最先建满的那一圈
+// （见 GetBuildCandidate 的 TOWER_RINGS）。
 // 注意：建造与采石共用 ArrowTowerStillWanted()（见 CalculateFarmerTargets）——
 // 建满 4 座后它返回 false，于是同时停建箭塔、并停止采石把农民让给食物与木头。
 // 只改建造而不改采石的话，塔数永远停在目标值以下，农民会一直采无用的石头。
@@ -291,9 +313,10 @@ static const int USR_POP_TARGET = 50;
 static const int USR_PRIEST_POP = 1;
 
 // ── 战车弓兵出厂后散开 ──────────────────────────────────────────────
-// 落点环绕市镇中心，按出厂顺序轮流分配。半径取 4 / 7 / 10 三圈 —— 夹在箭塔的
-// 三圈（6 / 9 / 12 格，见 GetBuildCandidate 的 TOWER_RINGS）之间，既离开靶场
-// 出口，又不出防守圈。每圈 8 个方向，共 24 个互不相同的落点。
+// 落点环绕市镇中心，按出厂顺序轮流分配。半径取 4 / 7 / 10 三圈，每圈 8 个方向，
+// 共 24 个互不相同的落点 —— 既离开靶场出口，又不至于一出生就挤成一堆。
+// （箭塔改成围着中心的四角一簇之后，7/10 圈会落在簇外；这不影响散开的目的，
+//  单位会绕开塔走。）
 static const int USR_SPREAD_RINGS[3][8][2] = {
     {{4, 0}, {3, 3}, {0, 4}, {-3, 3}, {-4, 0}, {-3, -3}, {0, -4}, {3, -3}},
     {{7, 0}, {5, 5}, {0, 7}, {-5, 5}, {-7, 0}, {-5, -5}, {0, -7}, {5, -5}},
@@ -377,6 +400,40 @@ static int lastEnemyBlockUR = -1;
 // 本局累计见过的敌方部队 SN（用于判断「敌人是不是打光了」，见
 // EnemyArmyStillExists）。声明在这里是为了让新对局重置块能清它。
 static set<int> enemyArmySeenSN;
+// 上一次「远程兵被近战贴上 → 全体远程兵后撤两格」的帧。
+// 详见 KiteRangedBackFromMelee（定义在 ManageOffensiveArmy 之前）。
+// 声明在这里同样是为了让新对局重置块能清它。
+static int lastKiteFrame = USR_INVALID_FRAME;
+// 站桩撤退的执行窗口：SN → 该单位「退出 32 格环」任务结束的帧。
+// 窗口内该单位被排除在 AssignFieldDefense 之外，让撤退真正走完。
+// 详见 ManageStandoff 里那段说明。声明在这里是为了让新对局重置块能清它。
+static map<int, int> standoffRetreatUntil;
+// 撤退封口窗口内部用的「进度基准」：SN → 上次检查时该单位到锚点的距离平方。
+// 一个站桩周期（60 帧）过去还没变近，就判定撤退失败、解封交还自卫权。
+// 没有这个出口的话，走不出去的单位会陷入「封 200 帧 → 到期 → 再发一次 →
+// 再封」的循环，既不动也不还手（实测表现为战车弓兵站着不动）。
+static map<int, int> standoffRetreatFromDis2;
+// ── 突击者（勾引守军出来）────────────────────────────────────────────
+// 站桩的前提是「守军会自己出来」。对面缩在基地里不出来时，站桩就变成双方干站着。
+// 这时派【一个】单位上前去勾 —— 就是策略文档第 48 行说的「必须拉扯」。
+//
+// 【为什么只派一个】敌方守军的追击上限是 25 格（DEFENSE_CHASE_LIMIT，量到它们的
+// 攻城武器厂），追一个目标追过界就放弃。全军压上时守军面对的是「一堆目标」，
+// 反而不会追出来；单个目标才有诱饵效果。
+//
+// 【流程照搬另一套实现的 manageAttack】选离敌方基地最近的空闲单位当突击者，
+// 记下它出发时的位置；它 8 格内无敌军且未受伤 → 朝敌方基地前进 3 格；
+// 一旦挨打、或 8 格内出现敌人 → 往起点退；退到起点 2 格内就交还指挥权，
+// 作为普通部队参战。详见 ManageStandoffAssault。
+static const int USR_ASSAULT_IDLE_FRAMES = 1500;  // 站桩僵住多少帧之后才派突击者
+static const int USR_ASSAULT_TRIGGER_DIS2 = 64;   // 威胁判定：8 格（欧氏平方）
+static const int USR_ASSAULT_STEP = 3;            // 每次前进/后退几格
+// 站桩连续生效的起始帧。用来判「僵住多久了」。站桩一结束就复位。
+static int standoffEngagedSince = USR_INVALID_FRAME;
+static int assaultSN = -1;        // 当前突击者的 SN（-1 = 没有）
+static int assaultStartDR = -1;   // 突击者出发时的位置，也是它后退的目标
+static int assaultStartUR = -1;
+static bool assaultRetreating = false;
 // 上次提交经济采集指令的游戏帧。
 static int lastEconomyOrderFrame = USR_INVALID_FRAME;
 // 上次提交建造指令的游戏帧。
@@ -446,15 +503,12 @@ static void LogIdleFarmerStuck(const tagFarmer &farmer, int desiredBucket,
 // 定义在 ManageOffensiveArmy 之前，但 ManageStandoff 要用它。
 static bool IsOffensiveArmy(const tagArmy &army);
 // 定义在 ManageStandoff 一带，但 ManagePriest 要用它们
-// （「敌人打光了就去转换攻城武器厂」那一段）。
-// 【两个判据的分工，不要混用】
-//   HasVisibleEnemyArmy()  —— 此刻视野里有没有敌兵（眼前的危险/该不该接敌）
-//   EnemyArmyStillExists() —— 按敌方开局总量 51 判断「是不是真打光了」
-// 祭司的出门/守家看后者（要等敌人真的清空才去换基地），
-// 总攻与站桩仍看前者（有可见敌兵就先打兵）。
+// （「没有敌人就去转换攻城武器厂」那一段）。
 static bool HasVisibleEnemyArmy();
-static bool EnemyArmyStillExists();
 static const tagBuilding *FindEnemySiegeBuilding();
+// 敌方基地锚点：侦察到就用真的，否则用「我方市镇中心的地图对极点」估。
+// 定义在 ManageStandoff 之前，但 ManagePriest 的禁区判定也要用它。
+static bool EstimateEnemySiegeAnchor(int &anchorDR, int &anchorUR);
 ;
 static bool IsAliveFarmerSN(int farmerSN);
 static bool IsFarmerRelationEstablished(int farmerSN, int targetSN);
@@ -517,6 +571,14 @@ static int armyCampOrderId = -1;
 // 当前普通建造指令的异步指令 ID，-1 表示没有等待中的指令。
 static int buildOrderId = -1;
 static int buildOrderType = -1;
+// 最近一次建造指令的目标格（左上角）。建造被拒时要靠它记住「这块地放不下」。
+static int buildOrderDR = -1;
+static int buildOrderUR = -1;
+// 【坏点表】地块 → 被判为「放不下」的帧。见 MarkBuildSpotBad。
+// 用 map 而不是 120×120 的数组：建造次数很少，条目也少。
+static map<pair<int, int>, int> badBuildSpot;
+// 坏点的有效期（帧）。照搬另一套实现的 badPlace 机制，取值也一致。
+static const int USR_BAD_BUILD_SPOT_FRAMES = 1500;
 static int buildFarmerSN = -1;
 static int stableOrderFrame = USR_INVALID_FRAME;
 // 最近一次非生产建筑动作的异步指令 ID。
@@ -1289,15 +1351,37 @@ static int FindThreatToPriestSN(int priestSN)
     return bestSN;
 }
 
-// 【已删除】FindEnemySiege(const tagArmy&)
-// 它只找「12 格以内、且附近 2 格没有敌人」的敌方攻城武器厂。
-// 它的唯一调用点在 ManagePriest 一个判据自相矛盾的块里，任何帧都执行不到，
-// 所以祭司从来没有下发过一次转换攻城厂的指令（实测整局 0 次）。
-// 现在转换由 ManagePriest 开头的「没有敌人 → 去转换敌方攻城武器厂」一段负责：
-// 它用 FindEnemySiegeBuilding() 找厂（不限距离，靠走过去），
-// 走进 USR_PRIEST_SIEGE_APPROACH_RADIUS(10) 格后直接 HumanAction。
-// 距离上限与「附近没有敌人」两个条件都被新实现覆盖（后者由
-// !HasVisibleEnemyArmy() 覆盖，比原来「2 格内没敌人」更严），故不再保留旧函数。
+static const tagBuilding *FindEnemySiege(const tagArmy &priest)
+{
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        // 只找攻城武器厂（胜利条件：转换它），修复距离计算的 BlockUR 笔误。
+        if (building.Blood <= 0 || building.Type != BUILDING_SIEGE)
+            continue;
+        const int dis2 = BlockDis2(building.BlockDR, building.BlockUR, priest.BlockDR, priest.BlockUR);
+        if (dis2 >= 12 * 12)
+            continue;
+        // 攻城武器厂附近 5 格内有敌人则视为不安全，等军队清理后再转换。
+        bool safe = true;
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.Blood <= 0)
+                continue;
+            const int enemyDis2 = BlockDis2(building.BlockDR, building.BlockUR,
+                                            enemy.BlockDR, enemy.BlockUR);
+            if (enemyDis2 < 2 * 2)
+            {
+                safe = false;
+                break;
+            }
+        }
+        if (!safe)
+            continue;
+        return &building;
+    }
+    return nullptr;
+}
+
 
 static int ArmyTargetPriority(const tagArmy &enemy)
 {
@@ -2028,6 +2112,17 @@ static void ProcessPendingGatherOrders()
         woodResearchRunning = false;
         // 敌人 SN 是跨局复用的，累计集合不清会让新对局一开局就以为「全见过」。
         enemyArmySeenSN.clear();
+        lastKiteFrame = USR_INVALID_FRAME;
+        standoffRetreatUntil.clear();
+        standoffRetreatFromDis2.clear();
+        badBuildSpot.clear();
+        buildOrderDR = -1;
+        buildOrderUR = -1;
+        standoffEngagedSince = USR_INVALID_FRAME;
+        assaultSN = -1;
+        assaultStartDR = -1;
+        assaultStartUR = -1;
+        assaultRetreating = false;
         marketCooldownUntil[0] = 0;
         marketCooldownUntil[1] = 0;
         marketCooldownUntil[2] = 0;
@@ -2327,6 +2422,38 @@ static int CountClusterHunters(int clusterId,
     return hunters;
 }
 
+// 农民禁区的半径（格）：到任何【已知】敌方建筑的这一距离以内，不派农民过去。
+//
+// 与站桩圈 USR_STANDOFF_RADIUS 同值 28 —— 那正是敌方守军够得到的范围
+// （DEFENSE_CHASE_LIMIT = 25，量到它们的攻城武器厂，远程还要减射程）。
+static const int USR_FARMER_ENEMY_BASE_KEEPOUT = 28;
+
+// 这个坐标是不是落在农民禁区里。
+//
+// 【为什么需要】农民的选点原先完全不看敌方位置：只要资源在那边就派人去 ——
+// 采到一半被守军杀掉，既丢农民，又可能把我们的部队一路牵过去。实测军队全灭
+// 那一局，farmers 从 20 掉到 0，大半死在前线方向。
+//
+// 【锚点为什么用「所有已知敌方建筑」而不是攻城武器厂】
+// 攻城武器厂要到很晚才被侦察到（上一局 f≈36000 才进 info.enemy_buildings），
+// 而那之前农民早就跑过去了。用已知建筑集合则是「侦察到哪座就管哪座」，越探越严。
+//
+// 【没侦察到任何敌方建筑时不设限】不知道的东西没法避开 —— 这是有意留的口子，
+// 否则开局就会把全场资源判成禁区、农民集体发呆。
+static bool IsInsideEnemyKeepout(int blockDR, int blockUR)
+{
+    const int r2 = USR_FARMER_ENEMY_BASE_KEEPOUT *
+                   USR_FARMER_ENEMY_BASE_KEEPOUT;
+    for (const tagBuilding &building : info.enemy_buildings)
+    {
+        if (building.Blood <= 0)
+            continue;
+        if (BlockDis2(blockDR, blockUR, building.BlockDR, building.BlockUR) <= r2)
+            return true;
+    }
+    return false;
+}
+
 static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
                               const int current[4])
 {
@@ -2357,6 +2484,11 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
     {
         const int bucket = ResourceBucket(resource.Type);
         if (bucket != desiredBucket || !IsGatherableResource(resource))
+            continue;
+
+        // 【农民禁区】离任何已知敌方建筑 28 格以内的资源不派人 —— 采到一半被守军
+        // 杀掉，既丢农民又可能把部队牵过去。见 IsInsideEnemyKeepout。
+        if (IsInsideEnemyKeepout(resource.BlockDR, resource.BlockUR))
             continue;
 
         map<int, ResourceAttemptState>::const_iterator attemptIt =
@@ -2466,6 +2598,10 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         if (!IsGatherableFarm(building))
           continue;
 
+        // 【农民禁区】同资源循环：自己建在敌方基地附近的农田也不派人去。
+        if (IsInsideEnemyKeepout(building.BlockDR, building.BlockUR))
+          continue;
+
         map<int, ResourceAttemptState>::const_iterator attemptIt =
             resourceAttemptState.find(building.SN);
         if (attemptIt != resourceAttemptState.end() &&
@@ -2570,6 +2706,31 @@ static int FindBuilderFarmerSN()
     return bestSN;
 }
 
+// 【把放不下的地块记成「坏点」】
+//
+// 建造因位置类原因被 Core 拒绝时（POSITION_NOT_FIT / OVERLAP / DIFFERENTHIGH /
+// OVERBORDER / UNEXPLORE），把该建筑占地范围内的每一格标记为坏点、记下帧号，
+// USR_BAD_BUILD_SPOT_FRAMES 帧内不再选它们。
+//
+// 【为什么需要】原先位置类失败只做 `buildCandidateIndex++`（换一个候选序号）。
+// 那是个【全局游标】：绕一圈之后还会回到同一个放不下的位置，反复撞同一堵墙。
+// 粒度错了 —— 该记的是「哪块地不行」，不是「上次试到第几个」。
+// 这个做法照搬自另一套实现（它的 badPlace[120][120] + badPlaceTime）。
+//
+// 失效期 1500 帧是有意的：地块被占的原因（农田/树木/没探明）大多不会很快消失，
+// 但也可能是暂时的（别人在造的工地挡着），所以不永久拉黑。
+static void MarkBuildSpotBad(int dr, int ur, int buildingType)
+{
+    if (dr < 0 || ur < 0)
+        return;
+    const int size = BuildingBlockSize(buildingType);
+    for (int x = dr; x < dr + size; ++x)
+    {
+        for (int y = ur; y < ur + size; ++y)
+            badBuildSpot[make_pair(x, y)] = g_frame;
+    }
+}
+
 static bool IsBuildCandidateUsable(int blockDR, int blockUR, int buildingType)
 {
     if (!info.theMap)
@@ -2591,6 +2752,13 @@ static bool IsBuildCandidateUsable(int blockDR, int blockUR, int buildingType)
             if ((*info.theMap)[dr][ur].type == MAPPATTERN_OCEAN ||
                 (*info.theMap)[dr][ur].type == MAPPATTERN_UNKNOWN ||
                 (*info.theMap)[dr][ur].height != baseHeight)
+                return false;
+            // 【坏点排除】这块地最近因「放不下」被 Core 拒过，别再选它。
+            // 见 MarkBuildSpotBad —— 没有这一步，失败重试会绕回同一个位置。
+            map<pair<int, int>, int>::const_iterator bad =
+                badBuildSpot.find(make_pair(dr, ur));
+            if (bad != badBuildSpot.end() &&
+                g_frame - bad->second <= USR_BAD_BUILD_SPOT_FRAMES)
                 return false;
         }
     }
@@ -3084,6 +3252,9 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     buildOrderId = ai->HumanBuild(farmerSN, buildingType, position.first, position.second);
     buildOrderType = buildingType;
     buildFarmerSN = farmerSN;
+    // 记下这次下单的位置：被 Core 拒时要靠它把这块地记成坏点（见 MarkBuildSpotBad）。
+    buildOrderDR = position.first;
+    buildOrderUR = position.second;
     if (buildingType == BUILDING_ARMYCAMP)
         armyCampOrderId = buildOrderId;
     lastBuildOrderFrame = g_frame;
@@ -3133,6 +3304,10 @@ static void TryBuildReturnDepot(UsrAI *ai)
             if (it->second.aliveCount > 0 ||
                 static_cast<int>(it->second.members.size()) < 2)
                 continue;
+            // 【农民禁区】在敌方基地旁边建仓库＝给禁区里的资源盖交付点，
+            // 农民根本不会去采（FindBestResourceSN 已挡），白花 120 木。
+            if (IsInsideEnemyKeepout(it->second.centerDR, it->second.centerUR))
+                continue;
             const int dis2 = FindNearestReturnBuildingDistance(
                 BUILDING_STOCK, it->second.centerDR, it->second.centerUR);
             if (dis2 > USR_HUNT_DEPOT_MIN_DIS2 && dis2 > huntDis2)
@@ -3162,6 +3337,10 @@ static void TryBuildReturnDepot(UsrAI *ai)
         {
             if (!IsGatherableResource(resource))
                 continue;
+            // 【农民禁区】不为禁区里的资源建交付点 —— 农民不会去采，仓库/谷仓
+            // 建在那儿纯属浪费。见 IsInsideEnemyKeepout。
+            if (IsInsideEnemyKeepout(resource.BlockDR, resource.BlockUR))
+                continue;
             // 建哪座交付建筑由资源类型决定：浆果丛要的是【谷仓】。原先一律当成
             // 仓库，于是会在浆果丛旁边盖一座对它毫无用处的仓库，而 AI 自己的评分
             // 立刻变「近」、继续往那儿派人 —— 自我强化的假象，也是野外那些多余
@@ -3180,6 +3359,9 @@ static void TryBuildReturnDepot(UsrAI *ai)
         for (const tagBuilding &building : info.buildings)
         {
             if (!IsGatherableFarm(building))
+                continue;
+            // 【农民禁区】同资源循环。
+            if (IsInsideEnemyKeepout(building.BlockDR, building.BlockUR))
                 continue;
             const int dis2 = FindNearestReturnBuildingDistance(
                 BUILDING_GRANARY, building.BlockDR, building.BlockUR);
@@ -4039,7 +4221,13 @@ static void ManageEconomyAndProduction(UsrAI *ai)
                     result->second == ACTION_INVALID_HUMANBUILD_DIFFERENTHIGH ||
                     result->second == ACTION_INVALID_HUMANBUILD_OVERBORDER ||
                     result->second == ACTION_INVALID_HUMANBUILD_UNEXPLORE)
+                {
                     buildCandidateIndex++;
+                    // 【把这块地记成坏点】只换候选序号是不够的：buildCandidateIndex
+                    // 是个全局游标，绕一圈还会回到同一个放不下的位置。
+                    // 见 MarkBuildSpotBad。
+                    MarkBuildSpotBad(buildOrderDR, buildOrderUR, buildOrderType);
+                }
                 // 供 [BUILD] 行的 failCode 字段使用。这段原先写在 TryBuild 的
                 // 死代码里，因此该字段从启用起就恒为 0，等于没有诊断。
                 const int typeIdx =
@@ -4130,7 +4318,8 @@ static void ManageEconomyAndProduction(UsrAI *ai)
       if (info.Wood >= 150)
         TryBuild(ai, BUILDING_MARKET);
     }
-    // 箭塔防守：围绕市镇中心四方向环形布置（TOWER_RINGS，近圈 6 格起），
+    // 箭塔防守：围绕市镇中心三圈 × 四方向分散布置
+    // （圈层与理由见 GetBuildCandidate 的 TOWER_RINGS），
     // 须等箭塔科技研发完成后才建造，且第三波骚扰之后不再建造
     // （USR_ARROWTOWER_STOP_FRAME，与采石权重共用 ArrowTowerStillWanted）。
     if (arrowTowerTechnologyReady && ArrowTowerStillWanted() &&
@@ -4389,35 +4578,49 @@ static pair<double, double> GetPriestEmergencyPoint(
     const tagArmy &priest,
     const tagArmy &threat)
 {
-    // 【第一版公式，943f7f7】朝市镇中心走（取祭司与中心连线的 2/3 处），
-    // 再朝「远离威胁」的方向偏移 3 格。
+    // 【撤退点 = 市镇中心 + 「背离威胁」方向 × USR_PRIEST_RETREAT_DISTANCE】
     //
-    // 为什么回到这一版：它是历史上唯一的「连续公式」—— 不需要"选哪座塔"、
-    // 也不需要"朝哪个方向"的离散判断。后续所有重写（候选表 12/10/8/6、
-    // 退中心、绕中心 18/15/12、跨塔打分、热力图）都在"选一个固定点"，
-    // 因而反复出现「算出的点等于祭司自身格 → 移动指令变成走回原地」
-    // 或「打分随祭司移动翻转 argmax → 目标在两座塔之间抖动」。
-    // 连续公式天然避开这两类问题。
+    // 【为什么不再用「朝中心走 2/3，再逐轴偏 3 格」】那个公式的实际位移上限只有
+    // 4 格：祭司本来就在中心附近时，(priest + center*2)/3 ≈ 中心本身，再 ±3 就
+    // 落在中心 ±3 格内，等于没退；而 dx/dy 是「祭司相对威胁」逐轴取符号，
+    // 威胁一换人（实测 tSort 在 6 骑兵 / 10 方阵兵 / 13 阔剑兵 之间跳）符号就
+    // 翻到对角。实测 f=21396~22405 发出的十二个撤退点全落在中心 ±4 格的方框里
+    // —— 祭司在里面打转 1300 帧，被追兵从容磨死。
     //
-    // 注意：原版这一行的偏移方向写反了 —— dx = priest.DR - threat.DR，
-    // 原代码取 dx>0 ? -3 : 3，那是朝威胁一侧走，与它自己的注释
-    // 「keep a small offset away from the threat」相反；这很可能就是
-    // 该提交说明里「有点Bug」的所指。这里按注释本意把方向改回。
-    int dx = priest.BlockDR - threat.BlockDR;
-    int dy = priest.BlockUR - threat.BlockUR;
-    if (dx == 0 && dy == 0)
-        dx = -1;  // 与威胁完全重合时给一个确定方向，避免两轴偏移都为 0
-
-    int blockDR = priest.BlockDR;
-    int blockUR = priest.BlockUR;
+    // 【新公式的两点改变】
+    //   ① 退到离中心【固定 14 格】的位置 —— 保证有真实位移，能跟追兵拉开距离；
+    //   ② 方向取【从威胁指向中心】的单位向量 —— 也就是往中心的另一侧退，
+    //      离威胁最远。它比「祭司相对威胁」稳定：敌人的位置变化比祭司慢得多。
+    //
+    // 【已知局限】威胁换人时方向仍可能翻（新威胁在中心的另一侧），那样目标会跳
+    // 到中心对面（最多 28 格）。这是一次有意的取舍：宁可偶尔跳一次，也不要
+    // 四个格子的位移 —— 后者在任何情况下都救不了祭司。
+    int cDR = priest.BlockDR;
+    int cUR = priest.BlockUR;
     const tagBuilding *center = FindCenter();
     if (center != nullptr) {
-        // 朝中心方向走 2/3 路程（落在祭司与中心之间、靠中心一侧）
-        blockDR = (priest.BlockDR + center->BlockDR * 2) / 3;
-        blockUR = (priest.BlockUR + center->BlockUR * 2) / 3;
+        cDR = center->BlockDR;
+        cUR = center->BlockUR;
     }
-    blockDR += dx > 0 ? 3 : (dx < 0 ? -3 : 0);  // 远离威胁
-    blockUR += dy > 0 ? 3 : (dy < 0 ? -3 : 0);
+
+    // 背离威胁的方向：优先「从威胁指向中心」；威胁压在中心上时退化为
+    // 「从中心指向祭司」（继续往外走）；两者重合时给一个确定方向。
+    double dx = double(cDR - threat.BlockDR);
+    double dy = double(cUR - threat.BlockUR);
+    double len = sqrt(dx * dx + dy * dy);
+    if (len < 0.5) {
+        dx = double(priest.BlockDR - cDR);
+        dy = double(priest.BlockUR - cUR);
+        len = sqrt(dx * dx + dy * dy);
+        if (len < 0.5) {
+            dx = 1.0;
+            dy = 0.0;
+            len = 1.0;
+        }
+    }
+
+    int blockDR = cDR + int(dx / len * double(USR_PRIEST_RETREAT_DISTANCE));
+    int blockUR = cUR + int(dy / len * double(USR_PRIEST_RETREAT_DISTANCE));
     blockDR = max(1, min(MAP_L - 2, blockDR));
     blockUR = max(1, min(MAP_U - 2, blockUR));
     return make_pair((blockDR + 0.5) * double(BLOCKSIDELENGTH),
@@ -4546,22 +4749,6 @@ static int PriestConversionPriority(int armySort);
 // 祭司在安全状态下治疗受伤友军：士兵按兵种优先级优先，同级再按受伤程度；
 // 农民优先级最低，仅在无士兵受伤时才治疗。忽略自身与侦察兵。
 static bool TryPriestHeal(UsrAI *ai, const tagArmy &priest) {
-  // 【USR_PRIEST_PASSIVE_FRAME(30000) 帧之后一律禁用】
-  //
-  // 治疗是 HumanAction：它建立对象关系之后，Core 的流程是「走过去再治疗」，
-  // 也就是这条指令会【把祭司拽到伤员身边】。总攻阶段祭司只保存实力，任何
-  // 会被敌人牵着走的行动都要掐掉。
-  //
-  // 【为什么拦在函数入口，而不是只拦调用点】唯一的调用点在 ManagePriest 的
-  // `!enemyVisible` 分支里，那个分支本身已经有三处 return；将来任何改动都
-  // 可能把治疗重新放出来。规则写在入口，谁调用都绕不过。
-  //
-  // 实测（ai_debug.log）：18500~21000 帧之间祭司在 (77,18)↔(78,18) 之间
-  // 原地摆动 2500 帧，就是这条治疗指令与「守家 12 格」规则互相拉扯 ——
-  // 两者的半径都恰好是 12 格，谁都赢不了，路径每次都被 suspendRelation 清空。
-  if (g_frame >= USR_PRIEST_PASSIVE_FRAME)
-    return false;
-
   // ① 正在治疗的友军未满血 → 保持该治疗关系，不切换目标。
   // 否则会因「别人伤更重」而在伤员之间反复横跳，谁都治不满。
   if (priest.WorkObjectSN != -1) {
@@ -4757,61 +4944,56 @@ static bool ShouldReissuePriestMove(const tagArmy *priest, int tx, int ty)
   return nowDis2 >= fromDis2;
 }
 
+// 祭司是否已经闯进「敌方基地禁区」（USR_PRIEST_ENEMY_BASE_KEEPOUT 格以内）。
+// 是则把「往市镇中心方向退」的落点写进 outDR/outUR 并返回 true。
+//
+// 【为什么退向市镇中心】中心离敌方基地上百格，朝它走一定出圈；而且那边有箭塔
+// 与部队。不需要算「背离敌方基地的精确方向」—— 那正是历史上反复出问题的地方
+// （逐轴取符号会随参照点翻转，见 GetPriestEmergencyPoint 的记录）。
+//
+// 【锚点用估算】敌方基地通常整局没被侦察到（实测 `enemyB` 最多到 1），
+// 用真坐标就没有红线可言。估算误差最差 26 格（见 EstimateEnemySiegeAnchor），
+// 副作用只是"退早了/退晚了"一点。
+static bool PriestInEnemyBaseKeepout(const tagArmy &priest_int,
+                                     int &outDR, int &outUR)
+{
+    int anchorDR = 0;
+    int anchorUR = 0;
+    if (!EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        return false;
+    if (BlockDis2(priest_int.BlockDR, priest_int.BlockUR, anchorDR, anchorUR) >=
+        USR_PRIEST_ENEMY_BASE_KEEPOUT * USR_PRIEST_ENEMY_BASE_KEEPOUT)
+        return false;
+
+    const tagBuilding *center = FindCenter();
+    if (center == nullptr)
+        return false;
+    outDR = center->BlockDR;
+    outUR = center->BlockUR;
+    return true;
+}
+
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
     if (priest == nullptr)
         return;  // 祭司死亡后不再执行祭司逻辑，避免解引用空指针
 
-    // 【先结算上一条订单，再让任何分支去读 priestMoveOrderId】
-    //
-    // 这一段原先在守家规则【之后】—— 也就是所有决策都读完 priestMoveOrderId
-    // 才轮到它清零。而下面「走到攻城厂就地转换」那条分支会立刻 return，永远
-    // 走不到这里，于是 priestMoveOrderId 一旦被赋值就再也不归零：转换指令只
-    // 下发一次，成功还算好，被 Core 拒绝（ret=14 ISNTFREE 之类）就永久卡死。
-    // 结算逻辑必须排在使用之前，这才是「每帧先清账、再做决策」的顺序。
-    // 记录回执码：0 = 关系已建立；非 0 说明指令被 Core 拒绝，祭司不会动。
-    if (priestMoveOrderId != -1)
-    {
-        map<int, int>::const_iterator result = info.ins_ret.find(priestMoveOrderId);
-        if (result != info.ins_ret.end() ||
-            g_frame - priestEmergencyTargetFrame >=
-                USR_PRODUCTION_ORDER_TIMEOUT)
-        {
-            priestMoveLastRet =
-                result != info.ins_ret.end() ? result->second : -1;
-            priestMoveLastRetFrame = g_frame;
-            priestMoveOrderId = -1;
-        }
-    }
-
     // 【没有敌人 → 去转换敌方攻城武器厂（唯一的获胜条件）】
     //
-    // 【为什么需要这一整段】这一段原先只做了半件事：把祭司「送出门」，
-    // 却没有「到位后转换」那一步 —— 唯一的转换调用点 FindEnemySiege() 被卡在
-    // 一个判据自相矛盾的块里（详见下面 4789 起的说明），任何帧都执行不到。
-    // 结果就是祭司一路走到厂门口、转身、回家，重来。这里把后半件补上。
+    // 【为什么需要这一整段】原先【没有任何「走过去」的逻辑】：
+    // FindEnemySiege 的判据里有 `if (dis2 >= 12 * 12) continue`，要求攻城厂
+    // 已经在祭司 12 格以内 —— 所以祭司只有在【偶然晃到旁边】时才会转换它，
+    // 其余时间都在基地附近待命。获胜路径实际上从来没被主动执行过。
     //
     // 【为什么放在最前面】它是获胜路径，优先级高于守家（12 格）与硬圈（50 格）——
     // 那两条都是为了保命，而这里是唯一的取胜手段，不能互相否决。
     //
-    // 【为什么要求「敌人打光了」，而不是「视野里没有敌人」】
-    //
-    // 判据是 EnemyArmyStillExists()（按敌方开局总量 51 判断），不是
-    // HasVisibleEnemyArmy()。
-    //
-    // 原先用「视野内没有敌人」，后果是祭司走到一半、远处任何一个敌兵进入视野，
-    // 这个条件立刻失效、它掉到 50 格缰绳被拽回家；等敌人不可见了再出门 ——
-    // 在 130 格的路程上来回摇摆，永远到不了厂门口。
-    //
-    // 用总量判据则相反：只要敌方还有任何兵力（哪怕此刻在迷雾里），祭司就不出门；
-    // 只有「51 个全部见过、且此刻一个都看不见」才认定真打光了、该去换基地了。
-    // 这与「有敌人就不要靠近基地」是同一条策略，只是把「敌人」的口径从
-    // 「此刻看得见的」换成「战略上还活着的」。
-    //
-    // 保留 g_frame >= USR_PRIEST_PASSIVE_FRAME(30000) 门槛：在那之前军队还没成型，
-    // 这时候押上祭司去换基地是亏的。
-    if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !EnemyArmyStillExists())
+    // 【为什么要求「没有敌人」】有敌人在的时候让祭司出门就是送；而且一旦它靠近
+    // 敌方基地，守军进入视野会让这个条件自动失效、它就会退回来，天然自限。
+    // 保留原先的 g_frame >= USR_PRIEST_PASSIVE_FRAME(30000) 门槛：在那之前
+    // 军队还没成型，这时候押上祭司去换基地是亏的。
+    if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !HasVisibleEnemyArmy())
     {
         const tagBuilding *siegeTarget = FindEnemySiegeBuilding();
         if (siegeTarget != nullptr)
@@ -4823,14 +5005,9 @@ static void ManagePriest(UsrAI *ai)
                 USR_PRIEST_SIEGE_APPROACH_RADIUS *
                     USR_PRIEST_SIEGE_APPROACH_RADIUS)
             {
-                // 还没到 → 走过去。
-                //
-                // 【有了转换关系就不能再发移动】WorkObjectSN 已经是这座厂，
-                // 说明转换关系已建立、祭司正在途中；此时再发 HumanMove 会经
-                // Core_List::addRelation → suspendRelation 把关系清掉。实测
-                // 这条 10 格边界会被反复跨越，一跨就互毁，必须在这里让路。
-                if (priest->WorkObjectSN != siegeTarget->SN &&
-                    ShouldReissuePriestMove(priest, siegeTarget->BlockDR,
+                // 还没到 → 走过去。到了 USR_PRIEST_SIEGE_APPROACH_RADIUS 以内
+                // 就不拦，让下面 FindEnemySiege 那条路径正常下发 HumanAction。
+                if (ShouldReissuePriestMove(priest, siegeTarget->BlockDR,
                                             siegeTarget->BlockUR))
                 {
                     priestMoveOrderId = ai->HumanMove(
@@ -4846,78 +5023,55 @@ static void ManagePriest(UsrAI *ai)
                 }
                 return;
             }
+        }
+    }
 
-            // 【走到位了 → 就地转换】
-            //
-            // 【为什么必须写在这里】全文件唯一会转换攻城厂的是 FindEnemySiege()，
-            // 而它唯一的调用点在下面那个「有可见敌人」的块里 —— 而那个块的上方
-            // 就有一句 `if (HasVisibleEnemyArmy()) return;`，判据完全相同。于是
-            //   有敌人 → 提前 return，到不了调用点；
-            //   没敌人 → 到了，但 anyEnemyVisible 为假，整块不执行。
-            // 也就是说那行在任何帧都不可达，祭司站在厂门口也不会动手
-            // （实测 baseKnown=1、enemyB=6、祭司距厂 130 格，全程 0 次转换）。
-            // 转换攻城厂是唯一的获胜条件，指令必须在这里下发。
-            //
-            // 距离用 USR_PRIEST_SIEGE_APPROACH_RADIUS(10)，它比引擎的转换距离
-            // （config.json 的 DIS_PRIEST = 12）小 2 格，保证「判定能转换」时
-            // 一定真的在转换距离内。
-            if (priest->ConvertCooldown <= 0 && priestMoveOrderId == -1 &&
-                priest->WorkObjectSN != siegeTarget->SN)
+    // 【不得进入敌方基地 USR_PRIEST_ENEMY_BASE_KEEPOUT 格以内】
+    // —— 取代原来的「活动缰绳：离市镇中心超过 50 格就拉回来」。
+    //
+    // 参照点从【我方市镇中心】换成【敌方基地】：祭司在别处可以自由活动，
+    // 唯一的硬边界是不许靠近敌方基地。豁免条件仍是 WorkObjectSN != -1 ——
+    // 那表示它已经建立了对象关系（正在转换、或正赶往转换目标），属于获胜路径。
+    // 注意用 WorkObjectSN 而不是 NowState：纯移动不会产生对象关系
+    // （实测祭司带着移动目标时 wo 一直是 -1），所以这个判据只放过「有活干」的情况。
+    //
+    // 【为什么还要挂在 HasVisibleEnemyArmy() 上】转换攻城厂要求走到厂 10 格内，
+    // 与 32 格红线直接矛盾。所以只在【有可见敌人】时才拦：敌人还在时远离敌方基地，
+    // 敌人清空了才放它去转换。（真正去转换那条路在本函数开头，会先 return。）
+    {
+        int awayDR = 0;
+        int awayUR = 0;
+        if (HasVisibleEnemyArmy() && priest->WorkObjectSN == -1 &&
+            PriestInEnemyBaseKeepout(*priest, awayDR, awayUR))
+        {
+            if (ShouldReissuePriestMove(priest, awayDR, awayUR))
             {
-                // 已经有关系时不重复下发 —— 重复指令会中止 Core 里的原关系。
-                priestMoveOrderId = ai->HumanAction(priest->SN, siegeTarget->SN);
+                priestMoveOrderId = ai->HumanMove(
+                    priest->SN, (awayDR + 0.5) * double(BLOCKSIDELENGTH),
+                    (awayUR + 0.5) * double(BLOCKSIDELENGTH));
+                priestEmergencyTarget = make_pair(awayDR, awayUR);
                 priestEmergencyTargetFrame = g_frame;
+                priestMoveFromDR = priest->BlockDR;
+                priestMoveFromUR = priest->BlockUR;
                 lastPriestOrderFrame = g_frame;
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                         "[SIEGECONV] f=%d priest=(%d,%d) siegeSN=%d "
-                         "siegePos=(%d,%d) dis2=%d siegeHP=%d/%d prevRet=%d",
-                         g_frame, priest->BlockDR, priest->BlockUR,
-                         siegeTarget->SN, siegeTarget->BlockDR,
-                         siegeTarget->BlockUR, siegeDis2, siegeTarget->Blood,
-                         siegeTarget->MaxBlood, priestMoveLastRet);
-                AiDebugLog(buf);
             }
-            // 【无论有没有下发指令都到此为止】
-            // 既然攻城厂已知、视野里又没有敌人，祭司唯一的任务就是转换它。
-            // 不能落到下面的守家(12)/缰绳(50)/治疗逻辑 —— 敌方基地离我方中心
-            // 130 格，一落到缰绳就会被 HumanMove 一路拽回家，形成
-            // 「走到厂门口 → 掉头 → 再走过去」的大范围来回。
             return;
         }
     }
 
-    // 【活动范围】离市镇中心超过 USR_PRIEST_LEASH_RADIUS 就直接拉回来，
-    // 不做任何别的判断。豁免条件是 WorkObjectSN != -1 —— 那表示它已经建立了
-    // 对象关系（正在转换、或正赶往转换目标），属于获胜路径，见常量的说明。
-    // 注意用 WorkObjectSN 而不是 NowState：纯移动不会产生对象关系
-    // （实测祭司带着移动目标时 wo 一直是 -1），所以这个判据只放过「有活干」的情况。
+    if (priestMoveOrderId != -1)
     {
-        const tagBuilding *leashHome = FindCenter();
-        if (leashHome != nullptr && priest->WorkObjectSN == -1)
+        map<int, int>::const_iterator result = info.ins_ret.find(priestMoveOrderId);
+        if (result != info.ins_ret.end() ||
+            g_frame - priestEmergencyTargetFrame >=
+                USR_PRODUCTION_ORDER_TIMEOUT)
         {
-            const int homeDis2 =
-                BlockDis2(priest->BlockDR, priest->BlockUR, leashHome->BlockDR,
-                          leashHome->BlockUR);
-            if (homeDis2 >
-                USR_PRIEST_LEASH_RADIUS * USR_PRIEST_LEASH_RADIUS)
-            {
-                if (ShouldReissuePriestMove(priest, leashHome->BlockDR,
-                                            leashHome->BlockUR))
-                {
-                    priestMoveOrderId = ai->HumanMove(
-                        priest->SN,
-                        (leashHome->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
-                        (leashHome->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
-                    priestEmergencyTarget =
-                        make_pair(leashHome->BlockDR, leashHome->BlockUR);
-                    priestEmergencyTargetFrame = g_frame;
-                    priestMoveFromDR = priest->BlockDR;
-                    priestMoveFromUR = priest->BlockUR;
-                    lastPriestOrderFrame = g_frame;
-                }
-                return;
-            }
+            // 记录回执码：0 = 移动关系已建立；非 0（尤其 14 = ISNTFREE）
+            // 说明指令被 Core 拒绝，祭司不会移动。
+            priestMoveLastRet =
+                result != info.ins_ret.end() ? result->second : -1;
+            priestMoveLastRetFrame = g_frame;
+            priestMoveOrderId = -1;
         }
     }
 
@@ -5027,13 +5181,11 @@ static void ManagePriest(UsrAI *ai)
     }
 
     const tagArmy *closeThreat = nullptr;
-    int closestDis2 = 1000000000;
     if (nearestEnemy != nullptr &&
         (nearestEnemy->WorkObjectSN == priest->SN ||
          nearestDis2 <=
              USR_PRIEST_DANGER_RADIUS * USR_PRIEST_DANGER_RADIUS)) {
         closeThreat = nearestEnemy;
-        closestDis2 = nearestDis2;
     }
 
     // 【诊断】威胁判定明细，用于定位「祭司被打却不撤」。
@@ -5129,56 +5281,38 @@ static void ManagePriest(UsrAI *ai)
     // 敌人，祭司就会去追转换目标，回基地那段根本执行不到。实测它就是这样跑到
     // 离基地很远的地方、被 4 个敌人贴到 1 格围死的。
     //
-    // 判据是「超出 USR_PRIEST_HOME_RADIUS(12) 格就回家并 return」：
-    // 在圈内时不拦，下面的转换逻辑照常跑（敌人都送到家门口了，转换是获胜路径，
-    // 不该关掉）。所以效果是「只转换送上门的，不追出去」。
-    // 【三万帧以后：敌方还有兵力就待在家里，什么也不做】
+    // 判据从「超出市镇中心 12 格就回家」改成「进入敌方基地 32 格以内就退开」
+    // （即 USR_PRIEST_ENEMY_BASE_KEEPOUT）。原来那两条以我方中心为参照的守家/
+    // 缰绳规则都已删除，理由见文件上方常量的说明。
     //
-    // 与函数开头那段是一对，两边合起来才是完整的规则 —— 判据都是
-    // EnemyArmyStillExists()（按敌方开局总量 51 判「打光了没有」）：
-    //     敌人打光了 → 去转换敌方攻城武器厂（唯一的获胜路径）
-    //     还有兵力   → 待在家里，不转换、不治疗、不追
-    // 两处必须同口径，否则会出现「上面放它出门、这里又拦下来」的互否。
+    // 与上面开头那段是一对，两边合起来才是完整的规则：
+    //     没有敌人 → 去转换敌方攻城武器厂（唯一的获胜路径）
+    //     有敌人   → 不许靠近敌方基地，不转换、不治疗、不追
     //
-    // 【为什么「在 12 格内」也要 return】原实现只在超出 12 格时 return，
-    // 圈内会落到下面的转换逻辑 —— 于是祭司会去追一个转换目标、走出 12 格，
-    // 又被这段拉回来，形成 HumanAction ↔ HumanMove 的来回拉扯（游戏日志里
-    // 表现为「设置工作目标为 X」和「移动至同一坐标」交替刷屏）。
-    // 有敌人时直接停手，就不存在这个循环。
+    // 【为什么「没进禁区」也要 return】原实现在圈内时会落到下面的转换逻辑 ——
+    // 于是祭司会去追一个转换目标、跑出圈外，又被这段拉回来，形成
+    // HumanAction ↔ HumanMove 的来回拉扯（游戏日志里表现为「设置工作目标为 X」
+    // 和「移动至同一坐标」交替刷屏）。有敌人时直接停手，就不存在这个循环。
     if (priestPassive)
     {
-        const tagBuilding *passiveHome = FindCenter();
-        if (passiveHome != nullptr)
+        int awayDR = 0;
+        int awayUR = 0;
+        if (PriestInEnemyBaseKeepout(*priest, awayDR, awayUR) &&
+            ShouldReissuePriestMove(priest, awayDR, awayUR))
         {
-            const int homeDis2 =
-                BlockDis2(priest->BlockDR, priest->BlockUR,
-                          passiveHome->BlockDR, passiveHome->BlockUR);
-            if (homeDis2 > USR_PRIEST_HOME_RADIUS * USR_PRIEST_HOME_RADIUS &&
-                ShouldReissuePriestMove(priest, passiveHome->BlockDR,
-                                        passiveHome->BlockUR))
-            {
-                priestMoveOrderId = ai->HumanMove(
-                    priest->SN,
-                    (passiveHome->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
-                    (passiveHome->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
-                priestEmergencyTarget =
-                    make_pair(passiveHome->BlockDR, passiveHome->BlockUR);
-                priestEmergencyTargetFrame = g_frame;
-                priestMoveFromDR = priest->BlockDR;
-                priestMoveFromUR = priest->BlockUR;
-                lastPriestOrderFrame = g_frame;
-            }
+            priestMoveOrderId = ai->HumanMove(
+                priest->SN, (awayDR + 0.5) * double(BLOCKSIDELENGTH),
+                (awayUR + 0.5) * double(BLOCKSIDELENGTH));
+            priestEmergencyTarget = make_pair(awayDR, awayUR);
+            priestEmergencyTargetFrame = g_frame;
+            priestMoveFromDR = priest->BlockDR;
+            priestMoveFromUR = priest->BlockUR;
+            lastPriestOrderFrame = g_frame;
         }
-        // 敌方还有兵力 → 到此为止：不转换、不撤退、不治疗。
-        // 敌人真的打光了 → 落到下面（转换攻城厂那段在本函数开头已经处理过，
-        // 这里放行是给「还没侦察到攻城厂 / 还没走到」的情况留余地）。
-        //
-        // 【判据用总量，不用视野】理由与上面 4796 那处相同：用视野判据会让祭司
-        // 在 130 格的路程上被「远处敌兵一闪」反复拽回家。总量判据只在敌方真的
-        // 一个不剩时才放它出门。
-        // 注意两处的语义必须一致 —— 一处用视野、一处用总量，会出现「上面放它
-        // 出门、这里又拦下来」的互否。
-        if (EnemyArmyStillExists())
+        // 有敌人 → 到此为止：不转换、不撤退、不治疗。
+        // 没有敌人 → 落到下面（转换攻城厂那段已经在上面前面处理过了，
+        // 这里放行是给「还没侦察到攻城厂」的情况留余地）。
+        if (HasVisibleEnemyArmy())
             return;
     }
 
@@ -5199,15 +5333,13 @@ static void ManagePriest(UsrAI *ai)
             }
         }
         if (anyEnemyVisible) {
-            // 【这里只转换敌方部队，不碰建筑】
-            // 原先还有一个 `if (!armyTarget && g_frame >= 30000)
-            // buildingTarget = FindEnemySiege(*priest);` 的分支，但它是死代码：
-            // 外层 `if (anyEnemyVisible)` 与上面的 `if (HasVisibleEnemyArmy())
-            // return;` 判据完全相同，所以「有敌人」时早就 return 了、走不到这里，
-            // 「没敌人」时这个块整体不执行。攻城厂的转换已挪到本函数开头
-            // 「没有敌人 → 去转换敌方攻城武器厂」那一段（见 4774 起）。
             const tagArmy *armyTarget = FindPriestConversionTarget(*priest);
-            const int targetSN = armyTarget ? armyTarget->SN : -1;
+            const tagBuilding *buildingTarget = nullptr;
+            if (!armyTarget && g_frame >= 30000)
+                buildingTarget = FindEnemySiege(*priest);
+            const int targetSN = armyTarget
+                                     ? armyTarget->SN
+                                     : (buildingTarget ? buildingTarget->SN : -1);
             // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
             if (targetSN != -1 && priest->ConvertCooldown <= 0 &&
                 priestMoveOrderId == -1 && priest->WorkObjectSN != targetSN) {
@@ -5292,16 +5424,17 @@ static void ManagePriest(UsrAI *ai)
     }
     if (!enemyVisible)
     {
-        // 开局探路：分层推进，把市镇中心 USR_PRIEST_EXPLORE_RADIUS(50) 格
-        // 以内的区域探开为止。走法与终止条件见 CapturePriestLap 与那里的说明。
+        // 开局探路：分层推进，把市镇中心 USR_PRIEST_EXPLORE_RADIUS(120) 格
+        // 以内的区域探开为止 —— 半径涵盖整张图，目的就是找到敌方基地
+        // （见该常量的说明）。走法与终止条件见 CapturePriestLap 与那里的说明。
         //
         // 放在「无敌人」分支里：有敌人时仍走威胁/转换逻辑，不会为了探路挨打。
         //
         // 【已取消】原先这里还有一个「视野里出现瞪羚就提前收工」的出口
         // （HasVisibleGazelle + FinishPriestExplore("gazelle")）。按需求去掉：
-        // 探路的目的不再只是找食物，而是把基地周边 50 格探开 —— 瞪羚出现得早，
+        // 探路的目的不再只是找食物，而是把外围探开 —— 瞪羚出现得早，
         // 按那个出口走的话祭司会刚出门就收工，外围根本没探。
-        // 【时间截止】到帧就收工，与「50 格内探干净」并列，谁先满足用谁。
+        // 【时间截止】到帧就收工，与「半径内探干净」并列，谁先满足用谁。
         // 放在半径检查之前，保证即使外围还没探完也一定回家。
         if (!priestExploreDone && g_frame >= USR_PRIEST_EXPLORE_UNTIL_FRAME)
             FinishPriestExplore("timeout");
@@ -5397,52 +5530,45 @@ static void ManagePriest(UsrAI *ai)
             return;  // 探路期间不做别的事（治疗/留基地）
         }
 
-        // 第三波之前没有敌人时，祭司留在基地待机。
-        // 它只有 100 血、近战与远程防御都是 0、且不能自愈，待在基地的箭塔
-        // 覆盖圈里最安全；原先它会在无威胁时自由治疗，被远处伤兵一路带离基地
-        // （实测跑到离市镇中心 30 格处待机，援军半径 14 与箭塔 6/9/12 格圈
-        //  都够不到）。
+        // 【无敌人时的待机位置：不再是「回基地」，而是「别待在敌方基地附近」】
+        //
+        // 原来这里是「守家」：没有敌人时留在市镇中心 12 格内待机（理由是祭司
+        // 只有 100 血、防御 0、不能自愈，待在箭塔圈里最安全）。按需求改成以
+        // 敌方基地为参照的红线 —— 祭司在别处可以自由活动，只要不进
+        // USR_PRIEST_ENEMY_BASE_KEEPOUT 圈就行。
         if (priestPassive || g_frame < USR_PRIEST_HOLD_HOME_UNTIL_FRAME)
         {
-            const tagBuilding *home = FindCenter();
-            if (home != nullptr)
+            int awayDR = 0;
+            int awayUR = 0;
+            if (PriestInEnemyBaseKeepout(*priest, awayDR, awayUR))
             {
-                const int homeDis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
-                                               home->BlockDR, home->BlockUR);
-                if (homeDis2 >
-                    USR_PRIEST_HOME_RADIUS * USR_PRIEST_HOME_RADIUS)
+                // 节流重发：每 USR_PRIEST_ORDER_INTERVAL 帧最多一次，
+                // 否则每帧重发会不断 suspendRelation + 重新寻路，反而走不动。
+                if (ShouldReissuePriestMove(priest, awayDR, awayUR))
                 {
-                    // 节流重发：每 USR_PRIEST_ORDER_INTERVAL 帧最多一次，
-                    // 否则每帧重发会不断 suspendRelation + 重新寻路，反而走不动。
-                    if (ShouldReissuePriestMove(priest, home->BlockDR,
-                                                home->BlockUR))
-                    {
-                        priestMoveOrderId = ai->HumanMove(
-                            priest->SN,
-                            (home->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
-                            (home->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
-                        priestEmergencyTarget =
-                            make_pair(home->BlockDR, home->BlockUR);
-                        priestEmergencyTargetFrame = g_frame;
-                        priestMoveFromDR = priest->BlockDR;
-                        priestMoveFromUR = priest->BlockUR;
-                        lastPriestOrderFrame = g_frame;
-                    }
-                    return;
+                    priestMoveOrderId = ai->HumanMove(
+                        priest->SN, (awayDR + 0.5) * double(BLOCKSIDELENGTH),
+                        (awayUR + 0.5) * double(BLOCKSIDELENGTH));
+                    priestEmergencyTarget = make_pair(awayDR, awayUR);
+                    priestEmergencyTargetFrame = g_frame;
+                    priestMoveFromDR = priest->BlockDR;
+                    priestMoveFromUR = priest->BlockUR;
+                    lastPriestOrderFrame = g_frame;
                 }
+                return;
             }
         }
-        // 总攻阶段（priestPassive）治疗已停用 —— 判据不在这一层，而是在
-        // TryPriestHeal 的函数入口，那里是唯一权威的规则点（见该函数注释）。
-        // 这里不再重复判断，避免两处条件将来各自漂移。
+        // 总攻阶段治疗也停用：祭司只保存实力，不做任何会被敌人牵制的行动。
+        if (priestPassive)
+            return;
         TryPriestHeal(ai, *priest);
         return;
     }
 
     // 转换全程保留，不因总攻阶段停用。
-    // 这里只处理「敌方部队」的转换；敌方攻城武器厂（唯一的获胜条件）已挪到
-    // 本函数开头那段处理 —— 原先挂在上面那个块里的 `g_frame >= 30000` 与
-    // priestPassive 的门槛相同，两条规则互相抵消，那一行从来没有被执行过。
+    // 转换敌方攻城武器厂是唯一的获胜条件，关掉它就等于关掉获胜路径——
+    // 而且原先挂在上面的 `g_frame >= 30000` 与 priestPassive 的门槛相同，
+    // 两条规则互相抵消，FindEnemySiege 那行从来没有被执行过。
     // 代价：FindPriestConversionTarget 没有距离限制，祭司可能为此跑到离基地
     // 30~50 格处（实测被 3 个敌人锁定后既撤不回来也打不过）。这是已知取舍。
 
@@ -6032,6 +6158,15 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR)
 }
 
 static int offensiveLastOrderFrame = USR_INVALID_FRAME;
+// 每次后撤几格。
+static const int USR_MELEE_KITE_BLOCKS = 2;
+// 两次后撤之间至少间隔多少帧。每次后撤都发 HumanMove，而 HumanMove 会清空路径并
+// 打断攻击关系 —— 不加节流会变成「每帧后退 → 每帧被清空 → 原地不动」。
+// 取 40：速度 4.07 的战车弓兵走完两格约 20 帧，够它真的挪开。
+static const int USR_MELEE_KITE_INTERVAL = 40;
+// 「被近战打到」的贴身判定：两格（欧氏距离平方）。敌人有 WorkObjectSN 指向我方
+// 单位只说明它锁了目标，还要真的贴上来才算打到。
+static const int USR_MELEE_KITE_TRIGGER_DIS2 = 4;
 
 // ── 站桩消耗（拉扯战术的自动化版）──────────────────────────────────
 //
@@ -6045,14 +6180,66 @@ static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 //     enemyai.cpp:68    static pair<double,double>Enemy_Center;  //enemy武器工程厂
 //     enemyai.cpp:2022  Initialize_Enemycenter() 取的是 BUILDING_SIEGE
 //
-// 【所以】把远程部队停在它 26~30 格处：守军冲出来到 25 格就折返，而那 1~5 格
+// 【所以】把远程部队停在它 26~32 格处：守军冲出来到 25 格就折返，而那 1~7 格
 // 正好落在我方战车弓兵射程（7）内 —— 白挨打，永远够不到我们。
 // 这比文档描述的「突击者反复进退」更省事：站对距离，对方会自己完成拉扯。
 //
+// 【环怎么维持】圈内不再按位置阈值驱赶，改成「被打到就后退两格」—— 挨一次打
+// 退一步，退到 32 格之外自然停手（见 ManageStandoff 圈内那档）。掉队的（> 44 格）
+// 则被拉回来，中间 32~44 是死区。只做「退出」不做「拉回」，被截停在后方的部队
+// 就无人接管；只做「拉回」不做「退出」，部队会一直贴在敌人身上并和自卫对撞。
+//
 // 【锚点为什么用攻城武器厂】因为敌方守军的判据就是量到它的。用市镇中心会算偏，
 // 偏多少取决于两座建筑隔多远。
-static const int USR_STANDOFF_RADIUS = 28;
-// 环上落点数。半径 28 的圆周长约 176 格，16 个点平均间隔约 11 格 ——
+static const int USR_STANDOFF_RADIUS = 32;
+// 「掉队靠拢」的触发宽度（格）：离锚点超过 USR_STANDOFF_RADIUS + 本值 的单位，
+// 才被当成掉队、派去向环上靠拢；32 ~ 44 之间是死区，什么都不做。
+//
+// 【为什么需要靠拢这一档】原先只有「圈内推出，圈外不管」两档，那个设计默认了
+// 「所有部队都已经在环附近」。但推进指令是全有或全无的 —— ManageOffensiveArmy
+// 一见视野里有敌人就 `return`（见那里的说明），还在半路上的部队被当场截停；
+// 而站桩只处理 32 格内的，圈外的一句都不发。两边同时忽略，掉队的部队
+// （实测多在 40~70 格）拿到零指令、永久站着不动。
+// 表现为「一部分兵在 50 格外站着不动」，而走在前面、已经进 32 格的那批正常。
+//
+// 【为什么中间必须留死区】靠拢与自卫是对撞的：靠拢把单位往环上搬，自卫把它
+// 往视野（7 格）/ 协防（12 格）半径内的敌人那儿搬，而敌人并不总在环上
+// （守军会追出到 25 格，也可能有人停在外圈）。两条规则的方向在 32 格线两侧
+// 会翻转，没有死区的话单位就卡在线上被两边轮流推。
+// 取 12 格：比自卫最大的非祭司触发半径（协防 12 格）不窄，保证「刚退到圈外」
+// 和「刚靠拢到环上」都不会立刻触发对面那条规则。
+static const int USR_STANDOFF_JOIN_BAND = 12;
+// 「被打到就后退几格」—— 圈内单位撤离环内的唯一手段。与 USR_MELEE_KITE_BLOCKS
+// 取同值（都是一次后撤的步长），但语义不同：这条背对【锚点】、那条背对【攻击者】，
+// 要调就分别调。
+static const int USR_STANDOFF_STEP_BLOCKS = 2;
+// 后退步的封口窗口（帧）：只用来挡住 AssignFieldSelfDefense 在同帧稍后覆盖这条
+// HumanMove。取 45 —— 走完两格约 24 帧、留一倍余量；且比 60 帧的站桩节流短，
+// 保证窗口在下一次站桩之前自然过期，不会和靠拢那条 200 帧的封口逻辑互相干扰。
+static const int USR_STANDOFF_STEP_SEAL_FRAMES = 45;
+// 靠拢指令的封口窗口长度（帧）：单位被派去向环上槽位靠拢之后，这么多帧内
+// 不接自卫指令、也不被站桩重发，让这次移动真正走完。
+//
+// 【为什么需要它】站桩每 60 帧才发一次「走向槽位」，而 AssignFieldDefense
+// 每 12 帧就发一次「打最近的敌人」（USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL），
+// 且自卫在 processData 里【后执行】—— 频率差 5 倍 + 后执行，站桩的移动指令
+// 每次都被覆盖，净效果是原地不动。
+// 取 200 帧：从内圈走到环上最多约 12 格，单位约 1 格 / 12 帧，留一倍余量。
+// 窗口内的解封条件见 ManageStandoff：走进死区（32~44）立刻解封、走到槽位解封、
+// 或一个周期内没有朝目标前进也解封 —— 所以「不还手」的时间不会超过实际所需。
+// 窗口到期时，同一次站桩遍历会立刻重新下发并续封，中间没有空档。
+//
+// 【为什么靠拢要 200 帧，而圈内的后退步只要 45 帧】靠拢是一段长距离行军
+// （从 70 格走到 32 格约 38 格、约 456 帧，分几段走完），必须整段封住才不会被
+// 自卫截走；圈内那档一次只退两格（约 24 帧），封 45 帧就够，而且封得短反而好 ——
+// 它退完就能立刻回到自卫状态继续输出。
+static const int USR_STANDOFF_RETREAT_FRAMES = 200;
+// 【已删除】USR_STANDOFF_RETREAT_INNER = 20（「20~32 之间不动」的滞回带）。
+// 它当年是和另一条规则配套的：那条规则说「进圈的一律推到 32 格环上」，
+// 滞回带是为了让 20~32 之间的单位不被反复推来推去。
+// 那条「按位置阈值推出去」的规则现在也删了 —— 圈内改成由挨打驱动的两格后退
+// （见 USR_STANDOFF_STEP_BLOCKS）。阈值本身没有了，围绕它设的滞回带自然也不必要。
+// 环上落点数。半径 32 的圆周长约 201 格，16 个点平均间隔约 12.5 格 ——
 // 足够分散，不会互相挤。
 static const int USR_STANDOFF_SLOTS = 16;
 // （原先这里还有 USR_STANDOFF_ADVANCE_ENEMIES 与 USR_STANDOFF_COUNT_RADIUS
@@ -6145,8 +6332,8 @@ static const tagBuilding *FindEnemySiegeBuilding()
 }
 
 // 站位圈上第 index 个落点相对锚点的格偏移。
-// 用固定的 16 方向表而不是 sin/cos：这个文件里其它环状布局（箭塔 TOWER_RINGS、
-// 战车弓兵 USR_SPREAD_RINGS）也都是整数表，保持一致且没有浮点取整问题。
+// 用固定的 16 方向表而不是 sin/cos：这个文件里其它环状布局（战车弓兵
+// USR_SPREAD_RINGS）也都是整数表，保持一致且没有浮点取整问题。
 static void StandoffRingOffset(int index, int &ddr, int &dur)
 {
     static const int COS16[USR_STANDOFF_SLOTS] = {
@@ -6159,12 +6346,193 @@ static void StandoffRingOffset(int index, int &ddr, int &dur)
     dur = SIN16[i] * USR_STANDOFF_RADIUS / 100;
 }
 
+// 敌方攻城武器厂的位置 —— 侦察到了用真的，没侦察到用估算。
+//
+// 【为什么要估算】FindEnemySiegeBuilding() 要求攻城厂已经进过
+// info.enemy_buildings（也就是被侦察到）。实测它【整局都是 nullptr】（`enemyB`
+// 最多到 1，那还是座箭塔），于是下面 ManageStandoff 第一行就 return false ——
+// 「有敌人就退到 28 格外」一次都没生效过。
+//
+// 【依据】四张地图都满足同一条：敌方攻城厂永远在我方市镇中心的【对角落】。
+//   相对我方中心的偏移：map (-66,+64) / map1 (+73,-65) / map2 (-57,-83) / map3 (+64,-58)
+//   用「地图中心的对极点」预测的误差：map3 (1,-1) / map2 (6,-4) / map (11,9) / map1 (14,12)
+// 最差曼哈顿 26 格 —— 站桩圈半径 28，够用；而且估错了也只是把站位圈摆偏一点，
+// 不会有别的副作用（真实坐标一出现就优先用真的）。
+//
+// 【为什么对地图旋转免疫】「对极点」这个关系在任何绕地图中心的旋转下都成立，
+// 所以不需要知道本局的 rotation：拿 FindCenter() 的真实坐标直接算。
+//
+// 【只用于「取位置」，不能用于「取目标】】转换攻城厂需要它的 SN，估算给不出 SN ——
+// 所以 ManagePriest 里那一段仍然只认 FindEnemySiegeBuilding()。
+static bool EstimateEnemySiegeAnchor(int &anchorDR, int &anchorUR)
+{
+    // ① 真攻城厂
+    const tagBuilding *real = FindEnemySiegeBuilding();
+    if (real != nullptr)
+    {
+        anchorDR = real->BlockDR;
+        anchorUR = real->BlockUR;
+        return true;
+    }
+
+    // ② 侦察到过的敌方建筑（enemyBaseDiscovered 记下的第一个）—— 真实数据，优于估算
+    if (enemyBaseDiscovered && enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0)
+    {
+        anchorDR = enemyBaseBlockDR;
+        anchorUR = enemyBaseBlockUR;
+        return true;
+    }
+
+    // ③ 都没侦察到 → 用我方中心关于地图中心的对极点估一个
+    const tagBuilding *center = FindCenter();
+    if (center == nullptr)
+        return false;
+    anchorDR = max(0, min(MAP_L - 1, MAP_L - 1 - center->BlockDR));
+    anchorUR = max(0, min(MAP_U - 1, MAP_U - 1 - center->BlockUR));
+    return true;
+}
+
+// 从 (fromDR,fromUR) 朝 (toDR,toUR) 走 step 格，发一条 HumanMove。
+// 按单位向量取整，所以走的是斜向也没关系；距离不足 step 时直接走向目标。
+static void MoveTowardBlock(UsrAI *ai, int sn, int fromDR, int fromUR, int toDR,
+                            int toUR, int step)
+{
+    double dx = double(toDR - fromDR);
+    double dy = double(toUR - fromUR);
+    const double len = sqrt(dx * dx + dy * dy);
+    if (len < 0.5)
+        return;  // 已经重合，不必发指令
+    const double go = (len < double(step)) ? len : double(step);
+    const int tx =
+        max(1, min(MAP_L - 2, fromDR + int(dx / len * go)));
+    const int ty =
+        max(1, min(MAP_U - 2, fromUR + int(dy / len * go)));
+    ai->HumanMove(sn, (tx + 0.5) * double(BLOCKSIDELENGTH),
+                  (ty + 0.5) * double(BLOCKSIDELENGTH));
+}
+
+// 突击者的驱动。只在已确认「视野里有敌人」时由 ManageStandoff 调用。
+//
+// 三个状态：没有突击者 → 站桩僵住足够久就选一个；有突击者 → 前进或后退；
+// 回到起点 → 交还指挥权（下次僵住再选一个）。死亡的突击者也走这条路。
+static void ManageStandoffAssault(UsrAI *ai, int anchorDR, int anchorUR)
+{
+    // ---- 没有突击者：站桩僵住够久了就选一个 ----
+    if (assaultSN == -1)
+    {
+        if (standoffEngagedSince == USR_INVALID_FRAME ||
+            g_frame - standoffEngagedSince < USR_ASSAULT_IDLE_FRAMES)
+            return;  // 还没僵住，老实站桩
+
+        int bestDis2 = 1000000000;
+        const tagArmy *best = nullptr;
+        for (const tagArmy &army : info.armies)
+        {
+            if (!IsOffensiveArmy(army) || army.NowState != HUMAN_STATE_IDLE)
+                continue;  // 只要空闲的：正在交战的别抽调
+            const int dis2 =
+                BlockDis2(army.BlockDR, army.BlockUR, anchorDR, anchorUR);
+            if (dis2 < bestDis2)
+            {
+                bestDis2 = dis2;
+                best = &army;
+            }
+        }
+        if (best == nullptr)
+            return;
+        assaultSN = best->SN;
+        assaultStartDR = best->BlockDR;
+        assaultStartUR = best->BlockUR;
+        assaultRetreating = false;
+        return;
+    }
+
+    // ---- 找到突击者本体 ----
+    const tagArmy *assault = nullptr;
+    for (const tagArmy &army : info.armies)
+    {
+        if (army.SN == assaultSN)
+        {
+            assault = &army;
+            break;
+        }
+    }
+    if (assault == nullptr)
+    {
+        // 死了（或回执里消失了）→ 取消，下次僵住时重新选一个
+        assaultSN = -1;
+        assaultRetreating = false;
+        return;
+    }
+    // 只驱动【空闲】的突击者。正在打或正在走的都别插指令 ——
+    // 否则 HumanMove 会经 suspendRelation 打断它刚建立的攻击关系，
+    // 变成「前进 → 被打断 → 再前进」的死循环（这个坑站桩那边踩过一次）。
+    if (assault->NowState != HUMAN_STATE_IDLE)
+        return;
+
+    // ---- 威胁判定：掉过血，或 8 格内有敌人 ----
+    bool threat = assault->Blood < assault->MaxBlood;
+    if (!threat)
+    {
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.Blood <= 0)
+                continue;
+            if (BlockDis2(assault->BlockDR, assault->BlockUR, enemy.BlockDR,
+                          enemy.BlockUR) <= USR_ASSAULT_TRIGGER_DIS2)
+            {
+                threat = true;
+                break;
+            }
+        }
+    }
+
+    if (!threat)
+    {
+        // 安全 → 朝敌方基地前进，把守军勾出来
+        MoveTowardBlock(ai, assault->SN, assault->BlockDR, assault->BlockUR,
+                        anchorDR, anchorUR, USR_ASSAULT_STEP);
+        return;
+    }
+
+    // 有威胁 → 退回起点，把追兵带到 32 格环上的火力网里
+    assaultRetreating = true;
+    const int backDis2 = BlockDis2(assault->BlockDR, assault->BlockUR,
+                                   assaultStartDR, assaultStartUR);
+    if (backDis2 <= 4)  // 回到起点 2 格内 → 收工
+    {
+        assaultSN = -1;
+        assaultRetreating = false;
+        return;
+    }
+    MoveTowardBlock(ai, assault->SN, assault->BlockDR, assault->BlockUR,
+                    assaultStartDR, assaultStartUR, USR_ASSAULT_STEP);
+}
+
+// 这个单位是不是正在被攻击（站桩圈的「被打到」判据）。
+//
+// 复用 FindDirectThreatToArmySN：某敌人的 WorkObjectSN 指向它，或敌箭塔把它
+// 设成 Project 且在 USR_FIELD_ASSIST_RADIUS 内。也就是【被锁定 / 被打】，
+// 而不是严格的「这一帧血量掉了」。
+//
+// 【为什么不用掉血判据】tagArmy 快照里没有逐单位的上一帧血量，要另加一张
+// map 才能做（参考文件对祭司用的就是这个办法）。而站桩这一步每 60 帧才跑
+// 一趟，"被锁定"已经够用 —— 真正的上行边界是 32 格环：退出去就不再触发。
+static bool IsArmyBeingAttacked(const tagArmy &army)
+{
+    return FindDirectThreatToArmySN(army.SN) != -1;
+}
+
 // 站桩阶段：返回 true 表示本帧已处理（部队正在圈上待机，不要再去打建筑）。
 static bool ManageStandoff(UsrAI *ai)
 {
-    const tagBuilding *siege = FindEnemySiegeBuilding();
-    if (siege == nullptr)
-        return false; // 还没侦察到攻城武器厂，退回原来的进攻逻辑
+    // 【锚点改成估算】原先是 `siege = FindEnemySiegeBuilding(); if (siege == nullptr)
+    // return false;` —— 实测攻城厂整局没被侦察到，这条规则从来没生效过。
+    // 站位只需要一个坐标，估算的够用（依据与误差见 EstimateEnemySiegeAnchor）。
+    int anchorDR = 0;
+    int anchorUR = 0;
+    if (!EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        return false; // 连市镇中心都没有（开局头几帧），退回原来的进攻逻辑
 
     // 【只要视野里还有敌人，就不靠近基地】
     //
@@ -6188,12 +6556,27 @@ static bool ManageStandoff(UsrAI *ai)
     // 取舍是【能不能拆掉基地】优先于【少送几波】—— 总量判据更保守，但它让获胜
     // 路径永远不启动，等于没有。
     if (!HasVisibleEnemyArmy())
+    {
+        // 站桩阶段结束（视野里没敌人了）→ 复位僵住计时与突击者。
+        // 【为什么必须复位】僵住计时是用来判「守军不出来」的，下一次站桩是全新的
+        // 一轮，不该继承上一轮的时长；突击者也一样（它可能已经死在半路）。
+        standoffEngagedSince = USR_INVALID_FRAME;
+        assaultSN = -1;
+        assaultRetreating = false;
         return false;
+    }
+    // 站桩开始计时（首次进入时记下，之后不动）。
+    if (standoffEngagedSince == USR_INVALID_FRAME)
+        standoffEngagedSince = g_frame;
 
     const int orderInterval = 60;
     if (g_frame - offensiveLastOrderFrame < orderInterval)
         return true; // 还在节流窗口里，但阶段判定已经做完
     offensiveLastOrderFrame = g_frame;
+
+    // 【突击者】站桩僵住够久就派一个去勾守军出来（见 ManageStandoffAssault）。
+    // 放在节流之后：它内部按每次走 3 格设计，不需要每帧驱动。
+    ManageStandoffAssault(ai, anchorDR, anchorUR);
 
     int slot = 0;
     for (const tagArmy &army : info.armies)
@@ -6201,52 +6584,225 @@ static bool ManageStandoff(UsrAI *ai)
         if (!IsOffensiveArmy(army))
             continue;
 
-        // 【不搬动正在交战的单位】WorkObjectSN != -1 表示它当前有攻击/工作关系。
-        //
-        // 【为什么必须加这一条】站桩发 HumanMove、AssignFieldSelfDefense 发
-        // HumanAction，两者都作用于同一批单位。而 HumanMove 会清空移动路径、
-        // 顺带把攻击关系一起打断 —— 于是形成死循环：
-        //     站桩 Move → 自卫重新 Attack → 站桩发现它不在圈上、又 Move → …
-        // 实测游戏日志里表现为：24 个战车弓兵每隔 48 帧被重复下同一条
-        // 「设置攻击目标为 方阵兵 91177」，中间夹着一批 HumanMove。
-        // 交战中不动它，等它打完（WorkObjectSN 归 -1）自然会被送回圈上。
-        if (army.WorkObjectSN != -1)
+        // 【突击者不参与环上站位】它现在归 ManageStandoffAssault 管 ——
+        // 不跳过的话，站桩每 60 帧会把它拽回 32 格环，而突击者每 60 帧又要它
+        // 前进 3 格，两条指令互相抵消，等于没派。
+        if (army.SN == assaultSN)
             continue;
 
-        // 清掉进攻锁：否则 AssignFieldSelfDefense 的第 2 优先级会捧着旧锁
+        // 清掉进攻锁：否则 AssignFieldDefense 的第 2 优先级会捧着旧锁
         // （可能是上一阶段留下的攻城武器厂），把部队带去冲建筑而不是守圈。
         // 清掉之后它会落到本地分支，只打视野/协防半径内的敌人 ——
-        // 也就是「站圈只打送上门的」。注意这本身【不会】造成指令互相覆盖，
-        // 覆盖的根源是 HumanMove 打断攻击关系，已由上面的「不搬动交战单位」解决。
+        // 也就是「站圈只打送上门的」。
         ClearArmyTargetLock(army.SN);
 
-        // 【有敌人就退到 28 格以外 —— 只退不进】
-        // 判据是「到锚点的距离」，不是「到槽位的距离」。
+        // 【有敌人就退到 32 格环上 —— 圈内的退出去、掉队的靠回来，交战中也搬】
         //
-        // 【为什么不能沿用「移到槽位」】原实现是「移到环上的槽位」，于是已经
-        // 被推到 30 格外的单位会被【拉回】28 格的圈上 —— 等于主动走进敌方守军的
-        // 追击范围（DEFENSE_CHASE_LIMIT = 25 格，量到它们的攻城武器厂），
-        // 正对着要躲的东西。现在已经在圈外的单位一个都不动。
+        // 【为什么现在连交战单位也搬】旧实现在这里有一句
+        //     if (army.WorkObjectSN != -1) continue;    // 交战中不动它
+        // 于是部队一旦开打就再也撤不出来。实测上一局：我军压到敌方基地外围，
+        // 对面 32 个守军（[AI] f=40000 enemyA=32）扑上来，我方 23 个兵全程处于
+        // 交战状态、每一帧都在这一行被跳过 —— 站桩规则形同不存在，2000 帧内
+        // 被打光（carcher 16→0），家里同时被抄（farmers 9→0，pop 37→1）。
+        //
+        // 【那条老注释担心的死循环，真正的成因不是「打断了攻击」】
+        // 它写的是「站桩 Move → 自卫重新 Attack → 站桩发现它不在圈上、又 Move」。
+        // 但这个环能闭上，是因为旧实现还负责【把圈外的单位拉回环上】—— 同一次
+        // Move 既是「退出」又是「进入」，自卫刚建好的关系立刻被打断。
+        //
+        // 【当时的修法是「只退不进」，但它错在两处】
+        //   ① 它写道「推出去之后它就在圈外，下一帧不会再被这条规则碰到 ——
+        //      环没有闭合点」。这个推理只约束了站桩自己，漏掉了自卫。自卫不是
+        //      「只退不进」：敌方守军追到 DEFENSE_CHASE_LIMIT(25) 格处停下时，
+        //      离环上的我们正好 7 格，恰好等于 USR_FIELD_ARMY_AGGRO_RADIUS(7)
+        //      —— 几何上必然踩线，自卫每 12 帧就把部队拉回圈里一次，环照旧闭着。
+        //      退出去的那一程也因此走不完（见下面进度判据的说明）。
+        //   ② 圈外一律不管，等于放弃了「半路被截停」的部队。推进指令是全有或
+        //      全无的（ManageOffensiveArmy 一见视野里有敌人就 return），
+        //      那些兵卡在 40~70 格处拿到零指令、永久站着不动。
+        // 【现在的规则是三档】圈内挨打后退 / 死区交还自卫 / 掉队靠拢。
+        // ① 那个抖动最终是【把位置阈值换成挨打驱动】解决的 —— 没有「一进阈值
+        // 就被推」这个每 60 帧的固定对撞，方向相反的两条规则就不再打架。
+        // 详见下面圈内那档的说明。
+        //
+        // 【代价】撤退发的 HumanMove 会打断该单位当前的攻击关系（经
+        // suspendRelation）。这是有意的：撤退就是脱离接触，松手之后由
+        // AssignFieldDefense 重新选目标。所以要清锁（上面那句）。
         const int anchorDis2 = BlockDis2(army.BlockDR, army.BlockUR,
-                                         siege->BlockDR, siege->BlockUR);
-        if (anchorDis2 > USR_STANDOFF_RADIUS * USR_STANDOFF_RADIUS)
+                                         anchorDR, anchorUR);
+        const int ringDis2 = USR_STANDOFF_RADIUS * USR_STANDOFF_RADIUS;
+        const int joinRadius = USR_STANDOFF_RADIUS + USR_STANDOFF_JOIN_BAND;
+        const int joinDis2 = joinRadius * joinRadius;
+        // 三档：圈内(≤32) 挨打后退两格；死区(32,44] 交还自卫权；掉队(>44) 向环靠拢。
+        // 【为什么圈外那一档不能一律不管】见 USR_STANDOFF_JOIN_BAND 的说明：
+        // 推进指令是全有或全无的，半路被截停的部队会卡在圈外，两边都不管。
+        const bool joinRing = (anchorDis2 > joinDis2);
+        if (!joinRing && anchorDis2 > ringDis2)
+        {
+            // 死区：不搬运，立刻解除封口、把自卫权还回去。
+            // 这一步保证「不还手」的时间不会超过实际走出/走进圈所需的时长。
+            standoffRetreatUntil.erase(army.SN);
+            standoffRetreatFromDis2.erase(army.SN);
             continue;
+        }
 
-        // 太近了 → 退到自己的槽位（半径正好 USR_STANDOFF_RADIUS）。
-        // 每个单位一个固定槽位（按它在 info.armies 里的顺序），保证散开；
-        // 错开方向避免所有人都挤在正对家门口的那一格。
+        if (!joinRing)
+        {
+            // ============ 圈内（离锚点 ≤ 32 格）：被打到就后退两格 ============
+            //
+            // 【规则】不再按位置阈值推出去，改成【由挨打驱动、每次只退两格】。
+            //
+            // 【为什么换掉原规则】原来这里写的是「只要在 32 格内就推到环上的
+            // 槽位」。它和自卫是对撞的：那是一个硬位置阈值，单位一进 32 格就
+            // 被推一次（每 60 帧），而自卫每 12 帧把它拉回来一次 —— 敌方守军
+            // 追到 DEFENSE_CHASE_LIMIT(25) 格处停下时，离环上的我们正好 7 格，
+            // 恰好等于 USR_FIELD_ARMY_AGGRO_RADIUS(7)，几何上必然踩线。
+            // 方向相反 + 频率差 5 倍，部队就在 25~32 之间来回走，退不完。
+            //
+            // 【为什么挨打驱动就没有这个问题】没有位置阈值，就没有「一进阈值
+            // 就被推」这个每 60 帧的固定对撞；而退到 32 格之外就自然停手
+            // （本分支只在 ≤32 格内生效）—— 环仍然是终点，只是不再靠硬阈值
+            // 驱赶，改成挨一次打退一步、逐步退出去。
+            //
+            // 【为什么这一档不需要像靠拢那样封 200 帧】它只在自己正被攻击时
+            // 触发，而被攻击的单位通常也在还手（WorkObjectSN 指向那个敌人），
+            // 自卫因此不会对它下发指令（看那里 `WorkObjectSN != targetSN` 的
+            // 条件）—— 本就不会被覆盖。所以这里只封 45 帧当保险，且它比 60 帧
+            // 的站桩节流短，不会和上面那套封口窗口的分析互相干扰。
+            //
+            // 【"被打到"的判据复用 FindDirectThreatToArmySN】它的定义是「某敌人
+            // 的 WorkObjectSN 指向我」+「敌箭塔把我设成 Project 且在 12 格内」，
+            // 也就是【被锁定/被打】。没有再加距离上限 —— 敌人在远处锁定我们时
+            // 它正在冲我们来，此时后退是合理的；真正的上行边界由 32 格环提供。
+            if (!IsArmyBeingAttacked(army))
+                continue;   // 没被打 → 原地待命，接敌交给自卫
+
+            int stepDR = 0;
+            int stepUR = 0;
+            if (army.BlockDR > anchorDR)
+                stepDR = USR_STANDOFF_STEP_BLOCKS;
+            else if (army.BlockDR < anchorDR)
+                stepDR = -USR_STANDOFF_STEP_BLOCKS;
+            if (army.BlockUR > anchorUR)
+                stepUR = USR_STANDOFF_STEP_BLOCKS;
+            else if (army.BlockUR < anchorUR)
+                stepUR = -USR_STANDOFF_STEP_BLOCKS;
+            if (stepDR == 0 && stepUR == 0)
+                stepUR = USR_STANDOFF_STEP_BLOCKS;  // 与锚点重合，给一个确定方向
+
+            int tx = max(1, min(MAP_L - 2, army.BlockDR + stepDR));
+            int ty = max(1, min(MAP_U - 2, army.BlockUR + stepUR));
+            if (tx == army.BlockDR && ty == army.BlockUR)
+                continue;   // 被地图边界夹回原地，这一步退不动
+
+            standoffRetreatUntil[army.SN] =
+                g_frame + USR_STANDOFF_STEP_SEAL_FRAMES;
+            // 清掉靠拢用的进度基准：这一档不用它，留着的话下次真去靠拢时
+            // 第一次 stalled 比较会拿一个早已过期的基准，误判成"走不动"。
+            standoffRetreatFromDis2.erase(army.SN);
+            ai->HumanMove(army.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
+                          (ty + 0.5) * double(BLOCKSIDELENGTH));
+            continue;
+        }
+
+        // ============ 圈外掉队（离锚点 > 44 格）：向环上槽位靠拢 ============
+        //
+        // 【站桩优先于自卫：靠拢执行期间把这个单位封给自己】
+        //
+        // 站桩每 60 帧才发一次「走向槽位」，而 AssignFieldDefense 每 12 帧就发
+        // 一次「打最近的敌人」（USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL），且
+        // 自卫在 processData 里【后执行】—— 频率差 5 倍 + 后执行，站桩的移动
+        // 指令每次都被覆盖，净效果就是原地不动。
+        //
+        // 所以窗口内：(i) 不重发（避免反复清空路径）；(ii) 由 AssignFieldDefense
+        // 主动跳过它。走进死区或到达槽位时上面/下面那句 erase 会解封。
+        map<int, int>::iterator retreatIt = standoffRetreatUntil.find(army.SN);
+        if (retreatIt != standoffRetreatUntil.end() &&
+            g_frame < retreatIt->second)
+        {
+            // 【窗口内的三个出口】① 走进死区（32~44）→ 由上面那句 erase 解封；
+            //                     ② 走到槽位 → 由下面那句解封；
+            //                     ③ 走不动 → 在这里解封。
+            //
+            // 【为什么必须有 ③】解封条件原来只有「走出 32 格」。走不出去的情况
+            // （槽位被别的单位占了 / 路径被挡 / 目的地在障碍里）就会变成
+            //    封 200 帧 → 到期 → 进圈内又发一次撤退 → 再封 200 帧 → …
+            // 单位全程既不动也不还手，实测表现为战车弓兵集体站着不动。
+            //
+            // 【判据】站桩循环每 60 帧才跑一次（orderInterval），所以这次比较
+            // 跨度正好是 60 帧 —— 期间单位本该走 4~5 格。没在朝目标前进就说明
+            // 它这一步根本走不动，再封下去只是继续站着。
+            //
+            // 【前进方向按档位取反】撤退是往环外走（离锚点越来越远），靠拢是往
+            // 环上走（越来越近），两者的「前进」在 anchorDis2 上是相反的符号。
+            // 基准值统一存「下发指令那一刻的 anchorDis2」（见下面赋值处）。
+            //
+            // 【原先是写死的 anchorDis2 >= 基准】那个比较对撤退来说是反的：
+            // 撤退成功时 anchorDis2 变大，`>=` 成立 → 立刻解封 → 自卫马上把它
+            // 拉回圈里，撤退等于只走了一程（约 60 帧）就被撤销。改成方向感知后，
+            // 成功前进的单位会一直封到走出圈外，撤退才真正走得完。
+            map<int, int>::const_iterator fromIt =
+                standoffRetreatFromDis2.find(army.SN);
+            // stalled：有基准、且这一程没有朝目标前进。
+            // 没基准（第一次进这个窗口）不算 stalled，由下面那句建立基准。
+            const bool stalled =
+                fromIt != standoffRetreatFromDis2.end() &&
+                (joinRing ? (anchorDis2 >= fromIt->second)
+                          : (anchorDis2 <= fromIt->second));
+            if (stalled)
+            {
+                standoffRetreatUntil.erase(retreatIt);
+                standoffRetreatFromDis2.erase(army.SN);
+            }
+            else
+            {
+                standoffRetreatFromDis2[army.SN] = anchorDis2;  // 首次建立 / 刷新基准
+            }
+            continue;
+        }
+
+        // 【原先这里有一条「20~32 之间不动」的滞回带，已删除】
+        //
+        // 它当时的理由是：把 25 格内的单位也推出去，会出现「推出 32 → 自卫又把它
+        // 追回 32 内 → 再推出去」的来回抖。但那个抖动现在由 USR_STANDOFF_RETREAT_FRAMES
+        // 的封口窗口解决了（撤退期间该单位不接自卫指令），滞回带不再必要。
+        //
+        // 而它有害：按规则「有敌人就退回到 32 格」，20~32 之间的单位本来就该被推
+        // 出去，留在带子里等于把那一段完全交给自卫逻辑，它们会一路被拉到敌方基地
+        // 脚下 —— 实测部队就是这样被摁在基地旁边退不出来的。
+        //
+        // 【无谓的搬动由下面「已站在槽位 3 格内就不发」那条挡掉】它天然形成了一个
+        // 3 格的死区，比按半径划线更贴合「已经在环上就别折腾」。
+
+        // 目标槽位（半径正好 USR_STANDOFF_RADIUS）：圈内单位来这里「退出」，
+        // 掉队单位也来这里「靠拢」—— 两者目标相同，都是站上环。
+        // 每个单位一个槽位（按它在 info.armies 里的顺序对 USR_STANDOFF_SLOTS 取模），
+        // 保证散开；错开方向避免所有人都挤在正对家门口的那一格。
+        // 两档共用同一条游标：槽位只是环上的点，圈内与圈外的单位站位不冲突。
         int ddr = 0;
         int dur = 0;
         StandoffRingOffset(slot++, ddr, dur);
-        int tx = siege->BlockDR + ddr;
-        int ty = siege->BlockUR + dur;
+        int tx = anchorDR + ddr;
+        int ty = anchorUR + dur;
         tx = max(1, min(MAP_L - 2, tx));
         ty = max(1, min(MAP_U - 2, ty));
 
         // 已经站在自己的槽位附近（3 格内）就不必重发 —— HumanMove 每次都会
         // 清空路径，反复下发会让部队原地打转，反而走不到。
         if (BlockDis2(army.BlockDR, army.BlockUR, tx, ty) <= 9)
+        {
+            // 靠拢任务完成 → 交还自卫权。不能等窗口自然到期：那会让归队的
+            // 单位在环上白站最多 200 帧，连祭司被打都不会回救。
+            // （走到这里必然是靠拢档，圈内那档在上面已经 continue 掉了。）
+            standoffRetreatUntil.erase(army.SN);
+            standoffRetreatFromDis2.erase(army.SN);
             continue;
+        }
+        // 发指令 + 开/续封口窗口：接下来 USR_STANDOFF_RETREAT_FRAMES 帧内，
+        // 这个单位不接自卫指令、也不会被站桩重发 —— 让这次移动真正走完。
+        // 窗口若在本帧已经过期，就会在这里被立刻续上，中间没有空档。
+        standoffRetreatUntil[army.SN] = g_frame + USR_STANDOFF_RETREAT_FRAMES;
+        standoffRetreatFromDis2[army.SN] = anchorDis2;   // 进度基准：出发时的距离
         ai->HumanMove(army.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
                       (ty + 0.5) * double(BLOCKSIDELENGTH));
     }
@@ -6326,6 +6882,121 @@ static bool IsOffensiveArmy(const tagArmy &army)
            army.Sort != AT_SCOUT;
 }
 
+// 远程兵种判定：config.json 里 DIS_* > 0 的那些 ——
+//   SLINGER 4 / BOWMAN 5 / IMPROVED 7 / COMPOSITE_BOWMAN 7 /
+//   CHARIOT_ARCHER 7 / STONE_THROWER 10。
+// 本 AI 实际会产的是普通弓兵与战车弓兵。
+static bool IsRangedUnitSort(int sort)
+{
+    return sort == AT_SLINGER || sort == AT_BOWMAN || sort == AT_IMPROVED ||
+           sort == AT_COMPOSITE_BOWMAN || sort == AT_CHARIOT_ARCHER ||
+           sort == AT_STONE_THROWER;
+}
+
+// 敌方近战兵判定：DIS_* == 0 的那些。SCOUT 也是 0，但它不参战，排除。
+static bool IsMeleeAttackerSort(int sort)
+{
+    return sort == AT_CLUBMAN || sort == AT_SWORDSMAN || sort == AT_HOPLITE ||
+           sort == AT_CHARIOT || sort == AT_CAVALRY ||
+           sort == AT_BROADSWORDSMAN;
+}
+
+// 【攻打敌方基地时：有远程兵被近战贴上 → 全体远程兵一起后撤两格】
+//
+// 【为什么是「全体」而不是只动挨打的那个】远程兵的价值在于拉开距离集体输出。
+// 只把一个单位往后拽，它会孤零零站在后面（离开其他人的火力掩护），而追它的
+// 那个近战兵跟着它一个人跑，其余远程兵照样被贴。整条线一起退两格，才能让
+// 追兵落在所有人射程之外、重新挨打。
+//
+// 【触发条件】「被近战打到」= 某个敌方近战兵的 WorkObjectSN 指向我方某个远程兵，
+// 且它就在两格内（USR_MELEE_KITE_TRIGGER_DIS2）。有工作关系只说明它锁了目标，
+// 还要真的贴上来才算打到。只看接触不看血量 —— 要趁接触的第一时间退，
+// 不是等血掉下去。
+//
+// 【为什么必须排在 ManageStandoff 之前】站桩那段会把圈内的单位往 28 格环上搬，
+// 而它一旦接管就直接 return。挨打撤退是更紧迫的动作，排在它后面就永远执行不到。
+//
+// 【没有「只在敌基地附近」的判断】调用点已经在 ManageOffensiveArmy 的几道门
+// 之后（33000 帧 / 已升时代 / 车轮科技 / 兵力 ≥8 / 已侦察到敌方建筑），
+// 而那些门就是「正在攻打敌方基地」的定义 —— 不必在这里再写一遍。
+static void KiteRangedBackFromMelee(UsrAI *ai)
+{
+    if (g_frame - lastKiteFrame < USR_MELEE_KITE_INTERVAL)
+        return;
+
+    // ① 找出「正在被近战兵打的远程兵」，顺便记下那个近战兵的位置当参照点。
+    bool pressed = false;
+    int refDR = 0;
+    int refUR = 0;
+    for (const tagArmy &unit : info.armies)
+    {
+        if (unit.Blood <= 0 || !IsRangedUnitSort(unit.Sort))
+            continue;
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.Blood <= 0 || !IsMeleeAttackerSort(enemy.Sort))
+                continue;
+            if (enemy.WorkObjectSN != unit.SN)
+                continue;
+            if (BlockDis2(unit.BlockDR, unit.BlockUR, enemy.BlockDR,
+                          enemy.BlockUR) > USR_MELEE_KITE_TRIGGER_DIS2)
+                continue;
+            pressed = true;
+            refDR = enemy.BlockDR;
+            refUR = enemy.BlockUR;
+            break;
+        }
+        if (pressed)
+            break;
+    }
+    if (!pressed)
+        return;   // 没人被近战贴上 → 什么都不做
+
+    // ② 全体远程兵各退两格。
+    // 方向：(i) 优先背离【自己最近的那个近战兵】；(ii) 自己身边没有近战兵时，
+    // 背离 ① 找到的参照点。这样左右两翼不会朝相反方向乱跑。
+    lastKiteFrame = g_frame;
+    for (const tagArmy &unit : info.armies)
+    {
+        if (unit.Blood <= 0 || !IsRangedUnitSort(unit.Sort))
+            continue;
+
+        int anchorDR = refDR;
+        int anchorUR = refUR;
+        int bestDis2 = USR_MELEE_KITE_TRIGGER_DIS2;
+        for (const tagArmy &enemy : info.enemy_armies)
+        {
+            if (enemy.Blood <= 0 || !IsMeleeAttackerSort(enemy.Sort))
+                continue;
+            const int dis2 = BlockDis2(unit.BlockDR, unit.BlockUR,
+                                       enemy.BlockDR, enemy.BlockUR);
+            if (dis2 <= bestDis2)
+            {
+                bestDis2 = dis2;
+                anchorDR = enemy.BlockDR;
+                anchorUR = enemy.BlockUR;
+            }
+        }
+
+        // 背离参照点，每轴最多 USR_MELEE_KITE_BLOCKS 格（切比雪夫距离 2）。
+        const int dx = unit.BlockDR - anchorDR;
+        const int dy = unit.BlockUR - anchorUR;
+        int sx = (dx > 0) ? USR_MELEE_KITE_BLOCKS
+                          : ((dx < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
+        int sy = (dy > 0) ? USR_MELEE_KITE_BLOCKS
+                          : ((dy < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
+        if (sx == 0 && sy == 0)
+            sy = USR_MELEE_KITE_BLOCKS;   // 与参照点完全重合，给一个确定方向
+
+        const int tx = max(1, min(MAP_L - 2, unit.BlockDR + sx));
+        const int ty = max(1, min(MAP_U - 2, unit.BlockUR + sy));
+        // 清掉进攻锁：否则 AssignFieldDefense 会捧着旧锁把刚退开的单位又送回去。
+        ClearArmyTargetLock(unit.SN);
+        ai->HumanMove(unit.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
+                      (ty + 0.5) * double(BLOCKSIDELENGTH));
+    }
+}
+
 static void ManageOffensiveArmy(UsrAI *ai)
 {
   // 进攻时机：过了 USR_OFFENSIVE_FRAME（33000）之后。此前军队只做接敌自卫
@@ -6362,6 +7033,10 @@ static void ManageOffensiveArmy(UsrAI *ai)
   UpdateEnemyBaseDiscovery();
   if (!enemyBaseDiscovered)
     return;
+
+  // 【远程兵被近战贴上 → 全体后撤两格】必须排在站桩之前：站桩一旦接管就直接
+  // return，排在它后面这条永远执行不到。详见 KiteRangedBackFromMelee。
+  KiteRangedBackFromMelee(ai);
 
   // 站桩阶段：视野里还有敌兵时，只把部队摆在敌方攻城武器厂外围的站位圈上，
   // 不直接冲基地。返回 true 表示本帧由它接管（机制详见 ManageStandoff）。
@@ -6628,6 +7303,16 @@ static void AssignFieldSelfDefense(UsrAI *ai)
     for (const tagArmy &army : info.armies)
     {
         if (army.Sort == AT_PRIEST || army.Sort == AT_SCOUT)
+            continue;
+
+        // 【正在执行站桩调动的单位不接自卫指令】
+        // 站桩那边每 60 帧才发一次（撤退 / 掉队靠拢），这里每 12 帧发一次
+        // 「打最近的敌人」，而且本函数后执行 —— 不给它让路的话每次都被覆盖。
+        // 窗口与解除条件（走进死区 / 到达槽位 / 走不动）见 ManageStandoff 里
+        // USR_STANDOFF_RETREAT_FRAMES 的说明。
+        map<int, int>::const_iterator retreatIt = standoffRetreatUntil.find(army.SN);
+        if (retreatIt != standoffRetreatUntil.end() &&
+            g_frame < retreatIt->second)
             continue;
 
         int targetSN = priestThreatSN;
