@@ -5780,7 +5780,22 @@ static void ManagePriest(UsrAI *ai)
                                    USR_PRIEST_FRONT_POST_BAND;
             const int farRadius = USR_PRIEST_FRONT_POST_DISTANCE +
                                   USR_PRIEST_FRONT_POST_BAND;
-            if (dis2 < nearRadius * nearRadius ||
+            // 【朝外推必须避开「正在冲厂」的情形】
+            //
+            // 转换分支会让祭司往厂里走（厂比驻留带更近），而这条「太近就推出去」
+            // 会把它拽回来 —— 两个分支每帧打架。实测表现：祭司卡在 34 格线上
+            // 来回振荡，到厂的关系被反复打断（[SIEGE] 里 wo 在厂 SN 与 -1 之间跳，
+            // [CONV] 每 40 帧重开一次），而它始终没能真正靠近厂。
+            //
+            // 所以只要「厂已被侦察到 + 视野无敌兵 + 所有箭塔都被牵制」，就不再
+            // 朝外推 —— 那三个条件正是允许它进厂的判据，这时候把它推出去等于
+            // 自己掐断获胜路径。朝外推原本的作用只是「别闯进敌方基地送死」，
+            // 而「会不会送死」已经由那三个条件把关了。
+            const bool mayApproachSiege =
+                g_frame >= USR_PRIEST_PASSIVE_FRAME &&
+                !HasVisibleEnemyArmy() && AllEnemyArrowTowersEngaged() &&
+                FindEnemySiegeBuilding() != nullptr;
+            if ((dis2 < nearRadius * nearRadius && !mayApproachSiege) ||
                 dis2 > farRadius * farRadius)
             {
                 int postDR = -1;
