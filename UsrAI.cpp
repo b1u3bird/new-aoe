@@ -4364,12 +4364,17 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     // 不承担侦测）；USR_SCOUT_RECON_FRAME 后再补 1 个，由它专职侦测敌方基地
     // （见 DispatchScouts 的角色判定）。
     scoutTarget = ScoutTargetCount();
-    // 战车（40 食 + 60 木）保留 2 个：速度 4.07，可作为前排挡一下远程。
-    chariotTarget = 2;
+    // 【战车配额 2 → 0，让给战车弓兵】原先是「保留 2 个速度 4.07 的前排挡远程」，
+    // 但它们的实际作用不成立：本 AI 的伤害全靠战车弓兵在射程外输出，而战车是
+    // 近战（DIS_CHARIOT = 0）、40 食 + 60 木，冲到敌方守军面前只是换血 ——
+    // 换掉的还是我们最缺的人口。腾出来的 2 个人口自动落到下面的主力配额上，
+    // 战车弓兵 20 → 22（见下面那个算式的注释，它是按人口上限倒推的）。
+    // 已经在场上的战车不会因此消失，只是不再补充。
+    chariotTarget = 0;
     // 主力（战车弓兵，40 食 + 70 木，血70/攻4/射程7/速度4.07）的配额
     // = 人口总数减去上面所有非主力配额。见 USR_POP_TARGET 的说明：
     // 这样调整任何一项都不会让总和超过人口上限。
-    // 当前算式：50 − 1(祭司) − 20(农民) − 5(弓兵) − 2(侦察) − 2(战车) = 20。
+    // 当前算式：50 − 1(祭司) − 20(农民) − 5(弓兵) − 2(侦察) − 0(战车) = 22。
     chariotArcherTarget = max(0, USR_POP_TARGET - USR_PRIEST_POP -
                                      farmerTarget - bowmanTarget - scoutTarget -
                                      chariotTarget);
