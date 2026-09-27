@@ -348,34 +348,6 @@ static const int USR_FARMER_TOWER_STUCK_MAX_TRIES = 3;
 // 这件事会持续得比较久（所有农民都往同一座塔挤），拉黑太短会立刻被重新选中。
 static const int USR_FARMER_TOWER_BLACKLIST_FRAMES = 900;
 
-// ── 士兵分担箭塔火力 ────────────────────────────────────────────────
-// 【为什么必须有这一块】敌方箭塔的目标取自 Defend 集合（enemyai.cpp:447-453），
-// 而那个集合【只收我方军队】（enemyai.cpp:238-241，农民与建筑那两行 push_back
-// 都被注释掉了）。于是塔打不到农民，能打的只有军队 —— 包括只有 100 血、防御为 0
-// 的祭司。派士兵贴过去，塔的目标就从"只能是祭司"变成"在一群士兵里挑一个"，
-// 祭司挨打的概率随之下降；士兵同时还在输出伤害。
-//
-// 【为什么士兵扛得住】战车弓兵 70 血（config.json:444）是农民 25 血（:65）的
-// 2.8 倍，同样是"每次命中扣 1 点"的节奏下能多挨 2.8 倍的攻击次数；而且它的
-// 射程是 7（:448），与塔射程 7（:261）相等 —— 可以在塔的外围排队输出，
-// 不必像农民那样挤到塔的相邻格里去（农民是近战，只能贴上去）。
-//
-// 【伤害效率的真相】战车弓兵对建筑的伤害其实和农民【一样】是 1 点/次：
-//   ATK 4 × 建筑 20%（Core_List.cpp:2411）× 军队倍率 1 = 0.8 → round → 0
-//   → 下限取 1（Core_List.cpp:2412）。
-// 那个"军队打建筑 2 倍"的加成（Development.cpp:47-48）只给剑士/骑兵/改进弓兵，
-// 战车弓兵不在名单里。所以这一块的价值在【分担火力与扛伤】，不在输出。
-
-// 每座箭塔最多派几个士兵。取 4：
-//   · 塔一次只打一个目标（Defend.back()），4 个已经足够把祭司的挨打概率压到 1/5；
-//   · 士兵是推基地的主力，不能全填进塔里 —— 军队总数约 20，5 座塔 × 4 = 20 是上限，
-//     实际会按塔数摊薄（下面的分配按"塔的威胁顺序"填，填不满就少填）。
-static const int USR_ARMY_TOWER_PER_TARGET_MAX = 4;
-// 士兵换塔指令的下发节流。取 60：与编队/巡逻同粒度。
-// 必须显著大于「HumanAction 之后 WorkObjectSN 变成新值」的结算时间，
-// 否则会反复重建攻击关系、把伤害进度清零。
-static const int USR_ARMY_TOWER_ORDER_INTERVAL = 60;
-
 // 阶段 B 的时间兜底帧。取 42000 = 农民出发(38000)之后 4000 帧，也就是农民
 // 走完那 130 格（约 1500 帧）到达环上之后再过 2500 帧。
 // 【为什么需要】EstimateEnemySiegeAnchor 的注释记录过一个真实故障：攻城厂整局
@@ -595,13 +567,6 @@ static map<int, int> farmerEscortLastOrderFrame;
 static map<int, int> farmerEscortStuckTries;
 // (农民 SN, 塔 SN) → 该农民对这座塔「走不到」，拉黑到哪一帧。
 static map<pair<int, int>, int> farmerEscortTowerBadForFarmer;
-// 军队 SN → 正在牵制的敌方箭塔 SN（士兵分担火力那一路，见 AssignArmyTowerAssault）。
-// 与 farmerEscortTowerTarget 分开存：虽然 SN 全局唯一、不会撞，但两者的生命周期
-// 与清理规则不同（农民是 latched 编制，军队随时会阵亡或被调走），混在一张表里
-// 会让「谁该被清理」变得不可读。
-static map<int, int> armyTowerTarget;
-// 军队 SN → 上次下发牵制指令的帧（节流）。
-static map<int, int> armyTowerLastOrderFrame;
 // 第三波结束后侦察骑兵的移动节流和巡逻点状态。
 static map<int, int> scoutLastOrderFrame;
 static map<int, int> scoutWaypointIndex;
@@ -2465,9 +2430,6 @@ static void ProcessPendingGatherOrders()
         farmerEscortLastOrderFrame.clear();
         farmerEscortStuckTries.clear();
         farmerEscortTowerBadForFarmer.clear();
-        // 士兵牵制箭塔那一路的残留同样要清（军队 SN 也是跨局复用的）。
-        armyTowerTarget.clear();
-        armyTowerLastOrderFrame.clear();
     }
     farmerResourceStateFrame = g_frame;
 
@@ -7616,123 +7578,6 @@ static void ManageFarmerEscortTowers(UsrAI *ai, const tagArmy &priest)
     }
 }
 
-// 士兵分担箭塔火力：在农民拆塔阶段，同时把一部分军队派去攻击敌方箭塔。
-//
-// 【这一块要解决的真实故障】上一局实测：农民 20 个从 38000 帧出发，到 42001 帧
-// 只剩 1 个，而 5 座箭塔只清掉 2 座 —— 祭司孤立无援地冲进厂区，被剩下的塔集火
-// 打死（hp 57 → 0）。农民死得快有两个叠加原因：
-//   · 它们必须在塔的相邻格里（近战），而塔被敌方守军和建筑围着，挤不进去；
-//   · 敌方守军【会主动打农民】（enemyai.cpp:440-442 打 Farmer.back()），
-//     而农民只有 25 血。
-// 士兵能同时缓解这两点：射程 7（不必挤相邻格）、70 血（扛得住）、
-// 而且它们进了塔的 Defend 集合，塔的火力就从「只能打祭司」变成一群人里挑一个。
-static void AssignArmyTowerAssault(UsrAI *ai)
-{
-    if (farmerEscortStage != FARMER_ESCORT_STAGE_TOWER)
-        return;   // 只在农民拆塔阶段生效；集结阶段军队照常推基地
-
-    vector<const tagBuilding *> towers;
-    int anchorDR = 0;
-    int anchorUR = 0;
-    CollectEnemyArrowTowers(towers, anchorDR, anchorUR);
-    if (towers.empty())
-        return;   // 没塔可牵制（已清空 / 还没侦察到）
-
-    // 清理已经阵亡 / 已经不存在的军队的残留记录。
-    for (map<int, int>::iterator it = armyTowerTarget.begin();
-         it != armyTowerTarget.end();)
-    {
-        const tagArmy *army = FindMyArmyBySN(it->first);
-        if (army == nullptr || army->Blood <= 0 || !IsOffensiveArmy(*army))
-            it = armyTowerTarget.erase(it);
-        else
-            ++it;
-    }
-
-    map<int, int> towerWorkers;  // 塔 SN -> 本轮已分配士兵数
-    map<int, int> armyToTower;   // 军队 SN -> 本轮的塔 SN
-
-    // ① 先保留既有分配 —— 对同一目标重复 HumanAction 会重建关系、清零伤害进度。
-    for (map<int, int>::iterator it = armyTowerTarget.begin();
-         it != armyTowerTarget.end(); ++it)
-    {
-        bool towerAlive = false;
-        for (size_t t = 0; t < towers.size(); ++t)
-        {
-            if (towers[t]->SN == it->second)
-                towerAlive = true;
-        }
-        if (!towerAlive)
-            continue;
-        if (towerWorkers[it->second] >= USR_ARMY_TOWER_PER_TARGET_MAX)
-            continue;
-        armyToTower[it->first] = it->second;
-        towerWorkers[it->second]++;
-    }
-
-    // ② 给还没有归属的军队按「塔的威胁顺序」补位，每次挑离该塔最近的。
-    for (size_t t = 0; t < towers.size(); ++t)
-    {
-        const int towerSN = towers[t]->SN;
-        while (towerWorkers[towerSN] < USR_ARMY_TOWER_PER_TARGET_MAX)
-        {
-            int bestSN = -1;
-            int bestDis2 = 1000000000;
-            for (const tagArmy &army : info.armies)
-            {
-                if (!IsOffensiveArmy(army))
-                    continue;
-                if (armyToTower.find(army.SN) != armyToTower.end())
-                    continue;
-                const int d2 = BlockDis2(army.BlockDR, army.BlockUR,
-                                         towers[t]->BlockDR, towers[t]->BlockUR);
-                if (d2 < bestDis2)
-                {
-                    bestDis2 = d2;
-                    bestSN = army.SN;
-                }
-            }
-            if (bestSN < 0)
-                break;   // 这个塔附近已经没有可派的军队了
-            armyToTower[bestSN] = towerSN;
-            towerWorkers[towerSN]++;
-        }
-    }
-
-    // ③ 下发。军营里没有采集挂单要清，只需按节流下发 + 写目标锁。
-    for (const tagArmy &army : info.armies)
-    {
-        if (!IsOffensiveArmy(army))
-            continue;
-        map<int, int>::const_iterator pick = armyToTower.find(army.SN);
-        if (pick == armyToTower.end())
-            continue;
-        const int targetSN = pick->second;
-
-        // 目标没变 → 什么都不做（不打断攻击关系）。
-        if (army.WorkObjectSN == targetSN)
-        {
-            armyTowerTarget[army.SN] = targetSN;
-            continue;
-        }
-
-        map<int, int>::const_iterator last =
-            armyTowerLastOrderFrame.find(army.SN);
-        if (last != armyTowerLastOrderFrame.end() &&
-            g_frame - last->second < USR_ARMY_TOWER_ORDER_INTERVAL)
-            continue;
-
-        // 【先记进攻锁再下指令】AssignFieldSelfDefense 的下一个优先级会读这张锁
-        // （它的第 2 优先级就是 currentTarget），先写锁再下发，下一帧它就不会
-        // 把刚派去牵制的士兵又拉去打别的目标。军队在 info.armies 里，
-        // 所以这条锁是有效的（与农民不同，见 farmerEscortTowerTarget 的说明）。
-        currentTarget[army.SN] = targetSN;
-        ai->HumanAction(army.SN, targetSN);
-        armyTowerTarget[army.SN] = targetSN;
-        armyTowerLastOrderFrame[army.SN] = g_frame;
-    }
-}
-
 // 所有已知的敌方箭塔是不是都已经被牵制住了。
 //
 // 【这是祭司进场的前置条件】用户要求「确保每一个箭塔都被牵制住才可以让祭司
@@ -7829,16 +7674,9 @@ static void ManageFarmerEscort(UsrAI *ai)
     }
 
     if (farmerEscortStage == FARMER_ESCORT_STAGE_TOWER)
-    {
         ManageFarmerEscortTowers(ai, *priest);
-        // 士兵分担火力排在农民之后：两者共用同一份「还剩哪些塔」的列表
-        // （CollectEnemyArrowTowers），农民先把人铺上去，士兵再补位。
-        AssignArmyTowerAssault(ai);
-    }
     else
-    {
         ManageFarmerEscortBand(ai, *priest);
-    }
 
     // 状态日志（每 500 帧）。n 单调下降就是「农民在被消耗」—— 它是
     // 「农民在路上被吃光」这个风险唯一的早期信号；pd 用来确认「40 格以外」
