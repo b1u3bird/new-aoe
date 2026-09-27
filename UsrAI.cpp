@@ -88,10 +88,13 @@ static const int USR_PRIEST_HEAL_RADIUS = 12;
 // 祭司留在基地：它只有 100 血、近战与远程防御都是 0、且不能自愈，
 // 待在基地的箭塔覆盖圈里最安全。
 static const int USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
-// 总攻阶段起始帧：此后祭司进入「只保存实力」状态 —— 不再转换、不再治疗，
-// 视野内没有敌人时留在基地。
+// 总攻阶段起始帧：此后祭司进入「只保存实力」状态 —— 不再治疗、不再【转换
+// 敌方士兵】，视野内没有敌人时留在基地；唯一保留的动作是转换敌方攻城武器厂
+// （那是获胜条件本身，见 ManagePriest 里那段转换分支）。
 // 祭司只有 100 血、近战与远程防御都是 0、不能自愈且不可补充（兵种列表里没有
 // 第二个），总攻期间让它待在箭塔覆盖圈里，比跟部队出去换血更稳。
+// 【转士兵为什么也必须停】换来的一个士兵对胜负没有贡献，却会把祭司按在
+// 敌方基地里读条换血；它挨不起这个交换。
 static const int USR_PRIEST_PASSIVE_FRAME = 30000;
 // 挨打时触发撤退的敌人搜索半径（格，欧氏）。
 // 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
@@ -236,6 +239,152 @@ static const int USR_OFFENSIVE_FRAME = 33000;
 // 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
 // 再让农民挨打时就地反击。
 static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
+// ── 农民护送祭司：总攻阶段的第二支力量 ──────────────────────────────
+//
+// 【这条机制的赌注，必须先知道】到 USR_FARMER_ESCORT_FRAME 会把【全部农民】
+// 一次性投入前线（USR_FARMER_ESCORT_MAX = 20），此后经济不再有采集力。
+// 三条既有设计正好接住这个取舍：
+//   · USR_FARMER_LATE_FRAME(35000) 之后本来就只保留 5 个农民；
+//   · 祭司 30000 帧后进入「保存实力」，唯一的获胜路径是转换敌方攻城厂
+//     （MainWidget::isWin 只认 isConverted() 的 BUILDING_SIEGE）；
+//   · 敌方箭塔【不会攻击农民】—— enemyai.cpp:238-241 的 Defend 集合只收
+//     enemyInfo.enemy_armies（我方军队），农民与建筑那两行 push_back 都被
+//     注释掉了；enemyai.cpp:447-453 的塔目标就是 Defend.back()。
+//     所以拆塔对农民是【单方面输出】，这是这件事在后期做得成的前提。
+// 反过来说，若实测发现农民在路上被敌方【军队】吃光（军队会主动打 Farmer，
+// enemyai.cpp:440-442），就该把 USR_FARMER_ESCORT_MAX 调小、或把
+// USR_FARMER_ESCORT_FRAME 推后。
+
+// 农民投入的帧号。取 38000，比 USR_FARMER_LATE_FRAME(35000) 再晚 3000 帧 ——
+// 那一帧之后农民上限本就压到 5、经济进入收缩期，把采集力一次性交给前线，
+// 与「此时经济已成型、军队才是胜负手」的既有判断一致。
+// 【与军队总攻(USR_OFFENSIVE_FRAME = 33000)差 5000 帧是有意的】：军队先出发
+// 去清守军，农民后走，避免在完全没有掩护的情况下先撞上敌方军队。
+static const int USR_FARMER_ESCORT_FRAME = 38000;
+
+// 祭司【跟随军队出征】到前线驻留带的帧号。取 38000 = USR_FARMER_ESCORT_FRAME，
+// 也就是「农民和祭司一起出发」—— 两者同帧动身、路程与移速都相近（农民 2.236、
+// 祭司 2.03 px/帧），才能同时到位；任何一方先走都会让另一方在敌方基地门口
+// 单独暴露几百帧。
+//
+// 【为什么不直接改 USR_OFFENSIVE_FRAME(33000)】那个常量还被 ManageOffensiveArmy
+// 用作军队总攻的时机，一起改会把军队也推迟 5000 帧 —— 而需求只要求祭司与农民
+// 同步，军队仍应提前出发去清守军（这正是上面那条「差 5000 帧是有意的」）。
+static const int USR_PRIEST_FRONT_POST_FRAME = 38000;
+
+// 征召人数上限。取 20 = USR_FARMER_TARGET（村民总数目标）—— 即「全部农民」。
+// 留这条口子的用途：实测若发现经济归零导致军队断粮（造兵在跑但产出为零），
+// 把它调小就是「留几个人在家采集」，不需要改别的地方。
+static const int USR_FARMER_ESCORT_MAX = 20;
+
+// 阶段 A 的集结半径（格，相对敌方锚点）。
+// 取 46 = USR_PRIEST_FRONT_POST_DISTANCE(40) + USR_PRIEST_FRONT_POST_BAND(6) ——
+// 正好是祭司驻留带的【外沿】。两个理由：
+//   · 需求是「待在 40 格以外」，取带的外沿让这一条由构造保证，不靠额外判断；
+//   · 落在祭司靠家那一侧，不会插到祭司与敌方基地之间（那会把守军先引到农民身上）。
+// 不用 40：那是祭司自己的驻留点，会和它抢格。
+static const int USR_FARMER_ESCORT_POST_DISTANCE = 46;
+// 第二圈半径。取 54 = 内圈 + 8 —— 两圈之间隔 8 格，远大于两个单位的碰撞盒
+// （CRASHBOX_SINGLEOB ≈ 5.96 px ≈ 0.17 格），不会自己挤自己。
+static const int USR_FARMER_ESCORT_OUTER_RING = 54;
+// 槽位总数 = 16 方位 × 2 圈。20 个农民需要 20 个互不相同的落点，
+// 32 给「落点在海里 / 被建筑占住 / 走不到」留了 12 个备槽。
+static const int USR_FARMER_ESCORT_SLOTS = 32;
+
+// 落点离祭司的最大距离（格，欧氏）。取 28 —— 需求是「和祭司一起」：
+// 没有这一条，外圈背面那半圈会把队伍拆成两处。28 覆盖得住最坏几何关系
+// （农民在 54 格外圈、祭司在 40−6=34 格内圈，轴向差 20，加上角度偏移仍在 28 内）。
+static const int USR_FARMER_ESCORT_LEASH = 28;
+
+// 距落点多少格算「已就位」——平方值 16，即 4 格。
+// 比战车散开的 USR_SPREAD_ARRIVED_RADIUS(2 格) 松得多，原因有两个：
+// 环心是【锚点】而不是固定建筑，落点会随祭司方位与估算锚点抖动；
+// 判太严会让「刚一就位又被判定没到位」，而每次重发 HumanMove 都清一次路径。
+static const int USR_FARMER_ESCORT_ARRIVED_DIS2 = 16;
+
+// 集结指令的下发节流。取 60 = ManageStandoff / DispatchScouts / 祭司探路
+// 同一个值 —— 本项目里「编队 / 巡逻」这条粒度统一定在 60 帧。
+// 必须显著大于走完一格的时间（约 16 帧/格），否则会「刚起步就重算」。
+static const int USR_FARMER_ESCORT_ORDER_INTERVAL = 60;
+
+// 被敌人缠住（正在交战）时给的宽限帧数。取 400：
+// 大于一整个攻击循环（约 40 帧）一个数量级，让他有机会脱身；
+// 又远小于「从 46 格带被一路引到敌方基地」所需的约 700 帧，
+// 所以不会顺着敌人一路漂到基地门口 —— 超过这个时间就把他硬拉回集结带。
+static const int USR_FARMER_ESCORT_ENGAGED_FRAMES = 400;
+
+// 走不到的落点拉黑多少帧。取 600 = USR_PRIEST_BAD_POINT_FRAMES —— 同量级，
+// 「这段时间里别再做那件事」。太短会立刻被重新选中（敌人没变的话它还是最优解），
+// 太长会把一个其实只是被临时堵住的点浪费掉。
+static const int USR_FARMER_ESCORT_BAD_POINT_FRAMES = 600;
+
+// ── 阶段 B：拆敌方箭塔 ──────────────────────────────────────────────
+// 同一座箭塔最多安排几个农民。取 8，两条独立理由指向同一个数：
+//   · 物理：箭塔是 2×2（BuildingBlockSize），正交相邻只有 8 格，第 9 个农民
+//     根本贴不到近战伤害阈值（约 SideLength/2 + 0.5 格，见 Farmer::getDis_attack）；
+//   · 收益：农民对建筑伤害是 3 × 20% → 每次命中 1 点，125 血要 125 次；
+//     8 人同打约 625 帧清一座（按单次命中周期 40 帧估），再加人只是把 625 压到
+//     500，不如把第二座也开工。20 个农民对这个上限正好铺 2.5 座塔。
+static const int USR_FARMER_TOWER_PER_TARGET_MAX = 8;
+
+// 拆塔指令的下发节流。取 30：介于军队自卫的 12 与箭塔索敌的 20 之间。
+// 必须大于「HumanAction 之后 WorkObjectSN 变成新值」所需的结算时间，
+// 否则会在关系还没建立时重发，把刚起手的攻击进度清零。
+static const int USR_FARMER_TOWER_ORDER_INTERVAL = 30;
+
+// 「已经站在塔跟前」的判定距离平方。取 9（3 格）。
+// 【为什么必须有这一条】20 个农民打一座 2×2 的箭塔，只有 8 个贴得上（正交相邻
+// 只有 8 格），其余的在周围排队等位置 —— 它们的 BlockDR/UR 自然不变，
+// 会被 IsFarmerStuckWalking 判成「走不动」。没有这个排除，排队的农民会被逐个
+// 判成「这座塔走不到」而换塔，超员兜底又把它们压回来，形成来回换目标的抖动。
+// 3 格比近战伤害阈值（约 SideLength/2 + 0.5 ≈ 1.5 格）宽一些，留出挤压余量。
+static const int USR_FARMER_TOWER_ENGAGE_DIS2 = 9;
+
+// 卡住重试次数上限。取 3：配合 USR_FARMER_TOWER_ORDER_INTERVAL(30)，
+// 3 次约 90 帧确认还没贴上就换塔 —— 再加上 IsFarmerStuckWalking 本身要求的
+// 300 帧没动，合计约 390 帧，接近单塔击杀时间（约 625 帧）的六成。
+static const int USR_FARMER_TOWER_STUCK_MAX_TRIES = 3;
+// 「该农民 → 该塔」拉黑多少帧。取 900：比落点黑名单长 —— 塔周围被己方单位挤死
+// 这件事会持续得比较久（所有农民都往同一座塔挤），拉黑太短会立刻被重新选中。
+static const int USR_FARMER_TOWER_BLACKLIST_FRAMES = 900;
+
+// ── 士兵分担箭塔火力 ────────────────────────────────────────────────
+// 【为什么必须有这一块】敌方箭塔的目标取自 Defend 集合（enemyai.cpp:447-453），
+// 而那个集合【只收我方军队】（enemyai.cpp:238-241，农民与建筑那两行 push_back
+// 都被注释掉了）。于是塔打不到农民，能打的只有军队 —— 包括只有 100 血、防御为 0
+// 的祭司。派士兵贴过去，塔的目标就从"只能是祭司"变成"在一群士兵里挑一个"，
+// 祭司挨打的概率随之下降；士兵同时还在输出伤害。
+//
+// 【为什么士兵扛得住】战车弓兵 70 血（config.json:444）是农民 25 血（:65）的
+// 2.8 倍，同样是"每次命中扣 1 点"的节奏下能多挨 2.8 倍的攻击次数；而且它的
+// 射程是 7（:448），与塔射程 7（:261）相等 —— 可以在塔的外围排队输出，
+// 不必像农民那样挤到塔的相邻格里去（农民是近战，只能贴上去）。
+//
+// 【伤害效率的真相】战车弓兵对建筑的伤害其实和农民【一样】是 1 点/次：
+//   ATK 4 × 建筑 20%（Core_List.cpp:2411）× 军队倍率 1 = 0.8 → round → 0
+//   → 下限取 1（Core_List.cpp:2412）。
+// 那个"军队打建筑 2 倍"的加成（Development.cpp:47-48）只给剑士/骑兵/改进弓兵，
+// 战车弓兵不在名单里。所以这一块的价值在【分担火力与扛伤】，不在输出。
+
+// 每座箭塔最多派几个士兵。取 4：
+//   · 塔一次只打一个目标（Defend.back()），4 个已经足够把祭司的挨打概率压到 1/5；
+//   · 士兵是推基地的主力，不能全填进塔里 —— 军队总数约 20，5 座塔 × 4 = 20 是上限，
+//     实际会按塔数摊薄（下面的分配按"塔的威胁顺序"填，填不满就少填）。
+static const int USR_ARMY_TOWER_PER_TARGET_MAX = 4;
+// 士兵换塔指令的下发节流。取 60：与编队/巡逻同粒度。
+// 必须显著大于「HumanAction 之后 WorkObjectSN 变成新值」的结算时间，
+// 否则会反复重建攻击关系、把伤害进度清零。
+static const int USR_ARMY_TOWER_ORDER_INTERVAL = 60;
+
+// 阶段 B 的时间兜底帧。取 42000 = 农民出发(38000)之后 4000 帧，也就是农民
+// 走完那 130 格（约 1500 帧）到达环上之后再过 2500 帧。
+// 【为什么需要】EstimateEnemySiegeAnchor 的注释记录过一个真实故障：攻城厂整局
+// 没被侦察到（`enemyB` 最多到 1，那还是座箭塔），于是 ManagePriest 那条冲厂分支
+// 因为 FindEnemySiegeBuilding() == nullptr 永远不执行，阶段 B 的 ①②③ 条全部关死，
+// 护送队会在环上白站到底。到这一帧时军队已压了近 9000 帧、敌方建筑必然已进
+// info.enemy_buildings，此时让农民去拆塔至少能替军队与祭司分担火力。
+static const int USR_FARMER_TOWER_FALLBACK_FRAME = 42000;
+
 // 农民去救祭司的最大距离（格，欧氏）。
 //
 // 【为什么要有上限】祭司是唯一的获胜路径且不可补充，但农民同样不可替代 ——
@@ -401,6 +550,58 @@ static map<int, int> farmerLastOrderFrame;
 static map<int, int> farmerThreatLastFrame;
 // 农民确认脱离威胁后的起始帧，用于安全滞后。
 static map<int, int> farmerSafeSinceFrame;
+// ── 农民护送祭司（详见 UsrAI.cpp 顶部「农民护送祭司」那组常量）────────────
+// 两阶段：BAND = 随祭司在敌方锚点外 46/54 两圈待命；TOWER = 祭司冲厂时转为拆箭塔。
+enum
+{
+    FARMER_ESCORT_STAGE_BAND = 0,
+    FARMER_ESCORT_STAGE_TOWER = 1
+};
+static int farmerEscortStage = FARMER_ESCORT_STAGE_BAND;
+// 已被征召护送祭司的农民 SN → 征召帧。【存在即护送中，一旦进入就不再回经济】
+// 这张表是「脱离经济」的唯一真相来源：所有会抢农民的入口都读 IsFarmerEscorting。
+// 写成 latch 而不是「按需切换」的理由：半途回经济要同时恢复
+// farmerLastOrderFrame 节流、pendingGatherOrders 记账、以及威胁迟滞三套状态，
+// 半恢复状态下农民会在箭塔与浆果丛之间每帧互抢，而每次 HumanAction 都经
+// Core_List::suspendRelation 清路径（Core_List.cpp:450-469）—— 表现为原地抖。
+static map<int, int> farmerEscortDuty;
+// 首次征召的帧号（USR_INVALID_FRAME = 尚未征召）。
+// 用它而不是「farmerEscortDuty 非空」做「只征召一次」的判据：全体阵亡时后者
+// 会重新变空，于是又征召一轮新产出的农民去送人头。
+static int farmerEscortDutyFrame = USR_INVALID_FRAME;
+// 阶段 A 的集结命令。字段照搬 ChariotSpreadOrder 的三件套，各有用途：
+// 落点做到达判定、下发帧做节流、下发时位置做「卡住」判定。
+struct FarmerEscortOrder
+{
+    int targetDR;
+    int targetUR;
+    int orderFrame;
+    int fromDR;
+    int fromUR;
+};
+static map<int, FarmerEscortOrder> farmerEscortOrders;
+// 走不到的落点：坐标 → 拉黑到期帧（与 priestBadRetreatPoints 同构）。
+static map<pair<int, int>, int> farmerEscortBadPoints;
+// 阶段 B：农民 SN → 正在拆的敌方箭塔 SN。
+//
+// 【不能复用 currentTarget】CleanDeadOwnerTargetLocks 用 FindMyArmyBySN 判断
+// 「锁的主人是否还活着」，而它只查 info.armies —— 农民不在其中，所以农民写进
+// currentTarget 的条目【每一帧都会被清掉】。表现会是「每帧重选目标 → 攻击关系
+// 被反复重建 → 伤害永远打不出去」。必须用独立表。
+static map<int, int> farmerEscortTowerTarget;
+// 农民 SN → 上次下发拆塔指令的帧（节流）。
+static map<int, int> farmerEscortLastOrderFrame;
+// 农民 SN → 对当前这座塔已经重试过几次（卡住时递增，换塔后归零）。
+static map<int, int> farmerEscortStuckTries;
+// (农民 SN, 塔 SN) → 该农民对这座塔「走不到」，拉黑到哪一帧。
+static map<pair<int, int>, int> farmerEscortTowerBadForFarmer;
+// 军队 SN → 正在牵制的敌方箭塔 SN（士兵分担火力那一路，见 AssignArmyTowerAssault）。
+// 与 farmerEscortTowerTarget 分开存：虽然 SN 全局唯一、不会撞，但两者的生命周期
+// 与清理规则不同（农民是 latched 编制，军队随时会阵亡或被调走），混在一张表里
+// 会让「谁该被清理」变得不可读。
+static map<int, int> armyTowerTarget;
+// 军队 SN → 上次下发牵制指令的帧（节流）。
+static map<int, int> armyTowerLastOrderFrame;
 // 第三波结束后侦察骑兵的移动节流和巡逻点状态。
 static map<int, int> scoutLastOrderFrame;
 static map<int, int> scoutWaypointIndex;
@@ -545,12 +746,19 @@ static bool IsOffensiveArmy(const tagArmy &army);
 // （「没有敌人就去转换攻城武器厂」那一段）。
 static bool HasVisibleEnemyArmy();
 static const tagBuilding *FindEnemySiegeBuilding();
+// 所有已知敌方箭塔是否都被牵制住了（每个塔都有我方单位以它为工作目标）。
+// 定义在农民护送那一段，但 ManagePriest 的「走向攻城厂」要用它做进门条件。
+static bool AllEnemyArrowTowersEngaged();
 // 敌方基地锚点：侦察到就用真的，否则用「我方市镇中心的地图对极点」估。
 // 定义在 ManageStandoff 之前，但 ManagePriest 的禁区判定也要用它。
 static bool EstimateEnemySiegeAnchor(int &anchorDR, int &anchorUR);
 ;
 static bool IsAliveFarmerSN(int farmerSN);
 static bool IsFarmerRelationEstablished(int farmerSN, int targetSN);
+// 该农民是否已被征召护送祭司（详见文件顶部那组常量）。
+// 前向声明放在这里：建造 / 恢复工地 / 修塔 / 经济派工四处都要读它，
+// 而它的定义在 IsAliveFarmerSN 旁边（与本块其余判据一致）。
+static bool IsFarmerEscorting(int farmerSN);
 // 上次提交建筑研发、升级或生产动作的游戏帧。
 static int lastBuildingActionFrame = USR_INVALID_FRAME;
 // 上次提交单位生产动作的游戏帧。
@@ -1688,6 +1896,12 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0)
             continue;
+        // 护送祭司的农民已经永久退出经济，不能算进配额的分母。
+        // 不排除的话，配额会按「全部农民」来算，而实际能采集的只剩少数几个 ——
+        // 于是 [FARIDLE] 那类经济诊断日志整段失真（日志里挂着 tgt=[20,0,0,0]
+        // 而 asg=[0,0,0,0]，看起来像派工坏了，其实人根本不在经济里）。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
         farmerCount++;
 
         for (const tagResource &resource : info.resources)
@@ -1948,6 +2162,17 @@ static bool IsAliveFarmerSN(int farmerSN)
             return farmer.Blood > 0;
     }
     return false;
+}
+
+// 该农民是否已被征召护送祭司 —— 也就是「已永久退出经济」。
+//
+// 【为什么按 SN 查表而不是按位置/状态判】护送是【编制】不是临时任务：
+// 一旦征召，这个农民到死都归护送队（见 farmerEscortDuty 的说明）。
+// 所有会抢农民的经济入口（派工 / 建造 / 恢复工地 / 修塔 / 自卫 / 自毁）
+// 都靠这一个判据让路，否则会把正在赶路或拆塔的人拽回采集。
+static bool IsFarmerEscorting(int farmerSN)
+{
+    return farmerEscortDuty.find(farmerSN) != farmerEscortDuty.end();
 }
 
 // 【诊断】「近处有闲置农田，农民却派了更远的目标」时记录一行。
@@ -2228,6 +2453,21 @@ static void ProcessPendingGatherOrders()
         nextChariotSpreadSlot = 0;
         // 帧号会随新对局回退，占位图必须跟着失效，否则复用上一局的旧栅格。
         knownOccupiedFrame = USR_INVALID_FRAME;
+        // 农民护送祭司的编制必须整组清掉：SN 是跨局复用的，漏清会让新对局
+        // 开局就带着上一局的护送名单（那些 SN 现在指向别的单位），
+        // 于是新对局的农民一出场就被判成「已退出经济」而站着不动。
+        farmerEscortStage = FARMER_ESCORT_STAGE_BAND;
+        farmerEscortDuty.clear();
+        farmerEscortDutyFrame = USR_INVALID_FRAME;
+        farmerEscortOrders.clear();
+        farmerEscortBadPoints.clear();
+        farmerEscortTowerTarget.clear();
+        farmerEscortLastOrderFrame.clear();
+        farmerEscortStuckTries.clear();
+        farmerEscortTowerBadForFarmer.clear();
+        // 士兵牵制箭塔那一路的残留同样要清（军队 SN 也是跨局复用的）。
+        armyTowerTarget.clear();
+        armyTowerLastOrderFrame.clear();
     }
     farmerResourceStateFrame = g_frame;
 
@@ -2721,6 +2961,10 @@ static int FindBuilderFarmerSN()
         if (farmer.FarmerSort != FARMERTYPE_FARMER ||
             farmer.Blood <= 0 || farmer.NowState != HUMAN_STATE_IDLE)
             continue;
+        // 护送祭司的农民已退出经济。这一条必须加：农民在集结环上待命时
+        // NowState 正是 IDLE，会被下面这条当成「最理想的建造人选」抽走。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
 
         int dis2 = center ? BlockDis2(farmer.BlockDR, farmer.BlockUR,
                                       center->BlockDR, center->BlockUR)
@@ -2741,6 +2985,8 @@ static int FindBuilderFarmerSN()
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER ||
             farmer.Blood <= 0 || farmer.NowState != HUMAN_STATE_WORKING)
+            continue;
+        if (IsFarmerEscorting(farmer.SN))
             continue;
 
         bool building = false;
@@ -3170,6 +3416,12 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
     {
         if (farmer.FarmerSort != FARMERTYPE_FARMER || farmer.Blood <= 0)
             continue;
+        // 【护送祭司的农民归 ManageFarmerEscort 管，经济一律不碰】必须放在
+        // 下面那条「僵尸农民救援」之前 —— 那条会把 WALKING 且卡住的农民接过来
+        // 派去采集，而护送农民在赶路时卡住是常态，被接管就等于中途退出队伍。
+        // 他的卡住由 ManageFarmerEscortBand 自己处理（换落点 + 拉黑）。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
         // 正常只派空闲农民；此外把「有目的地但已经走不动」的僵尸农民也接过来 ——
         // 它们的 NowState 永远是 WALKING、回不到 IDLE，不救就是永久僵在原地。
         // 判据见 USR_FARMER_STUCK_FRAMES。
@@ -3305,6 +3557,9 @@ static bool TryResumeIncompleteBuilding(UsrAI *ai)
     {
         if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER ||
             farmer.NowState == HUMAN_STATE_ATTACKING || IsFarmerBuilding(farmer))
+            continue;
+        // 护送祭司的农民不回头干工地（他是 latched 编制，见 farmerEscortDuty）。
+        if (IsFarmerEscorting(farmer.SN))
             continue;
         if (FindDirectThreatToFarmerSN(farmer) != -1 ||
             FindNearbyEnemyForFarmer(farmer) != -1)
@@ -4224,6 +4479,10 @@ static int FindRepairFarmerSN(const tagBuilding &building,
         if (usedFarmers.find(farmer.SN) != usedFarmers.end())
             continue;
         if (IsFarmerBuilding(farmer))
+            continue;
+        // 护送祭司的农民不修建筑。必须放在下面那条「僵尸农民也接受」之前 ——
+        // 那条会收走 WALKING 且卡住的农民，而护送农民赶路时卡住是常态。
+        if (IsFarmerEscorting(farmer.SN))
             continue;
 
         // 「有目的地但已经走不动」的僵尸农民也接受：它们的 NowState 永远是
@@ -5251,13 +5510,25 @@ static void ManagePriest(UsrAI *ai)
     // 军队还没成型，这时候押上祭司去换基地是亏的。
     //
     // 【为什么还要加 WorkObjectSN == -1】这一段发的是 HumanMove，而 HumanMove
-    // 会经 suspendRelation 打断既有的工作关系。它是唯一排在「转换不被打断」
+    // 会经 suspendRelation 打断既有的工作关系。它是唯一排在「转换不打断」
     // 那道 return 之前、又能下发移动的分支 —— 不加这个条件的话，祭司在
     // 「离厂 10~12 格」处转换厂时会被它重新拽向厂那一格，这次读条作废重来。
     // （转敌方士兵时 HasVisibleEnemyArmy() 已经为真、本就进不来；
     //   转建筑时目标不是兵，这个判据才是真正的防线。）
+    //
+    // 【为什么必须等所有箭塔都被牵制住】用户要求「确保每一个箭塔都被牵制住
+    // 才可以让祭司进行转化」。上一局实测的死因正是缺这一条：农民 38000 出发、
+    // 到 42001 只剩 1 个，5 座塔只清掉 2 座，而祭司 39637 就已经动身了 ——
+    // 它冲进厂区时那 4 座围着厂的塔（距厂 3~6.4 格，全在射程 7 内）一起开火，
+    // 57 血在约 500 帧里掉到 0。
+    //
+    // 这道门把「祭司冲厂」和「农民/士兵清塔」串成了顺序关系：塔没被牵制完，
+    // 祭司就留在 40 格带等（条件不成立时它会落到下面的站桩带分支）。
+    // 注意它只要求「被牵制」（有人正以该塔为工作目标），不要求「被拆掉」——
+    // 拆一座 125 血的塔要 125 次命中，等它塌完太久；而只要每座塔都有人缠着，
+    // 塔的火力就已经分散、祭司挨打的概率就下来了。
     if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !HasVisibleEnemyArmy() &&
-        priest->WorkObjectSN == -1)
+        priest->WorkObjectSN == -1 && AllEnemyArrowTowersEngaged())
     {
         const tagBuilding *siegeTarget = FindEnemySiegeBuilding();
         if (siegeTarget != nullptr)
@@ -5334,10 +5605,15 @@ static void ManagePriest(UsrAI *ai)
     // 同时它排在 keepout 之前，也就避免了两条规则方向相反时的来回跑
     // （keepout 是"朝我方中心退"，而中心在 100+ 格外的另一头）。
     //
-    // 【只在军队出征时生效】判据与总攻同口径：已侦察到敌方基地 + 过了
-    // USR_OFFENSIVE_FRAME(33000)。否则开局就把祭司往敌方基地拉，等于让它一个人
-    // 横穿半张地图。
-    if (enemyBaseDiscovered && g_frame >= USR_OFFENSIVE_FRAME)
+    // 【只在军队出征时生效】判据是「已侦察到敌方基地 + 过了
+    // USR_PRIEST_FRONT_POST_FRAME(38000)」。否则开局就把祭司往敌方基地拉，
+    // 等于让它一个人横穿半张地图。
+    //
+    // 【这一帧为什么与农民护送同帧、而不是沿用军队总攻的 33000】需求是
+    // 「农民和祭司一起上战场」：两者同帧动身才能同时到位（移速相近、路程相同）。
+    // 祭司单独提前 5000 帧出发，就会在农民还在赶路的那段时间里独自站在
+    // 敌方基地外的环上 —— 没有掩护，而它只有 100 血、防御为 0。
+    if (enemyBaseDiscovered && g_frame >= USR_PRIEST_FRONT_POST_FRAME)
     {
         int anchorDR = 0;
         int anchorUR = 0;
@@ -5719,10 +5995,21 @@ static void ManagePriest(UsrAI *ai)
         // 于是祭司走到了厂边上却永远不发起转换。实测日志：它停在 (15,77)、
         // mvTgt=(11,86)（那是厂的位置）、minDis=9999，直到被别的敌人打死。
         // 获胜路径要求"把敌人打光之后去把厂转掉"，所以这一条必须放开。
+        // 【30000 帧后不再转换敌方士兵】总攻阶段（USR_PRIEST_PASSIVE_FRAME）起，
+        // 祭司只做一件事：把敌方攻城武器厂转掉 —— 那是唯一的获胜条件。
+        // 转换士兵会把它按在敌方基地里读条换血，而它只有 100 血、近战与远程
+        // 防御都是 0、且不可补充；换来的一个士兵对胜负没有贡献。
+        //
+        // 【为什么用 USR_PRIEST_PASSIVE_FRAME 而不另立常量】那个常量本来就是
+        // 「总攻阶段起始帧」的定义，而它自己的注释里写的就是「此后祭司进入只
+        // 保存实力状态 —— 不再转换」。此前转士兵的分支在这条门槛之后仍然生效，
+        // 注释与代码并不一致，这一条把行为对齐到注释。
         const tagArmy *armyTarget =
-            anyEnemyVisible ? FindPriestConversionTarget(*priest) : nullptr;
+            (anyEnemyVisible && g_frame < USR_PRIEST_PASSIVE_FRAME)
+                ? FindPriestConversionTarget(*priest)
+                : nullptr;
         const tagBuilding *buildingTarget = nullptr;
-        if (!armyTarget && g_frame >= 30000)
+        if (!armyTarget && g_frame >= USR_PRIEST_PASSIVE_FRAME)
             buildingTarget = FindEnemySiege(*priest);
         {
             const int targetSN = armyTarget
@@ -6638,6 +6925,14 @@ static void AssignFarmerSelfDefense(UsrAI *ai)
     {
         if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
             continue;
+        // 【护送祭司的农民整个跳过自卫】理由有三条：
+        //   ① 阶段 A 的位置（锚点外 46 格）在敌方守军的追击上限
+        //      DEFENSE_CHASE_LIMIT(25) 之外，本来就不该挨打，自卫近乎死代码；
+        //   ② 阶段 B 里他的工作目标就是箭塔，12 帧一次的自卫会把他从塔上拽下来；
+        //   ③ 只留一个 Owner —— 自卫与护送都下发 HumanAction 的话，两个函数
+        //      每帧互抢，而每次 HumanAction 都清一次路径（表现为原地抖）。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
 
         // 目标优先级：
         //   ① 正在打我自己的敌人（最急，就在身边）
@@ -6687,6 +6982,899 @@ static void AssignFarmerSelfDefense(UsrAI *ai)
                 }
             }
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// 农民护送祭司
+//
+// 祭司是唯一的获胜路径（MainWidget::isWin 只认被转换过来的 BUILDING_SIEGE），
+// 但它只有 100 血、近战与远程防御都是 0、不可补充。它冲进敌方基地去转换攻城厂
+// 的那段路，正好穿过敌方箭塔的射程 —— 本机制就是把这段路上的箭塔先拔掉。
+//
+// 两个阶段（都由 ManageFarmerEscort 驱动，状态见文件顶部的 farmerEscortStage）：
+//   BAND  —— 全部农民撤出经济，随祭司集结在敌方锚点外 46/54 两圈待命；
+//   TOWER —— 祭司开始冲厂时，整队转去拆所有已知的敌方箭塔；塔清空后回环上待命。
+//
+// 【为什么敌方箭塔打不到农民】enemyai.cpp:238-241 的 Defend 集合只收
+// enemyInfo.enemy_armies（我方军队），农民与建筑那两行 push_back 都被注释掉了；
+// enemyai.cpp:447-453 的塔目标就是 Defend.back()。所以拆塔是单方面输出，
+// 塔不会还手 —— 这是这件事在后期做得成的前提。
+// ══════════════════════════════════════════════════════════════════════
+
+// 清理已阵亡的护送队员，把它们占着的落点、目标与黑名单条目一起放掉。
+// 不清理的后果有两层：这些 map 会随对局无限增长；而且 SN 是跨局复用的，
+// 新单位可能被当成老队员（新对局重置块处理跨局，这里是同一件事的对局内版本）。
+static void CleanFarmerEscortRoster()
+{
+    for (map<int, int>::iterator it = farmerEscortDuty.begin();
+         it != farmerEscortDuty.end();)
+    {
+        if (IsAliveFarmerSN(it->first))
+        {
+            ++it;
+            continue;
+        }
+        const int sn = it->first;
+        farmerEscortOrders.erase(sn);
+        farmerEscortTowerTarget.erase(sn);
+        farmerEscortLastOrderFrame.erase(sn);
+        farmerEscortStuckTries.erase(sn);
+        for (map<pair<int, int>, int>::iterator b =
+                 farmerEscortTowerBadForFarmer.begin();
+             b != farmerEscortTowerBadForFarmer.end();)
+        {
+            if (b->first.first == sn)
+                b = farmerEscortTowerBadForFarmer.erase(b);
+            else
+                ++b;
+        }
+        it = farmerEscortDuty.erase(it);
+    }
+}
+
+// 已知的敌方建筑里还有没有存活的箭塔（阶段 B 的时间兜底要用）。
+static bool HasKnownEnemyArrowTower()
+{
+    for (const tagBuilding &b : info.enemy_buildings)
+    {
+        if (b.Blood > 0 && b.Type == BUILDING_ARROWTOWER)
+            return true;
+    }
+    return false;
+}
+
+// 为某个护送农民挑一个集结落点。
+//
+// 【方位怎么排】以「祭司相对锚点的方位」为基准、向两侧交替展开的 16 个方位，
+// 每圈 16 个、共两圈 —— 与 PriestFrontPostBlock 完全相同的枚举顺序，好处是
+// 「铺不下时优先铺正面」（正对祭司的那几个方位先被选中）。
+//
+// 【为什么以祭司的方位为基准、而不是铺满一圈】铺满的话有一半落点在敌方基地的
+// 另一侧：农民从我家出发要绕半张地图才能到位（多 100+ 格 = 1600+ 帧），
+// 而且脱离大部队、单独撞上守军。以祭司的方位为基准，整队落在「祭司所在的那
+// 一侧」，也就是我方来向。
+//
+// 【落点为什么必须互不相同】目标格四邻全被占时，引擎对纯坐标移动直接
+// nullPath、停 50 帧后【整条指令被取消】（Core_List.cpp:2071-2093）——
+// 不是原地待命，而是行动作废。所以这里靠「查已有订单是否占了同一格」去重，
+// 而不是维护一张槽位占用表（少一张需要同步的表）。
+static bool FindFarmerEscortSlot(const tagFarmer &farmer, int anchorDR,
+                                 int anchorUR, int priestDR, int priestUR,
+                                 int &outDR, int &outUR)
+{
+    // 16 方向单位向量（×100 整数表），与 PriestFrontPostBlock / StandoffRingOffset
+    // 是同一套 —— 用整数表而不是 sin/cos，免去浮点取整带来的落点抖动。
+    static const int kCos16[16] = {100, 92, 71, 38, 0, -38, -71, -92,
+                                   -100, -92, -71, -38, 0, 38, 71, 92};
+    static const int kSin16[16] = {0, 38, 71, 92, 100, 92, 71, 38,
+                                   0, -38, -71, -92, -100, -92, -71, -38};
+
+    // 祭司相对锚点的方位（16 分度，点积最大的那个）
+    int base = 0;
+    {
+        const double dx = double(priestDR - anchorDR);
+        const double dy = double(priestUR - anchorUR);
+        const double len = sqrt(dx * dx + dy * dy);
+        if (len >= 0.5)
+        {
+            double bestDot = -1e18;
+            for (int i = 0; i < 16; ++i)
+            {
+                const double dot = double(kCos16[i]) * (dx / len) +
+                                   double(kSin16[i]) * (dy / len);
+                if (dot > bestDot)
+                {
+                    bestDot = dot;
+                    base = i;
+                }
+            }
+        }
+        // 祭司压在锚点上时（len < 0.5）base 保持 0：只是把整队的方位固定成
+        // 一个确定值，不影响任何判据。
+    }
+
+    int bestDR = -1;
+    int bestUR = -1;
+    int bestDis2 = 1000000000;
+    for (int ring = 0; ring < 2; ++ring)
+    {
+        const int radius = (ring == 0) ? USR_FARMER_ESCORT_POST_DISTANCE
+                                       : USR_FARMER_ESCORT_OUTER_RING;
+        for (int step = 0; step < 16; ++step)
+        {
+            // 从 base 向两侧交替展开：0, +1, -1, +2, -2, ...
+            const int offset = ((step + 1) / 2) * ((step % 2 == 1) ? -1 : 1);
+            const int i = ((base + offset) % 16 + 16) % 16;
+            int dr = anchorDR + kCos16[i] * radius / 100;
+            int ur = anchorUR + kSin16[i] * radius / 100;
+            // 夹进地图：朝敌那几个方位通常指向地图内部，越界是少数情况，
+            // 夹取只是安全网 —— 等价于「那一侧能走多远走多远」。
+            dr = max(1, min(MAP_L - 2, dr));
+            ur = max(1, min(MAP_U - 2, ur));
+
+            // ① 陆地、且没被自家建筑占住（复用祭司那套判据）
+            if (!IsPriestPointUsable(dr, ur))
+                continue;
+            // ② 四邻不能全被挡（理由见函数头）。这一条【只能】用在纯坐标落点上，
+            //    拆塔那种对象目标的指令不要加它。
+            if (!IsReachableAround(dr, ur, 1))
+                continue;
+            // ③ 上一轮判定过「走不到」的落点，在拉黑期内跳过
+            map<pair<int, int>, int>::const_iterator bad =
+                farmerEscortBadPoints.find(make_pair(dr, ur));
+            if (bad != farmerEscortBadPoints.end() && g_frame < bad->second)
+                continue;
+            // ④ 不能离祭司太远 —— 需求是「和祭司一起」。没有这一条时，
+            //    外圈背面那半圈会把队伍拆成两处。
+            if (BlockDis2(dr, ur, priestDR, priestUR) >
+                USR_FARMER_ESCORT_LEASH * USR_FARMER_ESCORT_LEASH)
+                continue;
+            // ⑤ 已有别的护送农民占着这个落点 → 跳过
+            bool taken = false;
+            for (map<int, FarmerEscortOrder>::const_iterator o =
+                     farmerEscortOrders.begin();
+                 o != farmerEscortOrders.end(); ++o)
+            {
+                if (o->first == farmer.SN)
+                    continue;
+                if (o->second.targetDR == dr && o->second.targetUR == ur)
+                {
+                    taken = true;
+                    break;
+                }
+            }
+            if (taken)
+                continue;
+
+            const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR, dr, ur);
+            if (dis2 < bestDis2)
+            {
+                bestDis2 = dis2;
+                bestDR = dr;
+                bestUR = ur;
+            }
+        }
+    }
+
+    if (bestDR < 0)
+        return false;
+    outDR = bestDR;
+    outUR = bestUR;
+    return true;
+}
+
+// 征召：把农民编入护送队（永久退出经济）。
+// 只在指定帧之后、且已侦察到敌方基地时执行一次。
+static void RecruitFarmersForEscort()
+{
+    // 与军队总攻同门槛（帧号 + 已侦察到敌方基地）。没有基地信息就编队，
+    // 只会得到一支不知道往哪走的队伍。
+    if (g_frame < USR_FARMER_ESCORT_FRAME)
+        return;
+    if (!enemyBaseDiscovered)
+        return;
+    // 只征召一次。用独立帧号而不是「名单非空」做判据：全体阵亡时后者会变空，
+    // 于是又征召一轮新产出的农民，形成送人头循环。
+    if (farmerEscortDutyFrame != USR_INVALID_FRAME)
+        return;
+
+    int anchorDR = 0;
+    int anchorUR = 0;
+    if (!EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        return;
+
+    // 按「离敌方锚点的距离」从近到远征召。
+    // 【为什么按距离而不是按 SN】SN 顺序与战场位置无关；按距离征召能让已经
+    // 在前线附近的农民先入列，队伍首尾不脱节。USR_FARMER_ESCORT_MAX 小于
+    // 农民总数时，这一条同时保证被留下的是家里那些（离战场最远的）。
+    vector<pair<int, int> > candidates;
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+        candidates.push_back(
+            make_pair(BlockDis2(farmer.BlockDR, farmer.BlockUR, anchorDR,
+                                anchorUR),
+                      farmer.SN));
+    }
+    sort(candidates.begin(), candidates.end());
+
+    int taken = 0;
+    for (size_t i = 0; i < candidates.size(); ++i)
+    {
+        if (taken >= USR_FARMER_ESCORT_MAX)
+            break;
+        const int sn = candidates[i].second;
+        farmerEscortDuty[sn] = g_frame;
+        // 清掉还没结算的采集挂单；已经建立的采集关系由第一次 HumanMove 打断
+        // （HumanMove → addRelation → suspendRelation 清路径）。
+        CancelPendingGatherOrder(sn);
+        ++taken;
+    }
+
+    farmerEscortDutyFrame = g_frame;
+    farmerEscortStage = FARMER_ESCORT_STAGE_BAND;
+
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "[FARMESC] f=%d RECRUIT n=%d max=%d anchor=(%d,%d)", g_frame,
+             taken, USR_FARMER_ESCORT_MAX, anchorDR, anchorUR);
+    AiDebugLog(buf);
+}
+
+// 祭司是否已经「冲进敌方基地去转换攻城厂」—— 阶段 B 的触发判据。
+//
+// 【为什么不能只判 WorkObjectSN == 攻城厂SN】那个信号最早只出现在祭司距厂
+// 12 格处（FindEnemySiege 的 dis2 < 12*12），而：
+//   · 祭司走完剩下的 12 格只要约 211 帧（移速 2.03 px/帧 ÷ 35.78 px/格）；
+//   · 转换【建筑】是瞬发的 —— Core_List.cpp:2379-2387 贴邻 + isConstructed
+//     就直接 change_BuildingRepresent，没有读条；
+//   · 农民从 46 格环跑到箭塔要 500~640 帧。
+// 等这个信号再放人，农民到达时祭司早已获胜、或已被打死（祭司 100 血、
+// 远程防御 0，一座箭塔 3 点/次 → 34 次命中就够）。
+// 所以主判据取「祭司的目的地已经越过 40 格带、指向敌方基地」这个更早的真实
+// 状态；WorkObjectSN 作为权威确认并入 —— 它成立时必然为真。
+//
+// outTriggerKind 只用于日志：事后要能区分「机制按预期提前放了人」与「兜底才放的」。
+static bool IsPriestSiegeCommitted(const tagArmy *priest, int &outTriggerKind)
+{
+    if (priest == nullptr)
+        return false;
+    // 与 ManagePriest 那条冲厂分支同门槛：30000 帧之前祭司不主动出门。
+    if (g_frame < USR_PRIEST_PASSIVE_FRAME)
+        return false;
+    if (!enemyBaseDiscovered)
+        return false;
+
+    // ① 权威：已建立到攻城厂的工作关系（正在走去 / 正在转换）。
+    const tagBuilding *siege = FindEnemySiegeBuilding();
+    if (siege != nullptr && priest->WorkObjectSN == siege->SN)
+    {
+        outTriggerKind = 1;
+        return true;
+    }
+
+    // ② 有可见敌兵时祭司不会往里冲（冲厂分支要求 !HasVisibleEnemyArmy()），
+    //    此时它的目的地即使指向前方，也只是站桩带的重算。
+    //    这一条同时保证「放人」不会和祭司的 keepout 分支（把他往家里推）同时发生。
+    if (HasVisibleEnemyArmy())
+        return false;
+
+    int anchorDR = 0;
+    int anchorUR = 0;
+    if (!EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        return false;
+
+    // ③ 祭司当前的目的地已经进入 40 格【带以内】。
+    //    冲厂那条 HumanMove 的落点就是厂的正交相邻格，而厂≈锚点。
+    //    站桩带那条 HumanMove 的落点半径恒为 40（PriestFrontPostBlock 传的是
+    //    USR_PRIEST_FRONT_POST_DISTANCE），斜方向上是 36²+15²=1521，
+    //    大于 (40−6)²=1156 —— 所以「带内落点」不会误触发这一条。
+    const int destDR = int(priest->DR0 / double(BLOCKSIDELENGTH));
+    const int destUR = int(priest->UR0 / double(BLOCKSIDELENGTH));
+    const int nearR =
+        USR_PRIEST_FRONT_POST_DISTANCE - USR_PRIEST_FRONT_POST_BAND;
+    if (BlockDis2(destDR, destUR, anchorDR, anchorUR) <= nearR * nearR)
+    {
+        outTriggerKind = 2;
+        return true;
+    }
+
+    // ④ 时间兜底：攻城厂整局没被侦察到（EstimateEnemySiegeAnchor 的注释记录过
+    //    这个真实故障：`enemyB` 最多到 1）时，ManagePriest 那条冲厂分支因为
+    //    FindEnemySiegeBuilding() == nullptr 永远不执行，①②③ 全部关死，
+    //    护送队会在环上白站到底。到兜底帧之后放开：此时总攻已经打了很久，
+    //    敌方建筑必然已进 info.enemy_buildings。
+    if (g_frame >= USR_FARMER_TOWER_FALLBACK_FRAME && HasKnownEnemyArrowTower())
+    {
+        outTriggerKind = 3;
+        return true;
+    }
+    return false;
+}
+
+// 阶段 A：把护送队铺到锚点外的环上。
+static void ManageFarmerEscortBand(UsrAI *ai, const tagArmy &priest)
+{
+    int anchorDR = 0;
+    int anchorUR = 0;
+    if (!EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        return;
+
+    // 全局节流 60 帧（与站桩 / 侦察 / 祭司探路同一粒度）。不节流就会每帧重算
+    // 落点，而 HumanMove 每次都会清空移动路径 —— 表现是整队原地抖。
+    static int lastBandPassFrame = USR_INVALID_FRAME;
+    if (lastBandPassFrame != USR_INVALID_FRAME &&
+        g_frame - lastBandPassFrame < USR_FARMER_ESCORT_ORDER_INTERVAL)
+        return;
+    lastBandPassFrame = g_frame;
+
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+        if (!IsFarmerEscorting(farmer.SN))
+            continue;
+
+        map<int, FarmerEscortOrder>::iterator it =
+            farmerEscortOrders.find(farmer.SN);
+        const bool hasOrder = (it != farmerEscortOrders.end());
+
+        // 已经就位 → 不再干预。注意【不能删记录】—— 落点可能本身就落在环上，
+        // 删掉的话下一轮会被当成新队员重新分配落点，形成来回搬运
+        // （SpreadChariotArchers 的同一处注释）。
+        if (hasOrder &&
+            BlockDis2(farmer.BlockDR, farmer.BlockUR, it->second.targetDR,
+                      it->second.targetUR) <= USR_FARMER_ESCORT_ARRIVED_DIS2)
+            continue;
+
+        // 正在交战：给一段宽限让他脱身，超时才硬拉。
+        // 【为什么必须设上限】没有它，农民会顺着追兵一路漂向敌方基地，
+        // 既脱离大部队，又把自己送进守军的包围里。
+        if (farmer.NowState == HUMAN_STATE_ATTACKING)
+        {
+            if (!hasOrder ||
+                g_frame - it->second.orderFrame <
+                    USR_FARMER_ESCORT_ENGAGED_FRAMES)
+                continue;
+        }
+
+        // 正在正常行进（没卡住）→ 不打扰。
+        // 其余情况（IDLE / WORKING / 卡住的 WALKING）都重新下令。
+        if (hasOrder && farmer.NowState == HUMAN_STATE_WALKING &&
+            !IsFarmerStuckWalking(farmer))
+            continue;
+
+        // 上一轮那个落点走不到 → 记黑名单，这一轮会换一个新的。
+        //
+        // 【必须限定在 WALKING 上】IsFarmerStuckWalking 的语义是「在同一格里
+        // 待了 USR_FARMER_STUCK_FRAMES 帧没动」，【不是】「走不动」—— 站着
+        // 待命的 IDLE 农民同样满足它。不加这个限定的话，一个已经走到落点附近、
+        // 只是被挤开几格的农民会被判成「这个落点走不到」而把它拉黑，
+        // 32 个落点会这样被逐个拉黑，最后整队在环上乱走。
+        // 落点本身的可达性在选点时已由 IsReachableAround 保证，剩下的
+        // 停住只是临时拥堵，重发一次指令即可，不该拉黑。
+        if (hasOrder && farmer.NowState == HUMAN_STATE_WALKING &&
+            IsFarmerStuckWalking(farmer))
+            farmerEscortBadPoints[make_pair(it->second.targetDR,
+                                            it->second.targetUR)] =
+                g_frame + USR_FARMER_ESCORT_BAD_POINT_FRAMES;
+
+        int dr = -1;
+        int ur = -1;
+        if (!FindFarmerEscortSlot(farmer, anchorDR, anchorUR, priest.BlockDR,
+                                  priest.BlockUR, dr, ur))
+            continue;   // 32 个槽位全不可用，这一轮先不动他
+
+        FarmerEscortOrder order;
+        order.targetDR = dr;
+        order.targetUR = ur;
+        order.orderFrame = g_frame;
+        order.fromDR = farmer.BlockDR;
+        order.fromUR = farmer.BlockUR;
+        farmerEscortOrders[farmer.SN] = order;
+
+        CancelPendingGatherOrder(farmer.SN);   // 双保险，防止漏进一条采集挂单
+        ai->HumanMove(farmer.SN, (dr + 0.5) * double(BLOCKSIDELENGTH),
+                      (ur + 0.5) * double(BLOCKSIDELENGTH));
+    }
+}
+
+// 阶段 B：把护送队分配到各座敌方箭塔上并下发攻击。
+// 收集存活的敌方箭塔，按距锚点（≈祭司必经之路）升序。
+//
+// 【为什么只认箭塔】需求是「防止祭司被箭塔攻击」，而箭塔是祭司进场期间唯一的
+// 持续伤害源：敌方守军追到 DEFENSE_CHASE_LIMIT(25) 就折返，而祭司站在 40 格外；
+// 打别的建筑对「保护祭司」没有作用，还会让农民白挨守军。
+//
+// 【为什么按距锚点排序】沿祭司的必经之路依次清，而不是各自就近 —— 靠前的塔先
+// 被灌满人、先被打掉，祭司往里走时面对的塔是越来越少，而不是越走越多。
+//
+// 农民与军队两条路共用这一个列表：两者必须看到同一份「还剩哪些塔」，
+// 否则会出现「农民以为清完了、士兵还在打另一座」这种对不上的状态。
+static void CollectEnemyArrowTowers(vector<const tagBuilding *> &towers,
+                                    int &anchorDR, int &anchorUR)
+{
+    towers.clear();
+    for (const tagBuilding &b : info.enemy_buildings)
+    {
+        if (b.Blood > 0 && b.Type == BUILDING_ARROWTOWER)
+            towers.push_back(&b);
+    }
+    anchorDR = 0;
+    anchorUR = 0;
+    EstimateEnemySiegeAnchor(anchorDR, anchorUR);
+    sort(towers.begin(), towers.end(),
+         [anchorDR, anchorUR](const tagBuilding *a, const tagBuilding *b) {
+             return BlockDis2(a->BlockDR, a->BlockUR, anchorDR, anchorUR) <
+                    BlockDis2(b->BlockDR, b->BlockUR, anchorDR, anchorUR);
+         });
+}
+
+// 阶段 B：把护送队分配到各座敌方箭塔上并下发攻击。
+static void ManageFarmerEscortTowers(UsrAI *ai, const tagArmy &priest)
+{
+    vector<const tagBuilding *> towers;
+    int anchorDR = 0;
+    int anchorUR = 0;
+    CollectEnemyArrowTowers(towers, anchorDR, anchorUR);
+
+    // 没有塔可打（已清空 / 还没侦察到）→ 回集结带待命。
+    // 注意阶段【不回退】：阶段是单向 latch，这里只是「没活干就待在祭司旁边」，
+    // 而不是回经济。按需求，农民拆完塔就在原地等。
+    if (towers.empty())
+    {
+        farmerEscortTowerTarget.clear();
+        ManageFarmerEscortBand(ai, priest);
+        return;
+    }
+
+    map<int, int> towerWorkers;   // 塔 SN -> 本轮已分配人数
+    map<int, int> farmerToTower;  // 农民 SN -> 本轮的塔 SN
+    map<int, pair<int, int> > towerPos;  // 塔 SN -> 坐标（判「是否已在塔跟前」）
+    for (size_t t = 0; t < towers.size(); ++t)
+        towerPos[towers[t]->SN] =
+            make_pair(towers[t]->BlockDR, towers[t]->BlockUR);
+
+    // ④ 先保留既有分配。对同一目标重复下达 HumanAction 会中止并重建关系、
+    //    把已经打出去的伤害进度清零（AssignArrowTowerTargets 的同一处注释）——
+    //    这是本机制能不能真拆掉一座塔的关键。
+    for (map<int, int>::iterator it = farmerEscortTowerTarget.begin();
+         it != farmerEscortTowerTarget.end(); ++it)
+    {
+        if (!IsAliveFarmerSN(it->first))
+            continue;
+        bool towerAlive = false;
+        for (size_t t = 0; t < towers.size(); ++t)
+        {
+            if (towers[t]->SN == it->second)
+                towerAlive = true;
+        }
+        if (!towerAlive)
+            continue;   // 塔没了 → 本轮重新分配
+        if (towerWorkers[it->second] >= USR_FARMER_TOWER_PER_TARGET_MAX)
+            continue;
+        map<pair<int, int>, int>::const_iterator bad =
+            farmerEscortTowerBadForFarmer.find(
+                make_pair(it->first, it->second));
+        if (bad != farmerEscortTowerBadForFarmer.end() && g_frame < bad->second)
+            continue;
+        farmerToTower[it->first] = it->second;
+        towerWorkers[it->second]++;
+    }
+
+    // 再给还没有归属的农民按「塔的威胁顺序」补位，每次挑离该塔最近的那个。
+    for (size_t t = 0; t < towers.size(); ++t)
+    {
+        const int towerSN = towers[t]->SN;
+        while (towerWorkers[towerSN] < USR_FARMER_TOWER_PER_TARGET_MAX)
+        {
+            int bestSN = -1;
+            int bestDis2 = 1000000000;
+            for (const tagFarmer &f : info.farmers)
+            {
+                if (f.Blood <= 0 || f.FarmerSort != FARMERTYPE_FARMER)
+                    continue;
+                if (!IsFarmerEscorting(f.SN))
+                    continue;
+                if (farmerToTower.find(f.SN) != farmerToTower.end())
+                    continue;
+                map<pair<int, int>, int>::const_iterator bad =
+                    farmerEscortTowerBadForFarmer.find(
+                        make_pair(f.SN, towerSN));
+                if (bad != farmerEscortTowerBadForFarmer.end() &&
+                    g_frame < bad->second)
+                    continue;
+                const int d2 =
+                    BlockDis2(f.BlockDR, f.BlockUR, towers[t]->BlockDR,
+                              towers[t]->BlockUR);
+                if (d2 < bestDis2)
+                {
+                    bestDis2 = d2;
+                    bestSN = f.SN;
+                }
+            }
+            if (bestSN < 0)
+                break;   // 这个塔附近没有可选农民了
+            farmerToTower[bestSN] = towerSN;
+            towerWorkers[towerSN]++;
+        }
+    }
+
+    // ⑤ 超员兜底：有塔已满但仍有人没归属 → 全部压到威胁最大的那一座。
+    //    宁可超员排队，也不能让农民站着不动（超员的那些会在外围等着，
+    //    塔一死就补上）。
+    for (const tagFarmer &f : info.farmers)
+    {
+        if (f.Blood <= 0 || f.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+        if (!IsFarmerEscorting(f.SN))
+            continue;
+        if (farmerToTower.find(f.SN) != farmerToTower.end())
+            continue;
+        farmerToTower[f.SN] = towers[0]->SN;
+    }
+
+    // ⑥ 下发。
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+        if (!IsFarmerEscorting(farmer.SN))
+            continue;
+        map<int, int>::const_iterator pick = farmerToTower.find(farmer.SN);
+        if (pick == farmerToTower.end())
+            continue;
+        const int targetSN = pick->second;
+
+        // 卡住：走着但没进展，【且还没走到塔的跟前】。
+        //   · 不能用 NowState == ATTACKING 判卡死 —— 那正是我们要的状态；
+        //   · 必须排除「已经在塔跟前」：20 个农民打一座 2×2 的塔只有 8 个贴得上，
+        //     其余在周围排队等位置，位置自然不动，那不是在卡死。没有这条排除，
+        //     排队的会被逐个判成「这座塔走不到」而换塔，超员兜底又把它们压回来，
+        //     形成来回换目标的抖动。判据见 USR_FARMER_TOWER_ENGAGE_DIS2。
+        const pair<int, int> &tpos = towerPos[targetSN];
+        const bool stuck =
+            (farmer.NowState == HUMAN_STATE_WALKING &&
+             IsFarmerStuckWalking(farmer) &&
+             BlockDis2(farmer.BlockDR, farmer.BlockUR, tpos.first,
+                       tpos.second) > USR_FARMER_TOWER_ENGAGE_DIS2);
+
+        // 目标没变、且没卡住 → 什么都不做。这是「不打断攻击关系」的防线。
+        // 注意卡住这一条必须【排在前面判】：「关系已建立、但走不过去」正是
+        // 卡住的典型形态，先按 WorkObjectSN 去重的话这种农民永远走不到
+        // 下面的换塔逻辑，会一直挂在原地。
+        if (farmer.WorkObjectSN == targetSN && !stuck)
+        {
+            farmerEscortStuckTries[farmer.SN] = 0;
+            farmerEscortTowerTarget[farmer.SN] = targetSN;
+            continue;
+        }
+
+        // 节流。卡住的也要走同一个窗口 —— IsFarmerStuckWalking 一旦为真就
+        // 之后每帧都为真，不节流的话下面的重试计数会在 3 帧内被加满。
+        map<int, int>::const_iterator last =
+            farmerEscortLastOrderFrame.find(farmer.SN);
+        if (last != farmerEscortLastOrderFrame.end() &&
+            g_frame - last->second < USR_FARMER_TOWER_ORDER_INTERVAL)
+            continue;
+        farmerEscortLastOrderFrame[farmer.SN] = g_frame;
+
+        if (stuck)
+        {
+            int &tries = farmerEscortStuckTries[farmer.SN];
+            ++tries;
+            if (tries >= USR_FARMER_TOWER_STUCK_MAX_TRIES)
+            {
+                // 这座塔对这个农民走不到 → 拉黑一段时间，下一轮他会分到别的塔
+                tries = 0;
+                farmerEscortTowerBadForFarmer[make_pair(farmer.SN, targetSN)] =
+                    g_frame + USR_FARMER_TOWER_BLACKLIST_FRAMES;
+                farmerEscortTowerTarget.erase(farmer.SN);
+                char buf[192];
+                snprintf(buf, sizeof(buf),
+                         "[FARMESC-BAD] f=%d farmer=%d tower=%d tries=%d "
+                         "until=%d",
+                         g_frame, farmer.SN, targetSN,
+                         USR_FARMER_TOWER_STUCK_MAX_TRIES,
+                         g_frame + USR_FARMER_TOWER_BLACKLIST_FRAMES);
+                AiDebugLog(buf);
+            }
+            // 卡住时一律不重发同一条指令 —— 重发不会改变结果，
+            // 只会把刚建立的攻击关系又清一次。
+            continue;
+        }
+
+        farmerEscortStuckTries[farmer.SN] = 0;
+        CancelPendingGatherOrder(farmer.SN);
+        ai->HumanAction(farmer.SN, targetSN);
+        farmerEscortTowerTarget[farmer.SN] = targetSN;
+    }
+
+    // 每座塔的进度日志（每 500 帧）。blood 的下降速率用来反推「单次命中周期」——
+    // 那是本机制唯一无法从代码确定的量（动画帧数在 res.rcc 里），
+    // USR_FARMER_TOWER_PER_TARGET_MAX 等工期常量要靠它校准。
+    static int lastTowerLogFrame = USR_INVALID_FRAME;
+    if (lastTowerLogFrame == USR_INVALID_FRAME ||
+        g_frame - lastTowerLogFrame >= 500)
+    {
+        lastTowerLogFrame = g_frame;
+        for (size_t t = 0; t < towers.size(); ++t)
+        {
+            char buf[224];
+            snprintf(buf, sizeof(buf),
+                     "[FARMESC-TOWER] f=%d sn=%d blood=%d/%d pos=(%d,%d) "
+                     "attackers=%d disToPriest=%d",
+                     g_frame, towers[t]->SN, towers[t]->Blood,
+                     towers[t]->MaxBlood, towers[t]->BlockDR,
+                     towers[t]->BlockUR, towerWorkers[towers[t]->SN],
+                     BlockDis(towers[t]->BlockDR, towers[t]->BlockUR,
+                              priest.BlockDR, priest.BlockUR));
+            AiDebugLog(buf);
+        }
+    }
+}
+
+// 士兵分担箭塔火力：在农民拆塔阶段，同时把一部分军队派去攻击敌方箭塔。
+//
+// 【这一块要解决的真实故障】上一局实测：农民 20 个从 38000 帧出发，到 42001 帧
+// 只剩 1 个，而 5 座箭塔只清掉 2 座 —— 祭司孤立无援地冲进厂区，被剩下的塔集火
+// 打死（hp 57 → 0）。农民死得快有两个叠加原因：
+//   · 它们必须在塔的相邻格里（近战），而塔被敌方守军和建筑围着，挤不进去；
+//   · 敌方守军【会主动打农民】（enemyai.cpp:440-442 打 Farmer.back()），
+//     而农民只有 25 血。
+// 士兵能同时缓解这两点：射程 7（不必挤相邻格）、70 血（扛得住）、
+// 而且它们进了塔的 Defend 集合，塔的火力就从「只能打祭司」变成一群人里挑一个。
+static void AssignArmyTowerAssault(UsrAI *ai)
+{
+    if (farmerEscortStage != FARMER_ESCORT_STAGE_TOWER)
+        return;   // 只在农民拆塔阶段生效；集结阶段军队照常推基地
+
+    vector<const tagBuilding *> towers;
+    int anchorDR = 0;
+    int anchorUR = 0;
+    CollectEnemyArrowTowers(towers, anchorDR, anchorUR);
+    if (towers.empty())
+        return;   // 没塔可牵制（已清空 / 还没侦察到）
+
+    // 清理已经阵亡 / 已经不存在的军队的残留记录。
+    for (map<int, int>::iterator it = armyTowerTarget.begin();
+         it != armyTowerTarget.end();)
+    {
+        const tagArmy *army = FindMyArmyBySN(it->first);
+        if (army == nullptr || army->Blood <= 0 || !IsOffensiveArmy(*army))
+            it = armyTowerTarget.erase(it);
+        else
+            ++it;
+    }
+
+    map<int, int> towerWorkers;  // 塔 SN -> 本轮已分配士兵数
+    map<int, int> armyToTower;   // 军队 SN -> 本轮的塔 SN
+
+    // ① 先保留既有分配 —— 对同一目标重复 HumanAction 会重建关系、清零伤害进度。
+    for (map<int, int>::iterator it = armyTowerTarget.begin();
+         it != armyTowerTarget.end(); ++it)
+    {
+        bool towerAlive = false;
+        for (size_t t = 0; t < towers.size(); ++t)
+        {
+            if (towers[t]->SN == it->second)
+                towerAlive = true;
+        }
+        if (!towerAlive)
+            continue;
+        if (towerWorkers[it->second] >= USR_ARMY_TOWER_PER_TARGET_MAX)
+            continue;
+        armyToTower[it->first] = it->second;
+        towerWorkers[it->second]++;
+    }
+
+    // ② 给还没有归属的军队按「塔的威胁顺序」补位，每次挑离该塔最近的。
+    for (size_t t = 0; t < towers.size(); ++t)
+    {
+        const int towerSN = towers[t]->SN;
+        while (towerWorkers[towerSN] < USR_ARMY_TOWER_PER_TARGET_MAX)
+        {
+            int bestSN = -1;
+            int bestDis2 = 1000000000;
+            for (const tagArmy &army : info.armies)
+            {
+                if (!IsOffensiveArmy(army))
+                    continue;
+                if (armyToTower.find(army.SN) != armyToTower.end())
+                    continue;
+                const int d2 = BlockDis2(army.BlockDR, army.BlockUR,
+                                         towers[t]->BlockDR, towers[t]->BlockUR);
+                if (d2 < bestDis2)
+                {
+                    bestDis2 = d2;
+                    bestSN = army.SN;
+                }
+            }
+            if (bestSN < 0)
+                break;   // 这个塔附近已经没有可派的军队了
+            armyToTower[bestSN] = towerSN;
+            towerWorkers[towerSN]++;
+        }
+    }
+
+    // ③ 下发。军营里没有采集挂单要清，只需按节流下发 + 写目标锁。
+    for (const tagArmy &army : info.armies)
+    {
+        if (!IsOffensiveArmy(army))
+            continue;
+        map<int, int>::const_iterator pick = armyToTower.find(army.SN);
+        if (pick == armyToTower.end())
+            continue;
+        const int targetSN = pick->second;
+
+        // 目标没变 → 什么都不做（不打断攻击关系）。
+        if (army.WorkObjectSN == targetSN)
+        {
+            armyTowerTarget[army.SN] = targetSN;
+            continue;
+        }
+
+        map<int, int>::const_iterator last =
+            armyTowerLastOrderFrame.find(army.SN);
+        if (last != armyTowerLastOrderFrame.end() &&
+            g_frame - last->second < USR_ARMY_TOWER_ORDER_INTERVAL)
+            continue;
+
+        // 【先记进攻锁再下指令】AssignFieldSelfDefense 的下一个优先级会读这张锁
+        // （它的第 2 优先级就是 currentTarget），先写锁再下发，下一帧它就不会
+        // 把刚派去牵制的士兵又拉去打别的目标。军队在 info.armies 里，
+        // 所以这条锁是有效的（与农民不同，见 farmerEscortTowerTarget 的说明）。
+        currentTarget[army.SN] = targetSN;
+        ai->HumanAction(army.SN, targetSN);
+        armyTowerTarget[army.SN] = targetSN;
+        armyTowerLastOrderFrame[army.SN] = g_frame;
+    }
+}
+
+// 所有已知的敌方箭塔是不是都已经被牵制住了。
+//
+// 【这是祭司进场的前置条件】用户要求「确保每一个箭塔都被牵制住才可以让祭司
+// 进行转化」。判据取「有我方单位正以这座塔为工作目标」—— 关系一旦建立（不论
+// 是正在赶路还是正在攻击）就算数，因为：
+//   · 对农民：那意味着已经有人在这座塔上投入劳动，塔正在被打掉；
+//   · 对士兵：关系成立就意味着它已经在塔附近，会进塔的 Defend 集合并分走火力。
+//
+// 【为什么必须逐座查】只查「附近有没有人」是不够的：5 座塔可能分布在不同方向，
+// 祭司冲进去的路上只经过其中两座 —— 剩下那三座照样能打到它。要保证的是
+// 【每一座】都有人，而不是随便哪一座有人。
+static bool AllEnemyArrowTowersEngaged()
+{
+    for (const tagBuilding &tower : info.enemy_buildings)
+    {
+        if (tower.Blood <= 0 || tower.Type != BUILDING_ARROWTOWER)
+            continue;
+        bool engaged = false;
+        for (const tagFarmer &farmer : info.farmers)
+        {
+            if (farmer.Blood > 0 && farmer.WorkObjectSN == tower.SN)
+            {
+                engaged = true;
+                break;
+            }
+        }
+        if (!engaged)
+        {
+            for (const tagArmy &army : info.armies)
+            {
+                if (army.Blood > 0 && army.WorkObjectSN == tower.SN)
+                {
+                    engaged = true;
+                    break;
+                }
+            }
+        }
+        if (!engaged)
+            return false;
+    }
+    return true;
+}
+
+// 农民护送祭司的唯一入口（在 processData 里每帧调用一次）。
+static void ManageFarmerEscort(UsrAI *ai)
+{
+    // 先清理阵亡队员，下面的统计与日志才是准的。
+    CleanFarmerEscortRoster();
+    RecruitFarmersForEscort();
+
+    if (farmerEscortDuty.empty())
+        return;
+
+    // 祭司是唯一的获胜路径；他没了这局基本就结束，护送队跟着撤编。
+    const tagArmy *priest = FindPriest();
+    if (priest == nullptr)
+        return;
+
+    if (farmerEscortStage == FARMER_ESCORT_STAGE_BAND)
+    {
+        int kind = 0;
+        if (IsPriestSiegeCommitted(priest, kind))
+        {
+            farmerEscortStage = FARMER_ESCORT_STAGE_TOWER;   // 单向，永不回退
+            // 清掉集结状态：残留的落点记录会干扰拆塔分配（落点去重会看到旧订单）。
+            farmerEscortOrders.clear();
+            farmerEscortTowerTarget.clear();
+            farmerEscortStuckTries.clear();
+            farmerEscortLastOrderFrame.clear();
+
+            int anchorDR = 0;
+            int anchorUR = 0;
+            EstimateEnemySiegeAnchor(anchorDR, anchorUR);
+            int towerCount = 0;
+            for (const tagBuilding &b : info.enemy_buildings)
+            {
+                if (b.Blood > 0 && b.Type == BUILDING_ARROWTOWER)
+                    ++towerCount;
+            }
+            // 【这行是本机制的验收口径】kind = 1 关系确认 / 2 目的地越过带 / 3 兜底。
+            // 若实测全是 1，说明上面第 ③ 条没生效、农民必然迟到（阶段 B 的整个
+            // 时序论证见 IsPriestSiegeCommitted 的函数头）。
+            char buf[288];
+            snprintf(buf, sizeof(buf),
+                     "[FARMESC] f=%d STAGE=TOWER kind=%d priest=(%d,%d) hp=%d "
+                     "wo=%d dest=(%d,%d) anchor=(%d,%d) towers=%d",
+                     g_frame, kind, priest->BlockDR, priest->BlockUR,
+                     priest->Blood, priest->WorkObjectSN,
+                     int(priest->DR0 / double(BLOCKSIDELENGTH)),
+                     int(priest->UR0 / double(BLOCKSIDELENGTH)), anchorDR,
+                     anchorUR, towerCount);
+            AiDebugLog(buf);
+        }
+    }
+
+    if (farmerEscortStage == FARMER_ESCORT_STAGE_TOWER)
+    {
+        ManageFarmerEscortTowers(ai, *priest);
+        // 士兵分担火力排在农民之后：两者共用同一份「还剩哪些塔」的列表
+        // （CollectEnemyArrowTowers），农民先把人铺上去，士兵再补位。
+        AssignArmyTowerAssault(ai);
+    }
+    else
+    {
+        ManageFarmerEscortBand(ai, *priest);
+    }
+
+    // 状态日志（每 500 帧）。n 单调下降就是「农民在被消耗」—— 它是
+    // 「农民在路上被吃光」这个风险唯一的早期信号；pd 用来确认「40 格以外」
+    // 这条不变量（应当稳定在 34~46）。
+    static int lastEscortLogFrame = USR_INVALID_FRAME;
+    if (lastEscortLogFrame == USR_INVALID_FRAME ||
+        g_frame - lastEscortLogFrame >= 500)
+    {
+        lastEscortLogFrame = g_frame;
+        int alive = 0;
+        int arrived = 0;
+        int attacking = 0;
+        for (const tagFarmer &farmer : info.farmers)
+        {
+            if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+                continue;
+            if (!IsFarmerEscorting(farmer.SN))
+                continue;
+            ++alive;
+            if (farmer.NowState == HUMAN_STATE_ATTACKING)
+                ++attacking;
+            else if (farmer.NowState == HUMAN_STATE_IDLE)
+                ++arrived;
+        }
+        int pd = -1;
+        int anchorDR = 0;
+        int anchorUR = 0;
+        if (EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+            pd = BlockDis(priest->BlockDR, priest->BlockUR, anchorDR, anchorUR);
+        char buf[224];
+        snprintf(buf, sizeof(buf),
+                 "[FARMESC] f=%d stage=%d n=%d arrived=%d attacking=%d "
+                 "priest=(%d,%d) pd=%d hp=%d",
+                 g_frame, farmerEscortStage, alive, arrived, attacking,
+                 priest->BlockDR, priest->BlockUR, pd, priest->Blood);
+        AiDebugLog(buf);
     }
 }
 
@@ -7714,6 +8902,10 @@ static void KeepHuntersOnLiveGazelles(UsrAI *ai)
     {
         if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
             continue;
+        // 护送祭司的农民不归打猎管（他的工作对象是箭塔，本来也进不了猎物群判断，
+        // 这一句是把意图写明，免得日后改了 gazelleClusterOf 的口径时被误伤）。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
         if (farmer.WorkObjectSN < 0)
             continue;
         // 手上就是活瞪羚 → 正在猎杀，不管。
@@ -8062,9 +9254,15 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   if (info.Human_Num + 2 < info.Human_MaxNum)
     return;
 
+  // 【只数经济里的农民】护送祭司的农民已经不在采集，把他们算进来会让
+  // 「还剩 5 个维持采集」这条门槛虚高；而且他们一旦被选去自毁，等于在农民
+  // 赶路的 ~1500 帧里把突击队解散掉 —— 自毁是不可逆的，不能碰 latched 的编制。
+  // 副作用（已知且接受）：农民全部投入护送之后这条通道自然失效，人口被占满、
+  // 军队无法补充。这是「全部农民一起上战场」这个选择的直接代价。
   int farmerCount = 0;
   for (const tagFarmer &farmer : info.farmers) {
-    if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER)
+    if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER &&
+        !IsFarmerEscorting(farmer.SN))
       farmerCount++;
   }
   if (farmerCount <= 5) // 保留 5 个农民维持采集
@@ -8080,6 +9278,8 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   int bestDis2 = 1000000000;
   for (const tagFarmer &farmer : info.farmers) {
     if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+      continue;
+    if (IsFarmerEscorting(farmer.SN))
       continue;
     const int dis2 = BlockDis2(farmer.BlockDR, farmer.BlockUR, center->BlockDR,
                                center->BlockUR);
@@ -8298,6 +9498,15 @@ void UsrAI::processData()
     // 必须排在所有派工/抢修逻辑之前 —— 否则位置跟踪滞后，会把正常行进的
     // 农民误判成卡死。
     UpdateFarmerWatch();
+    // 【农民护送祭司】必须排在 ManageEconomyAndProduction【之前】：征召名单
+    // 要在同一帧被 TryAssignIdleFarmer 看到 —— 排在它后面的话，刚被拉走的农民
+    // 会先领到一条采集指令，我们再花一条 HumanAction 去覆盖它，白走一次
+    // addRelation → suspendRelation（清路径），而且那条 pendingGatherOrders
+    // 会残留到下一帧（ProcessPendingGatherOrders 本帧已经跑过了）。
+    // 必须排在 ManagePriest【之后】：它读祭司本帧的 WorkObjectSN / DR0 / UR0
+    // 判阶段 B。排在 UpdateFarmerWatch【之后】：IsFarmerStuckWalking 依赖
+    // 它刷新的位置记录，否则会把正常行进的农民误判成卡死。
+    ManageFarmerEscort(this);
     ManageEconomyAndProduction(this);
     // 猎手在整群清完之前只杀不采：引擎在猎物死后会自动把他跳到采集，
     // 这里做事后纠正，把他拉回群里还活着的瞪羚。
