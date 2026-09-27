@@ -169,6 +169,22 @@ static const int USR_PRIEST_SIEGE_PROBE_MIN = 3;
 // 转换的位置（祭司转建筑的判据是「贴邻 + 已建成」，见 Core_CondiFunc.cpp），
 // 不需要我们替它算精确落点，也就绕开了「落点被自己人占住」这件事。
 static const int USR_PRIEST_SIEGE_PICK_DISTANCE = 40;
+
+// 祭司进厂前，攻城厂这个半径内的箭塔必须【已被摧毁】，而不是"被牵制"。
+//
+// 【为什么"被牵制"不够】门控最初写的是「每座塔都有人以它为工作目标」，
+// 但那只是"有人在打它"，塔照样开火。实测致命一局：
+//   [FARMESC-TOWER] f=41285 sn=11099 blood=15/125 disToPriest=3
+//   [FARMESC-TOWER] f=41285 sn=11091 blood=34/125 disToPriest=4
+//   [FARMESC-TOWER] f=41285 sn=11097 blood=15/125 disToPriest=9
+// 三座塔（15/15/34 血）离祭司只有 3~9 格、全部在射程 7 之内，一齐开火 ——
+// 祭司那时刚进入转换状态（convAlive=1 convB=1），200 帧内从 100 血被打到 13。
+// 而同一时刻 near10=0（10 格内没有敌方军队），说明这份伤害跟敌方部队无关。
+//
+// 【半径为什么是 10】塔射程 7（config.json:261）；祭司贴到厂边时自己在厂的
+// 2 格内，所以「厂 10 格内的塔」正好覆盖"够得到祭司"的全部塔，再留 3 格余量
+// 应对贴邻判据的取整。
+static const int USR_PRIEST_SIEGE_TOWER_CLEAR = 10;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
 //
@@ -760,6 +776,10 @@ static const tagBuilding *FindEnemySiegeBuilding();
 // 所有已知敌方箭塔是否都被牵制住了（每个塔都有我方单位以它为工作目标）。
 // 定义在农民护送那一段，但 ManagePriest 的「走向攻城厂」要用它做进门条件。
 static bool AllEnemyArrowTowersEngaged();
+// 攻城厂附近的箭塔是否【已被摧毁】—— 不只是"被牵制"。见它的定义处的说明。
+static bool SiegeTowersCleared();
+// 祭司现在可不可以冲向攻城厂（冲厂 / 转换 / 驻留三条分支共用）。见定义处。
+static bool CanPriestApproachSiege();
 // 敌方基地锚点：侦察到就用真的，否则用「我方市镇中心的地图对极点」估。
 // 定义在 ManageStandoff 之前，但 ManagePriest 的禁区判定也要用它。
 static bool EstimateEnemySiegeAnchor(int &anchorDR, int &anchorUR);
@@ -5615,20 +5635,20 @@ static void ManagePriest(UsrAI *ai)
             char buf[288];
             snprintf(buf, sizeof(buf),
                      "[SIEGE] f=%d priest=(%d,%d) hp=%d visibleEnemy=%d wo=%d "
-                     "allEngaged=%d siegeSeen=%d siege=(%d,%d) dis2=%d "
-                     "anchor=(%d,%d)",
+                     "allEngaged=%d towersCleared=%d siegeSeen=%d "
+                     "siege=(%d,%d) dis2=%d anchor=(%d,%d)",
                      g_frame, priest->BlockDR, priest->BlockUR, priest->Blood,
                      HasVisibleEnemyArmy() ? 1 : 0, priest->WorkObjectSN,
                      AllEnemyArrowTowersEngaged() ? 1 : 0,
-                     seen != nullptr ? 1 : 0, seen != nullptr ? seen->BlockDR : -1,
+                     SiegeTowersCleared() ? 1 : 0, seen != nullptr ? 1 : 0,
+                     seen != nullptr ? seen->BlockDR : -1,
                      seen != nullptr ? seen->BlockUR : -1, seenDis2, anchorDR,
                      anchorUR);
             AiDebugLog(buf);
         }
     }
 
-    if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !HasVisibleEnemyArmy() &&
-        priest->WorkObjectSN == -1 && AllEnemyArrowTowersEngaged())
+    if (CanPriestApproachSiege() && priest->WorkObjectSN == -1)
     {
         const tagBuilding *siegeTarget = FindEnemySiegeBuilding();
         if (siegeTarget != nullptr)
@@ -5792,8 +5812,7 @@ static void ManagePriest(UsrAI *ai)
             // 自己掐断获胜路径。朝外推原本的作用只是「别闯进敌方基地送死」，
             // 而「会不会送死」已经由那三个条件把关了。
             const bool mayApproachSiege =
-                g_frame >= USR_PRIEST_PASSIVE_FRAME &&
-                !HasVisibleEnemyArmy() && AllEnemyArrowTowersEngaged() &&
+                CanPriestApproachSiege() &&
                 FindEnemySiegeBuilding() != nullptr;
             if ((dis2 < nearRadius * nearRadius && !mayApproachSiege) ||
                 dis2 > farRadius * farRadius)
@@ -6213,8 +6232,12 @@ static void ManagePriest(UsrAI *ai)
             // 视野里没有敌兵、或已进入总攻阶段（不再转士兵）→ 解除锁定。
             priestConversionLockSN = -1;
         }
+        // 【转换分支同样要过进厂门控】原先这里只判「过了 30000 帧」，
+        // 于是它可以绕过冲厂分支的那套门控直接对厂建立关系、把祭司带进塔的
+        // 火力网 —— 实测致命一局就是这样：祭司在 convB=1（正在转换建筑）的
+        // 状态下被三座 15/15/34 血的箭塔从 100 打到 13。
         const tagBuilding *buildingTarget = nullptr;
-        if (!armyTarget && g_frame >= USR_PRIEST_PASSIVE_FRAME)
+        if (!armyTarget && CanPriestApproachSiege())
             buildingTarget = FindEnemySiege(*priest);
         {
             const int targetSN = armyTarget
@@ -7999,6 +8022,55 @@ static bool AllEnemyArrowTowersEngaged()
             return false;
     }
     return true;
+}
+
+// 攻城厂附近的箭塔是否都已【被摧毁】（不只是被牵制，理由见
+// USR_PRIEST_SIEGE_TOWER_CLEAR 的说明：被牵制的塔照样开火，而祭司
+// 100 血、防御 0，扛不住几轮）。
+//
+// 已摧毁的塔 Blood<=0、根本不会进下面的循环，所以判据就是
+// 「厂周围这个半径内没有【活着的】箭塔」。
+//
+// 【拿不到厂位置时不设限】EstimateEnemySiegeAnchor 给不出锚点时（没有我方
+// 中心、也没侦察到任何敌方建筑）无从判断远近，这时放行 —— 否则开局就会把
+// 祭司永久锁在门外。
+static bool SiegeTowersCleared()
+{
+    int siegeDR = 0;
+    int siegeUR = 0;
+    if (!EstimateEnemySiegeAnchor(siegeDR, siegeUR))
+        return true;
+    const int r2 =
+        USR_PRIEST_SIEGE_TOWER_CLEAR * USR_PRIEST_SIEGE_TOWER_CLEAR;
+    for (const tagBuilding &b : info.enemy_buildings)
+    {
+        if (b.Blood <= 0 || b.Type != BUILDING_ARROWTOWER)
+            continue;
+        if (BlockDis2(b.BlockDR, b.BlockUR, siegeDR, siegeUR) <= r2)
+            return false;   // 厂旁边还有活着的塔
+    }
+    return true;
+}
+
+// 祭司现在可不可以冲向攻城厂 —— 进厂的前置条件，由「冲厂」与「转换」两条
+// 分支共用（两者原先各写各的，于是转换分支能绕过冲厂分支的门控直接建立关系，
+// 实测祭司就是这样在塔还活着的时候冲进去转换、被打死的）。
+//
+// 四条同时成立才放行：
+//   ① 过了 USR_PRIEST_PASSIVE_FRAME —— 那之前军队还没成型，押上祭司是亏的；
+//   ② 视野里没有敌方军队 —— 有敌人时出门就是送（原设计）；
+//   ③ 所有已知箭塔都被牵制 —— 每座塔都有人在打，它们才不会专心招呼祭司；
+//   ④ 厂周围 USR_PRIEST_SIEGE_TOWER_CLEAR 格内的箭塔【已被摧毁】——
+//      ③ 只保证"有人在打它"，塔照样开火，而祭司 100 血、防御 0，扛不住几轮。
+static bool CanPriestApproachSiege()
+{
+    if (g_frame < USR_PRIEST_PASSIVE_FRAME)
+        return false;
+    if (HasVisibleEnemyArmy())
+        return false;
+    if (!AllEnemyArrowTowersEngaged())
+        return false;
+    return SiegeTowersCleared();
 }
 
 // 农民护送祭司的唯一入口（在 processData 里每帧调用一次）。
