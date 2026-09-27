@@ -309,6 +309,22 @@ static const int USR_SCOUT_RECON_FRAME = 33000;
 // 与 USR_SCOUT_RECON_FRAME 同帧是有意的：专职侦测兵开始工作时，
 // 军队也刚好具备出击的条件。
 static const int USR_OFFENSIVE_FRAME = 33000;
+// 军队开始向【地图中间】集结的帧号。取 30000 —— 与侦察骑兵出厂
+// （USR_SCOUT_FIRST_FRAME）、祭司「保存实力」（USR_PRIEST_PASSIVE_FRAME）同帧，
+// 三者都是「后期开始」的信号。
+//
+// 【为什么要有集结这一步】USR_OFFENSIVE_FRAME 一到，ManageOffensiveArmy 会让
+// 全军直奔目标建筑。而部队是零散生产出来的、散在基地各处，一起出发会拉成一条
+// 长线，先到的被守军逐个吃掉。先在地图中心（双方基地之间的中点，四张图的敌方
+// 基地都在我方市镇中心的对角线上）把队伍收拢，到点再整体压上。
+static const int USR_ARMY_RALLY_FRAME = 30000;
+// 集结指令的下发间隔。取 120：基地到地图中心约 60~70 格，按 HUMAN_SPEED
+// 2.236 走完约 1000 帧；这个间隔够走一段，又不至于频繁重发（每次 HumanMove
+// 都会经 suspendRelation 清一次路径）。
+static const int USR_ARMY_RALLY_ORDER_INTERVAL = 120;
+// 离地图中心的距离平方在这个值以内就算到位（10 格 = 100）。
+// 不取更小的值：部队走到中心附近会自然散开，要求太严会让他们在原地反复微调。
+static const int USR_ARMY_RALLY_ARRIVED_DIS2 = 100;
 // 农民自卫的启动帧。此前的农民遇袭一律靠撤离，不还手 —— 早期被零星骚扰
 // 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
 // 再让农民挨打时就地反击。
@@ -837,6 +853,8 @@ static int lastPriestOrderFrame = USR_INVALID_FRAME;
 // 主力开始总攻后的祭司跟随门控状态。
 static bool offensiveAttackStarted = false;
 static int offensiveAttackStartFrame = USR_INVALID_FRAME;
+// 上一次下发「向地图中间集结」指令的帧。见 ManageOffensiveArmy 开头那一段。
+static int lastArmyRallyFrame = USR_INVALID_FRAME;
 // 祭司最近一次确认安全的起始游戏帧。
 static int priestSafeSinceFrame = USR_INVALID_FRAME;
 // 当前祭司移动指令的异步指令 ID，-1 表示没有等待中的指令。
@@ -2498,6 +2516,10 @@ static void ProcessPendingGatherOrders()
         // 敌人 SN 是跨局复用的，累计集合不清会让新对局一开局就以为「全见过」。
         enemyArmySeenSN.clear();
         lastKiteFrame = USR_INVALID_FRAME;
+        // 帧号会随新对局回退，集结的节流时间戳必须跟着失效 ——
+        // 否则新局的 30000 帧会减去上一局的帧号、算出负数，条件永不成立，
+        // 集结一次都不下发。
+        lastArmyRallyFrame = USR_INVALID_FRAME;
         standoffRetreatUntil.clear();
         standoffRetreatFromDis2.clear();
         badBuildSpot.clear();
@@ -9210,6 +9232,40 @@ static int PickEscortTowerForArmy(const tagArmy &army,
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
+  // 【集结阶段：USR_ARMY_RALLY_FRAME(30000) 之后，先全军到地图中间收拢】
+  //
+  // 地图中心是双方基地之间的中点（四张图的敌方基地都在我方市镇中心的对角线上，
+  // 见 EstimateEnemySiegeAnchor 的实测数据）。先在那儿把队伍收齐，等
+  // USR_OFFENSIVE_FRAME(33000) 再整体压上去 —— 部队是零散生产出来的、平时散在
+  // 基地各处，直接出发会拉成一条长线，先到的被守军逐个吃掉。
+  //
+  // 【为什么放在这里、不放进下面的进攻分支】下面第一行就是
+  // `if (g_frame < USR_OFFENSIVE_FRAME) return;`，集结必须发生在它之前。
+  // 同时也排在那些兵力/科技门控之前：集结只是把人往中间挪，不需要满足
+  // 「车轮科技完成」「兵力 ≥ 8」这些出击条件 —— 早点开始走，到点正好能压上。
+  if (g_frame >= USR_ARMY_RALLY_FRAME && g_frame < USR_OFFENSIVE_FRAME)
+  {
+    if (lastArmyRallyFrame == USR_INVALID_FRAME ||
+        g_frame - lastArmyRallyFrame >= USR_ARMY_RALLY_ORDER_INTERVAL)
+    {
+      lastArmyRallyFrame = g_frame;
+      const int cx = MAP_L / 2;
+      const int cy = MAP_U / 2;
+      for (const tagArmy &army : info.armies)
+      {
+        if (!IsOffensiveArmy(army))
+          continue;   // 祭司与侦察兵各有自己的调度
+        // 已经在中心附近 → 不动（重复下发 HumanMove 会清路径）
+        if (BlockDis2(army.BlockDR, army.BlockUR, cx, cy) <=
+            USR_ARMY_RALLY_ARRIVED_DIS2)
+          continue;
+        ai->HumanMove(army.SN, (cx + 0.5) * double(BLOCKSIDELENGTH),
+                      (cy + 0.5) * double(BLOCKSIDELENGTH));
+      }
+    }
+    return;
+  }
+
   // 进攻时机：过了 USR_OFFENSIVE_FRAME（33000）之后。此前军队只做接敌自卫
   // —— AssignFieldSelfDefense 是「看到谁打谁」，从不主动推进。
   if (g_frame < USR_OFFENSIVE_FRAME)
