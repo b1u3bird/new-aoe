@@ -6507,69 +6507,106 @@ static bool IsScoutFrontierUsable(int blockDR, int blockUR)
     return true;
 }
 
-// 【朝敌方锚点方向加权 —— 优先侦察对角线】
+// 这个前沿点是不是在「朝敌方锚点的那一侧」。
 //
-// 需求是「侦察骑兵优先侦察对角线」。四张图的敌方基地都在我方市镇中心的对角线上
-// （实测偏移见 EstimateEnemySiegeAnchor 的注释：-66,+64 / +73,-65 / -57,-83 /
-// +64,-58），所以朝那个方向探最有可能最早发现敌方基地与攻城厂。
+// 【为什么用中垂线判据而不是角度】「对角线方向」本质上就是「离敌方基地比离
+// 我方基地更近的那半张图」，而以中心↔锚点的中垂线来切，恰恰等价于「与
+// 中心→锚点方向的夹角在 ±90° 内」。好处是全程只有平方距离比较，不必做三角函数，
+// 也就没有整数溢出的风险（坐标最大 128，点积的平方项会顶到 int 上限）。
+static bool IsTowardEnemyAnchor(int blockDR, int blockUR, int anchorDR,
+                                int anchorUR, int centerDR, int centerUR)
+{
+    if (centerDR < 0)
+        return true;   // 拿不到我方中心就不设限
+    return BlockDis2(blockDR, blockUR, anchorDR, anchorUR) <
+           BlockDis2(blockDR, blockUR, centerDR, centerUR);
+}
+
+// 【优先侦察对角线】
+//
+// 需求是「侦察骑兵优先侦察对角线」，而且是【硬性优先】：不把通往敌方基地的
+// 那一侧探完，就不许去探别的方向。
+//
+// 四张图的敌方基地都在我方市镇中心的对角线上（实测偏移见 EstimateEnemySiegeAnchor
+// 的注释：-66,+64 / +73,-65 / -57,-83 / +64,-58），所以朝那个方向探最有可能最早
+// 发现敌方基地与攻城厂。
 //
 // 【为什么这件事是前置】攻城厂必须【已经进 info.enemy_buildings】，祭司才能转换
 // 它 —— 因为转换指令要的是它的 SN，而 SN 只能从那份已侦察列表里拿。侦察兵不去，
 // 厂就永远不出现在列表里，祭司整条获胜路径都无从执行（实测有一局祭司站在敌方
 // 锚点旁满血待命 1500 帧、一次转换都没发起过）。
 //
-// 【锚点为什么在循环外算一次】EstimateEnemySiegeAnchor 内部要遍历敌方建筑列表，
-// 放进 32×32 的双重循环里会白跑上千次。
+// 【为什么是两遍扫描而不是给方向加权】先前试过把「到锚点的距离」按约十分之一的
+// 权重并进评分，效果是侦察兵仍然会在别的方向花掉大量时间 —— 加权只改变同分时的
+// 偏好，压不过「就近」这一项。要做成「探完对角线才探别的」，就必须把它变成
+// 筛选条件，而不是评分项：第一遍只在中垂线靠敌那侧找，一个都没有（那一侧真探完了）
+// 才放开全部。
 //
-// 【权重为什么取这个量级】原评分是 -dis2*10（就近贪婪），最坏 130²*10 ≈ 17 万；
-// 朝向项按同样的平方距离直接减（最坏 130² ≈ 1.7 万，约为就近项的十分之一）。
-// 这样「先探近处」仍然成立，但同等距离下朝敌方那一侧的点会胜出 ——
-// 效果是侦察兵一路朝对角线外扩，而不是围着基地四周均匀绕圈。
+// 【锚点与中心为什么在循环外各算一次】EstimateEnemySiegeAnchor 内部要遍历敌方
+// 建筑列表、FindCenter 也要遍历，放进 32×32 的双重循环里会白跑上千次。
 static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR,
                                   int &targetUR)
 {
     int anchorDR = 0;
     int anchorUR = 0;
     const bool haveAnchor = EstimateEnemySiegeAnchor(anchorDR, anchorUR);
+    const tagBuilding *center = FindCenter();
+    const int centerDR = center != nullptr ? center->BlockDR : -1;
+    const int centerUR = center != nullptr ? center->BlockUR : -1;
 
-    int bestScore = -2000000000;
-    bool found = false;
-    for (int dr = 2; dr < MAP_L - 2; ++dr)
+    for (int pass = 0; pass < 2; ++pass)
     {
-        for (int ur = 2; ur < MAP_U - 2; ++ur)
-        {
-            if (!IsScoutFrontierUsable(dr, ur))
-                continue;
+        // pass 0：只在中垂线靠敌那侧找。没有锚点就跳过这一遍（无从判断方向）。
+        const bool enemySideOnly = (pass == 0 && haveAnchor);
 
-            const pair<int, int> block = {dr, ur};
-            const int recentPenalty = scoutFrontierVisitFrame.count(block) &&
-                                              g_frame - scoutFrontierVisitFrame[block] < 2400
-                                          ? 1800
-                                          : 0;
-            const int distance = BlockDis2(scout.BlockDR, scout.BlockUR,
-                                           dr, ur);
-            int occupiedPenalty = 0;
-            for (const auto &other : info.armies)
+        int bestScore = -2000000000;
+        bool found = false;
+        for (int dr = 2; dr < MAP_L - 2; ++dr)
+        {
+            for (int ur = 2; ur < MAP_U - 2; ++ur)
             {
-                if (other.SN != scout.SN && other.Sort == AT_SCOUT &&
-                    other.Blood > 0 && other.BlockDR == dr &&
-                    other.BlockUR == ur)
-                    occupiedPenalty += 2500;
-            }
-            const int toAnchor =
-                haveAnchor ? BlockDis2(dr, ur, anchorDR, anchorUR) : 0;
-            const int score = -distance * 10 - toAnchor - recentPenalty -
-                              occupiedPenalty;
-            if (!found || score > bestScore)
-            {
-                bestScore = score;
-                targetDR = dr;
-                targetUR = ur;
-                found = true;
+                if (!IsScoutFrontierUsable(dr, ur))
+                    continue;
+                if (enemySideOnly &&
+                    !IsTowardEnemyAnchor(dr, ur, anchorDR, anchorUR, centerDR,
+                                         centerUR))
+                    continue;
+
+                const pair<int, int> block = {dr, ur};
+                const int recentPenalty = scoutFrontierVisitFrame.count(block) &&
+                                                  g_frame - scoutFrontierVisitFrame[block] < 2400
+                                              ? 1800
+                                              : 0;
+                const int distance = BlockDis2(scout.BlockDR, scout.BlockUR,
+                                               dr, ur);
+                int occupiedPenalty = 0;
+                for (const auto &other : info.armies)
+                {
+                    if (other.SN != scout.SN && other.Sort == AT_SCOUT &&
+                        other.Blood > 0 && other.BlockDR == dr &&
+                        other.BlockUR == ur)
+                        occupiedPenalty += 2500;
+                }
+                // 同一遍之内仍然是「就近」（-dis2*10）为主，再按到锚点的远近
+                // 做次序微调 —— 于是靠敌那一侧是从近到远一路推过去的。
+                const int toAnchor =
+                    haveAnchor ? BlockDis2(dr, ur, anchorDR, anchorUR) : 0;
+                const int score = -distance * 10 - toAnchor - recentPenalty -
+                                  occupiedPenalty;
+                if (!found || score > bestScore)
+                {
+                    bestScore = score;
+                    targetDR = dr;
+                    targetUR = ur;
+                    found = true;
+                }
             }
         }
+        if (found)
+            return true;
+        // pass 0 一个都没找到 → 靠敌那侧已经探完，落进 pass 1 放开全部。
     }
-    return found;
+    return false;
 }
 static int FindScoutThreatSN(const tagArmy &scout)
 {
