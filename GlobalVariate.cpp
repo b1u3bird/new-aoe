@@ -728,7 +728,15 @@ void ParseArguments(const QApplication&app){
          "record the instruction output file",
         "fileName"
        );
-    QList<QCommandLineOption>options={option0,option1,option2,option3,option4,option5,option6,option7};
+    // 【--softgl：强制软件渲染，并行跑多个实例时用】
+    // 真正生效的地方在 main.cpp —— Qt 要求渲染后端必须在 QApplication
+    // 构造【之前】定下，所以那边手工扫了一遍 argv。这里注册它只有一个目的：
+    // 不让下面那句 parser.process() 把它当成未知选项、打印错误并 exit(1)。
+    QCommandLineOption option8(
+        QStringList()<<"softgl",
+         "force software rendering (for running multiple instances in parallel)"
+       );
+    QList<QCommandLineOption>options={option0,option1,option2,option3,option4,option5,option6,option7,option8};
     parser.addOptions(options);
 
     // QCommandLineParser会把缺少值的-map直接当成参数错误并结束程序。

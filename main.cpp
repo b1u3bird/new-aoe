@@ -7,12 +7,37 @@
 int main(int argc, char* argv[])
 {
 
+    // 【窗口属性必须在 QApplication 构造之前设置】
+    // Qt 在 QApplication 建立时就定下了渲染后端，构造之后再 setAttribute 是
+    // 无效的 —— 下面那句 QApplication::setAttribute(Qt::AA_UseDesktopOpenGL)
+    // 写在构造【之后】，所以它从加进来那天起就没生效过。
+    //
+    // 【--softgl：强制软件渲染，给并行跑多个实例用】
+    // 多个游戏实例并行时，几个 OpenGL 窗口争抢同一个 GPU 上下文，被遮挡的
+    // 那些会停止重绘、整块变黑（实测单实例正常，只要并行就黑 —— 2 个和 4 个
+    // 都一样）。软件渲染不走 GPU，各画各的。代价是渲染改由 CPU 承担、会慢些。
+    //
+    // 这里不能用 QCommandLineParser：它要求先有 QApplication，而这些属性
+    // 必须在 QApplication 之前设置。所以手工扫一遍 argv。
+    // 不加这个参数时行为与改动前完全一致，手动玩不受影响。
+    bool softGL = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (qstrcmp(argv[i], "--softgl") == 0)
+        {
+            softGL = true;
+            break;
+        }
+    }
+    if (softGL)
+        QApplication::setAttribute(Qt::AA_UseSoftwareOpenGL);
+
     //
     QApplication app(argc, argv);
     Logger::init(Logger::LogLevel::Debug);
     //解析参数
     ParseArguments(app);
-    //开启GPU加速
+    //开启GPU加速（注意：设在 QApplication 构造之后，按 Qt 的规则无效）
     QApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
     //创建网络插件
     NetworkManager=new NetworkPlugin(&app);
