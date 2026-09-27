@@ -5570,6 +5570,44 @@ static void ManagePriest(UsrAI *ai)
     // 注意它只要求「被牵制」（有人正以该塔为工作目标），不要求「被拆掉」——
     // 拆一座 125 血的塔要 125 次命中，等它塌完太久；而只要每座塔都有人缠着，
     // 塔的火力就已经分散、祭司挨打的概率就下来了。
+    // 【诊断：祭司为什么不往厂走】这一段是整条获胜路径的入口，而它有三道门
+    // （视野无敌兵 / 无工作关系 / 所有箭塔被牵制）外加「厂是否已侦察到」。
+    //
+    // 【为什么必须加】此前日志里能看到的只有 [CONVBLOCK]（那是「有目标却不发起
+    // 转换」），而「根本走不到转换那一步」是完全空白的 —— 实测有一局祭司停在
+    // (14,7)（离锚点曼哈顿 6 格、满血、视野内无敌人）整整 500 帧没动，
+    // [CONV] 与 [CONVBLOCK] 都没有输出，只能靠猜是三道门里的哪一道关着，
+    // 还是"厂边的落点根本走不到"。
+    {
+        static int lastSiegeLogFrame = USR_INVALID_FRAME;
+        if (lastSiegeLogFrame == USR_INVALID_FRAME ||
+            g_frame - lastSiegeLogFrame >= 500)
+        {
+            lastSiegeLogFrame = g_frame;
+            const tagBuilding *seen = FindEnemySiegeBuilding();
+            int anchorDR = 0;
+            int anchorUR = 0;
+            EstimateEnemySiegeAnchor(anchorDR, anchorUR);
+            const int seenDis2 =
+                seen != nullptr
+                    ? BlockDis2(priest->BlockDR, priest->BlockUR, seen->BlockDR,
+                                seen->BlockUR)
+                    : -1;
+            char buf[288];
+            snprintf(buf, sizeof(buf),
+                     "[SIEGE] f=%d priest=(%d,%d) hp=%d visibleEnemy=%d wo=%d "
+                     "allEngaged=%d siegeSeen=%d siege=(%d,%d) dis2=%d "
+                     "anchor=(%d,%d)",
+                     g_frame, priest->BlockDR, priest->BlockUR, priest->Blood,
+                     HasVisibleEnemyArmy() ? 1 : 0, priest->WorkObjectSN,
+                     AllEnemyArrowTowersEngaged() ? 1 : 0,
+                     seen != nullptr ? 1 : 0, seen != nullptr ? seen->BlockDR : -1,
+                     seen != nullptr ? seen->BlockUR : -1, seenDis2, anchorDR,
+                     anchorUR);
+            AiDebugLog(buf);
+        }
+    }
+
     if (g_frame >= USR_PRIEST_PASSIVE_FRAME && !HasVisibleEnemyArmy() &&
         priest->WorkObjectSN == -1 && AllEnemyArrowTowersEngaged())
     {
@@ -5613,6 +5651,33 @@ static void ManagePriest(UsrAI *ai)
                             goalDR = cx;
                             goalUR = cy;
                         }
+                    }
+                }
+                // 【诊断：厂边的落点选出来没有】goalDR < 0 表示厂周围一圈全是
+                // 不可站（海里 / 被建筑占）或不可达的格子 —— 那时代码不会下发任何
+                // 移动指令，祭司就永远钉在原地（这正是"满血站着不动"的一种成因，
+                // 而此前它在日志里完全没有痕迹）。
+                {
+                    static int lastGoalLogFrame = USR_INVALID_FRAME;
+                    if (lastGoalLogFrame == USR_INVALID_FRAME ||
+                        g_frame - lastGoalLogFrame >= 500)
+                    {
+                        lastGoalLogFrame = g_frame;
+                        const int reissue =
+                            goalDR >= 0
+                                ? (ShouldReissuePriestMove(priest, goalDR,
+                                                           goalUR)
+                                       ? 1
+                                       : 0)
+                                : -1;
+                        char buf[256];
+                        snprintf(buf, sizeof(buf),
+                                 "[SIEGE] f=%d goal=(%d,%d) reissue=%d dis2=%d "
+                                 "siege=(%d,%d) priest=(%d,%d)",
+                                 g_frame, goalDR, goalUR, reissue, siegeDis2,
+                                 siegeTarget->BlockDR, siegeTarget->BlockUR,
+                                 priest->BlockDR, priest->BlockUR);
+                        AiDebugLog(buf);
                     }
                 }
                 if (goalDR >= 0 &&
