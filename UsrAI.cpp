@@ -436,6 +436,14 @@ static const int USR_FARMER_TOWER_FALLBACK_FRAME = 42000;
 // 取 8：明显小于军队的协防半径 USR_FIELD_ASSIST_RADIUS(12) —— 军队能跑，
 // 农民跑不起。
 static const int USR_FARMER_PRIEST_HELP_RADIUS = 8;
+// 自毁腾人口时至少保留的农民数（按【全部】农民算，含护送队）。
+//
+// 【为什么按总数算】原先这条门槛数的是「非护送农民」，那是个错误的口径：
+// 护送启动后非护送农民本来就少（RECRUIT 常常只征到 16 个，剩 4 个 + 中心
+// 补产的），于是「还剩 5 个」这个判断反而更容易越线，把新农民当多余的清掉。
+// 用总数才是"还剩多少人在干活"的正确口径；选人自毁时再排除护送队
+// （见 SacrificeExcessFarmers 的选人循环）。
+static const int USR_FARMER_KEEP_MIN = 5;
 // 箭塔建筑候选点相对中心的目标距离，单位为地图格。
 static const int USR_ARROWTOWER_BUILD_RADIUS = 18;
 // 箭塔目标数量。取 4 = 朝敌三个方向各一座 + 最朝敌那个方向补一座
@@ -9712,18 +9720,29 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   if (info.Human_Num + 2 < info.Human_MaxNum)
     return;
 
-  // 【只数经济里的农民】护送祭司的农民已经不在采集，把他们算进来会让
-  // 「还剩 5 个维持采集」这条门槛虚高；而且他们一旦被选去自毁，等于在农民
-  // 赶路的 ~1500 帧里把突击队解散掉 —— 自毁是不可逆的，不能碰 latched 的编制。
-  // 副作用（已知且接受）：农民全部投入护送之后这条通道自然失效，人口被占满、
-  // 军队无法补充。这是「全部农民一起上战场」这个选择的直接代价。
+  // 【触发条件：人口真的卡住了军队 —— 而不是"非护送农民超过 5 个"】
+  //
+  // 原来这里判的是「非护送农民 > 5」，那是个错误的代理指标：护送启动后
+  // 非护送农民本来就少（RECRUIT 常常只征到 16 个，剩下 4 个 + 中心补产的），
+  // 反而更容易越过阈值，于是把新农民逐个当多余的清掉 —— 实测一局杀了 17 个、
+  // 农民从 20 掉到 2，之后没人拆敌塔、撑到帧数上限判负。
+  //
+  // 真正该问的是「人口满了（上面那道门已保证），而且还有军队要造」。
+  // 「还有军队要造」的可观测证据：有靶场空闲着 —— 说明产能不是瓶颈，
+  // 卡的是人口（或资源，但资源不够时自毁也解决不了，不该在这条路径上处理）。
+  // 这样就把「人口确实卡住军队」和「本来就不需要造兵」分开了。
+  if (CountAvailableRanges() == 0)
+    return;
+
+  // 【保留多少采集力：按【全部】农民算，不是按非护送的算】
+  // 用总数才是"还剩多少人在干活"的正确口径。选人时再排除护送队 ——
+  // 他们是 latched 的编制，自毁不可逆，不能碰。
   int farmerCount = 0;
   for (const tagFarmer &farmer : info.farmers) {
-    if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER &&
-        !IsFarmerEscorting(farmer.SN))
+    if (farmer.Blood > 0 && farmer.FarmerSort == FARMERTYPE_FARMER)
       farmerCount++;
   }
-  if (farmerCount <= 5) // 保留 5 个农民维持采集
+  if (farmerCount <= USR_FARMER_KEEP_MIN) // 保留这么多农民维持采集
     return;
 
   const tagBuilding *center = FindBuildingByType(BUILDING_CENTER, true);
@@ -9768,17 +9787,17 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   }
 }
 
-// 【总开关】农民护送祭司 + 人口满时自毁农民 —— 两个机制暂时停用。
+// 【总开关】农民护送祭司 + 人口满时自毁农民。
 //
-// 停用的原因（实测）：自毁那套在一局里杀掉了 17 个农民（农民从 20 掉到 2），
+// 曾经整体停用过一次：自毁那套在一局里杀掉了 17 个农民（农民 20 → 2），
 // 它挑的是「不在护送队里的」零散农民，本意是牺牲多余劳动力换人口，实际却把
-// 市镇中心补产的新农民逐个清掉了；农民死光之后没人拆敌塔，战局就卡在
-// 「撑到帧数上限判负」。护送机制本身（集结 + 拆塔）也需要在农民不被自毁的
-// 前提下重新验证。
+// 市镇中心补产的新农民逐个清掉了。现在恢复启用 —— 但自毁的判据已经改成
+// 「人口真的卡住军队」（见 SacrificeExcessFarmers），不再是那个会把新农民
+// 当多余的代理指标。
 //
 // 【为什么用常量开关而不是直接注释掉调用】这样两个函数仍然被「引用」，
-// 不会产生 -Wunused-function 警告；恢复时只把这一个 false 改成 true。
-static const bool USR_FARMER_ESCORT_ENABLED = false;
+// 不会产生 -Wunused-function 警告；停用只改这一个 true/false。
+static const bool USR_FARMER_ESCORT_ENABLED = true;
 
 void UsrAI::processData()
 {
