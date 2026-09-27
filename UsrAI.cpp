@@ -7025,6 +7025,41 @@ static void DispatchScouts(UsrAI *ai)
         scoutLastOrderFrame[scout.SN] = g_frame;
         scoutFrontierVisitFrame[make_pair(targetDR, targetUR)] = g_frame;
     }
+
+    // 【侦察兵状态日志】这个机制此前完全没有日志 —— 侦察兵探得深不深只能从画面
+    // 上看，日志里既查不到它走到了哪、也看不出它是不是一直在避险。
+    //
+    // 【这三个数怎么用来定位】pos 与 dest 一起看方向对不对；homeDis 是离我方
+    // 市镇中心的曼哈顿距离 —— 它长期停在几十格就说明侦察兵根本没走出去
+    // （而不是"走出去但绕错了方向"），那是另一类问题（避险过频 / 生产太晚）。
+    {
+        static int lastScoutLogFrame = USR_INVALID_FRAME;
+        if (lastScoutLogFrame == USR_INVALID_FRAME ||
+            g_frame - lastScoutLogFrame >= 500)
+        {
+            lastScoutLogFrame = g_frame;
+            const tagBuilding *center = FindCenter();
+            for (const tagArmy &army : info.armies)
+            {
+                if (army.Sort != AT_SCOUT || army.Blood <= 0)
+                    continue;
+                const int homeDis =
+                    center != nullptr
+                        ? BlockDis(army.BlockDR, army.BlockUR, center->BlockDR,
+                                   center->BlockUR)
+                        : -1;
+                char buf[224];
+                snprintf(buf, sizeof(buf),
+                         "[SCOUT] f=%d sn=%d pos=(%d,%d) dest=(%d,%d) state=%d "
+                         "homeDis=%d",
+                         g_frame, army.SN, army.BlockDR, army.BlockUR,
+                         int(army.DR0 / double(BLOCKSIDELENGTH)),
+                         int(army.UR0 / double(BLOCKSIDELENGTH)), army.NowState,
+                         homeDis);
+                AiDebugLog(buf);
+            }
+        }
+    }
 }
 
 static int FindDirectThreatToFarmerSN(const tagFarmer &farmer)
