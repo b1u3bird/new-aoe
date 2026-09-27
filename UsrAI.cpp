@@ -332,22 +332,22 @@ static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // enemyai.cpp:440-442），就该把 USR_FARMER_ESCORT_MAX 调小、或把
 // USR_FARMER_ESCORT_FRAME 推后。
 
-// 农民投入的帧号。取 38000，比 USR_FARMER_LATE_FRAME(35000) 再晚 3000 帧 ——
-// 那一帧之后农民上限本就压到 5、经济进入收缩期，把采集力一次性交给前线，
-// 与「此时经济已成型、军队才是胜负手」的既有判断一致。
-// 【与军队总攻(USR_OFFENSIVE_FRAME = 33000)差 5000 帧是有意的】：军队先出发
+// 农民投入的帧号。取 35000 = USR_FARMER_LATE_FRAME —— 那一帧之后农民上限
+// 本就压到 5、经济进入收缩期，把采集力一次性交给前线，与「此时经济已成型、
+// 军队才是胜负手」的既有判断一致。
+// 【与军队总攻(USR_OFFENSIVE_FRAME = 33000)差 2000 帧是有意的】：军队先出发
 // 去清守军，农民后走，避免在完全没有掩护的情况下先撞上敌方军队。
-static const int USR_FARMER_ESCORT_FRAME = 38000;
+static const int USR_FARMER_ESCORT_FRAME = 35000;
 
-// 祭司【跟随军队出征】到前线驻留带的帧号。取 38000 = USR_FARMER_ESCORT_FRAME，
+// 祭司【跟随军队出征】到前线驻留带的帧号。取 35000 = USR_FARMER_ESCORT_FRAME，
 // 也就是「农民和祭司一起出发」—— 两者同帧动身、路程与移速都相近（农民 2.236、
 // 祭司 2.03 px/帧），才能同时到位；任何一方先走都会让另一方在敌方基地门口
 // 单独暴露几百帧。
 //
 // 【为什么不直接改 USR_OFFENSIVE_FRAME(33000)】那个常量还被 ManageOffensiveArmy
-// 用作军队总攻的时机，一起改会把军队也推迟 5000 帧 —— 而需求只要求祭司与农民
-// 同步，军队仍应提前出发去清守军（这正是上面那条「差 5000 帧是有意的」）。
-static const int USR_PRIEST_FRONT_POST_FRAME = 38000;
+// 用作军队总攻的时机，一起改会把军队也推迟 2000 帧 —— 而需求只要求祭司与农民
+// 同步，军队仍应提前出发去清守军（这正是上面那条「差 2000 帧是有意的」）。
+static const int USR_PRIEST_FRONT_POST_FRAME = 35000;
 
 // 征召人数上限。取 20 = USR_FARMER_TARGET（村民总数目标）—— 即「全部农民」。
 // 留这条口子的用途：实测若发现经济归零导致军队断粮（造兵在跑但产出为零），
@@ -436,14 +436,14 @@ static const int USR_FARMER_TOWER_BLACKLIST_FRAMES = 900;
 // → 打建筑」那一段的目标选择 —— 所以视野里一出现敌兵，军队立刻丢下塔回去打敌人。
 static const int USR_ARMY_TOWER_PER_TARGET_MAX = 4;
 
-// 阶段 B 的时间兜底帧。取 42000 = 农民出发(38000)之后 4000 帧，也就是农民
+// 阶段 B 的时间兜底帧。取 39000 = 农民出发(35000)之后 4000 帧，也就是农民
 // 走完那 130 格（约 1500 帧）到达环上之后再过 2500 帧。
 // 【为什么需要】EstimateEnemySiegeAnchor 的注释记录过一个真实故障：攻城厂整局
 // 没被侦察到（`enemyB` 最多到 1，那还是座箭塔），于是 ManagePriest 那条冲厂分支
 // 因为 FindEnemySiegeBuilding() == nullptr 永远不执行，阶段 B 的 ①②③ 条全部关死，
-// 护送队会在环上白站到底。到这一帧时军队已压了近 9000 帧、敌方建筑必然已进
+// 护送队会在环上白站到底。到这一帧时军队已压了近 6000 帧、敌方建筑必然已进
 // info.enemy_buildings，此时让农民去拆塔至少能替军队与祭司分担火力。
-static const int USR_FARMER_TOWER_FALLBACK_FRAME = 42000;
+static const int USR_FARMER_TOWER_FALLBACK_FRAME = 39000;
 
 // 农民去救祭司的最大距离（格，欧氏）。
 //
