@@ -9188,18 +9188,51 @@ static void KiteRangedBackFromMelee(UsrAI *ai)
             }
         }
 
-        // 背离参照点，每轴最多 USR_MELEE_KITE_BLOCKS 格（切比雪夫距离 2）。
-        const int dx = unit.BlockDR - anchorDR;
-        const int dy = unit.BlockUR - anchorUR;
-        int sx = (dx > 0) ? USR_MELEE_KITE_BLOCKS
-                          : ((dx < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
-        int sy = (dy > 0) ? USR_MELEE_KITE_BLOCKS
-                          : ((dy < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
-        if (sx == 0 && sy == 0)
-            sy = USR_MELEE_KITE_BLOCKS;   // 与参照点完全重合，给一个确定方向
-
-        const int tx = max(1, min(MAP_L - 2, unit.BlockDR + sx));
-        const int ty = max(1, min(MAP_U - 2, unit.BlockUR + sy));
+        // 【退到站桩环上：离敌方锚点 USR_STANDOFF_RADIUS(32) 格】
+        //
+        // 原来只退 USR_MELEE_KITE_BLOCKS(2) 格 —— 而敌方骑兵 / 战车与战车弓兵
+        // 的移速【完全相同】（config.json 里都是 4.0656）：退 2 格、它追 2 格，
+        // 距离纹丝不动，只是每 40 帧白挨一轮打，最后被磨死。
+        //
+        // 站桩环是现成的安全位置：敌方守军的追击上限是 25 格（量到它们的
+        // 攻城厂，DEFENSE_CHASE_LIMIT），退到 32 格至少拉开 7 格 —— 而 7 格
+        // 正好是战车弓兵的射程，追兵停在 25 格线上时我们还够得着。
+        int tx = -1;
+        int ty = -1;
+        {
+            int siegeDR = 0;
+            int siegeUR = 0;
+            if (EstimateEnemySiegeAnchor(siegeDR, siegeUR))
+            {
+                // 沿「锚点 → 单位」这条射线取 32 格处的点：沿它自己那条射线
+                // 往外退，不会横穿战场，左右两翼也不会朝相反方向跑。
+                const double dx = double(unit.BlockDR - siegeDR);
+                const double dy = double(unit.BlockUR - siegeUR);
+                const double len = sqrt(dx * dx + dy * dy);
+                if (len >= 0.5)
+                {
+                    tx = siegeDR + int(dx / len * USR_STANDOFF_RADIUS);
+                    ty = siegeUR + int(dy / len * USR_STANDOFF_RADIUS);
+                }
+            }
+        }
+        if (tx < 0 || ty < 0)
+        {
+            // 拿不到敌方锚点（或单位正好压在锚点上、算不出方位）→ 退回原来的
+            // 「背离最近的那个近战兵、每轴退 USR_MELEE_KITE_BLOCKS 格」。
+            const int dx = unit.BlockDR - anchorDR;
+            const int dy = unit.BlockUR - anchorUR;
+            int sx = (dx > 0) ? USR_MELEE_KITE_BLOCKS
+                              : ((dx < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
+            int sy = (dy > 0) ? USR_MELEE_KITE_BLOCKS
+                              : ((dy < 0) ? -USR_MELEE_KITE_BLOCKS : 0);
+            if (sx == 0 && sy == 0)
+                sy = USR_MELEE_KITE_BLOCKS;   // 与参照点完全重合，给一个确定方向
+            tx = unit.BlockDR + sx;
+            ty = unit.BlockUR + sy;
+        }
+        tx = max(1, min(MAP_L - 2, tx));
+        ty = max(1, min(MAP_U - 2, ty));
         // 清掉进攻锁：否则 AssignFieldDefense 会捧着旧锁把刚退开的单位又送回去。
         ClearArmyTargetLock(unit.SN);
         ai->HumanMove(unit.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
