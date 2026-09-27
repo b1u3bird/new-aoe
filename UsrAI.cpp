@@ -5636,59 +5636,47 @@ static void ManagePriest(UsrAI *ai)
             const int siegeDis2 =
                 BlockDis2(priest->BlockDR, priest->BlockUR,
                           siegeTarget->BlockDR, siegeTarget->BlockUR);
-            // 【要走多近：贴到厂的边上】见 USR_PRIEST_SIEGE_TOUCH_DIS2 的说明 ——
-            // 引擎对「祭司转建筑」的判据只有 1.833 格，正交相邻格才够得着。
-            // 原先是"到了 10 格就不管"，于是祭司停在厂 10 格外等一个可见敌兵来
-            // 触发转换；等不到就一直站着（实测它就是这样停在 (15,77)、minDis=9999）。
-            if (siegeDis2 > USR_PRIEST_SIEGE_TOUCH_DIS2)
+
+            // 【只需进到「选取距离」以内，不再要求贴到厂边上】
+            //
+            // 【原来那套为什么会死锁】原判据是 siegeDis2 > USR_PRIEST_SIEGE_TOUCH_DIS2
+            // （4，即贴到厂 2 格内）就去"走到厂边"，而落点是在【厂周围一圈】里挑
+            // 离祭司最近的一个。厂被建筑或自己人围着时，那一圈里离祭司最近的格
+            // 可能就是他【自己脚下】—— 实测：祭司停在 (14,7)、到厂平方距离 18
+            // （4.24 格），goal 选出来正是 (14,7)，于是 ShouldReissuePriestMove
+            // 判定"目标没变"而不下发，代码 return。它每帧都在这一分支里原地返回，
+            // 【永远走不到下面的转换分支】。日志表现就是 goal 恒等于 priest 坐标、
+            // reissue=0 —— 那正是"满血、站着不动、一次转换都没发起过"的成因。
+            //
+            // 现在门槛放到 USR_PRIEST_SIEGE_PICK_DISTANCE —— 与转换分支【选取】
+            // 目标用的是同一个距离。进到那个圈里，本分支就不再插手，交给转换分支
+            // 用 HumanAction 建立关系、由【引擎】驱动走完最后一段：引擎自己知道
+            // 要贴到多近才转得动（判据是"贴邻 + 已建成"，见 Core_CondiFunc.cpp），
+            // 不需要我们替它算一个可能被自己人占住的落点。
+            const int pickDis2 = USR_PRIEST_SIEGE_PICK_DISTANCE *
+                                 USR_PRIEST_SIEGE_PICK_DISTANCE;
+            if (siegeDis2 > pickDis2)
             {
-                // 目标取【厂周围一圈里的空位】，不是厂自己那一格：建筑占格，
-                // HumanMove 到被建筑占住的格子会被引擎按 nullPath 取消指令。
-                // 取离祭司最近的可用落点 —— 方向上就是"正对"厂的那一侧。
-                const int siegeSize = BuildingBlockSize(siegeTarget->Type);
+                // 厂还远：沿"祭司相对厂"的方位走到选取距离的边上。
+                // 复用祭司驻留点那套取点，走的是它自己那条射线，不会横穿敌方基地。
                 int goalDR = -1;
                 int goalUR = -1;
-                int bestGoalDis2 = 1000000000;
-                for (int ddx = -1; ddx <= siegeSize; ++ddx)
-                {
-                    for (int ddy = -1; ddy <= siegeSize; ++ddy)
-                    {
-                        if (ddx >= 0 && ddx < siegeSize && ddy >= 0 &&
-                            ddy < siegeSize)
-                            continue;   // 厂自己占的那一块
-                        const int cx = siegeTarget->BlockDR + ddx;
-                        const int cy = siegeTarget->BlockUR + ddy;
-                        if (!IsPriestPointUsable(cx, cy))
-                            continue;
-                        if (!IsReachableAround(cx, cy, 1))
-                            continue;
-                        const int d = BlockDis2(priest->BlockDR, priest->BlockUR,
-                                                cx, cy);
-                        if (d < bestGoalDis2)
-                        {
-                            bestGoalDis2 = d;
-                            goalDR = cx;
-                            goalUR = cy;
-                        }
-                    }
-                }
-                // 【诊断：厂边的落点选出来没有】goalDR < 0 表示厂周围一圈全是
-                // 不可站（海里 / 被建筑占）或不可达的格子 —— 那时代码不会下发任何
-                // 移动指令，祭司就永远钉在原地（这正是"满血站着不动"的一种成因，
-                // 而此前它在日志里完全没有痕迹）。
+                const bool haveGoal = PriestFrontPostBlock(
+                    siegeTarget->BlockDR, siegeTarget->BlockUR,
+                    priest->BlockDR, priest->BlockUR,
+                    USR_PRIEST_SIEGE_PICK_DISTANCE, goalDR, goalUR);
+                const int reissue = haveGoal
+                                        ? (ShouldReissuePriestMove(
+                                               priest, goalDR, goalUR)
+                                               ? 1
+                                               : 0)
+                                        : -1;
                 {
                     static int lastGoalLogFrame = USR_INVALID_FRAME;
                     if (lastGoalLogFrame == USR_INVALID_FRAME ||
                         g_frame - lastGoalLogFrame >= 500)
                     {
                         lastGoalLogFrame = g_frame;
-                        const int reissue =
-                            goalDR >= 0
-                                ? (ShouldReissuePriestMove(priest, goalDR,
-                                                           goalUR)
-                                       ? 1
-                                       : 0)
-                                : -1;
                         char buf[256];
                         snprintf(buf, sizeof(buf),
                                  "[SIEGE] f=%d goal=(%d,%d) reissue=%d dis2=%d "
@@ -5699,8 +5687,7 @@ static void ManagePriest(UsrAI *ai)
                         AiDebugLog(buf);
                     }
                 }
-                if (goalDR >= 0 &&
-                    ShouldReissuePriestMove(priest, goalDR, goalUR))
+                if (haveGoal && reissue == 1)
                 {
                     priestMoveOrderId = ai->HumanMove(
                         priest->SN, (goalDR + 0.5) * double(BLOCKSIDELENGTH),
