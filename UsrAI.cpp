@@ -20,8 +20,22 @@ tagInfo info;
 static const int USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL = 12;
 // 军队协防友军时允许响应的最大曼哈顿距离，单位为地图格。
 static const int USR_FIELD_ASSIST_RADIUS = 12;
-// 普通军队主动发现敌军的最大欧氏距离，单位为地图格。
-static const int USR_FIELD_ARMY_AGGRO_RADIUS = 7;
+// 普通军队【主动发现敌军】的最大欧氏距离（格）。这是 AssignFieldSelfDefense
+// 第 4 优先级（FindEnemyArmyInVision）的半径。
+//
+// 【7 → 12，按需求试】7 格的原意是"只打送上门的"：站桩环在 32 格、敌方守军追到
+// DEFENSE_CHASE_LIMIT(25) 折返，两者相距正好 7 格 —— 所以 7 格刚好能在守军停在
+// 折返线上的那一刻把它纳入射程（塔射程也是 7）。
+// 提到 12 之后，视野外的敌人也会被主动纳入：守军停在 25 格处时离环上的我们 7 格、
+// 本来就够得着；但【守军还没冲到 25、还在往里走】的那一段，以及停在更里侧（比如
+// 20 格）的敌人，现在也会把部队从环上叫下去。
+// 代价：敌方远程（投石车射程 10）在这个距离上能打到我们，而我们战车弓兵只有 7
+// （研究完木材/工艺后 9）—— 会被迫在挨打的情况下靠近。
+static const int USR_FIELD_ARMY_AGGRO_RADIUS = 12;
+// 军队【主动去打狮子】的最大欧氏距离（格）。
+// 原先与上面那条共用一个常量；上面从 7 提到 12 时把狮子一起放大会让部队为了打猎
+// 从阵线上跑开 12 格，所以拆出独立的一条，保持原值不动。
+static const int USR_FIELD_LION_AGGRO_RADIUS = 7;
 // 农民遭遇敌人时触发主动处理的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_FARMER_AGGRO_RADIUS = 7;
 // 箭塔重新选择攻击目标的最小间隔，单位为游戏帧。
@@ -143,6 +157,17 @@ static const int USR_PRIEST_CONVERTING_RADIUS = 12;
 // 解法是红线【只挂在「有可见敌人」上】：敌人还在时祭司远离敌方基地，
 // 敌人清空了才放它去转换（那条路本来就排在上面、会先 return）。
 static const int USR_PRIEST_ENEMY_BASE_KEEPOUT = 32;
+// 祭司【跟随军队出征】时在前线的驻留半径（格，相对敌方基地锚点）。
+//
+// 【为什么是 40】敌方守军的追击上限是 DEFENSE_CHASE_LIMIT(25)（量到攻城武器厂，
+// 也就是我们的锚点），远程兵射程 9（config 的 DIS_* 上限 + 科技）。40 格在追击
+// 上限外 15 格 —— 站在这儿敌人正常够不到，祭司才能在前线待得住。这就是"站
+// 40 格以外"的直接目的：**用距离换生存**，而不是靠撤退。
+static const int USR_PRIEST_FRONT_POST_DISTANCE = 40;
+// 驻留半径的容差带（格）：距离落在 [40−6, 40+6] 里就不动。
+// 没有带的话，它每帧都要为"差一格"重算一次落点，而 HumanMove 每次都会清空路径
+// —— 表现就是原地抖。上边界同时是"别缩在家里"的门槛：超过 46 格就往里拉。
+static const int USR_PRIEST_FRONT_POST_BAND = 6;
 // 祭司遇袭时的撤退距离（格）：退到「市镇中心背离威胁那一侧」这么多格处。
 // 见 GetPriestEmergencyPoint —— 旧公式的实际位移只有 4 格，等于没退。
 // 取 14：大于箭塔射程（7）的两倍，退出去之后追兵要重新跑一段；也不至于远到
@@ -217,8 +242,7 @@ static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // 被杀一个就少一份产出。农民移速 HUMAN_SPEED = 2.236、攻击射程 1，
 // 目标在 8 格之外时等它走到，祭司多半已经死了，而它自己成了送人头。
 // 所以只让「本来就在祭司附近干活」的农民顺手去救。
-// 取 8：与本文件的 USR_FIELD_ARMY_AGGRO_RADIUS(7) 同一量级，
-// 又明显小于军队的协防半径 USR_FIELD_ASSIST_RADIUS(12) —— 军队能跑，
+// 取 8：明显小于军队的协防半径 USR_FIELD_ASSIST_RADIUS(12) —— 军队能跑，
 // 农民跑不起。
 static const int USR_FARMER_PRIEST_HELP_RADIUS = 8;
 // 箭塔建筑候选点相对中心的目标距离，单位为地图格。
@@ -1111,7 +1135,7 @@ static int FindNearbyEnemyLionToAttack(const tagArmy &myArmy)
         return -1;
 
     int bestSN = -1;
-    int bestDis2 = USR_FIELD_ARMY_AGGRO_RADIUS * USR_FIELD_ARMY_AGGRO_RADIUS;
+    int bestDis2 = USR_FIELD_LION_AGGRO_RADIUS * USR_FIELD_LION_AGGRO_RADIUS;
 
     for (const tagResource &resource : info.resources)
     {
@@ -5150,6 +5174,61 @@ static bool PriestInEnemyBaseKeepout(const tagArmy &priest_int,
     return true;
 }
 
+// 祭司的【前线驻留点】：在「敌方锚点 ↔ 祭司」这条射线上、离锚点 postDistance 格处。
+//
+// 【为什么沿祭司自己那条射线取】祭司是从家里走过来的；沿它当前所在的射线取点，
+// "已经在 40 格上"时算出来的点就落在它脚下附近 —— 它不需要横穿一段去换方位。
+//
+// 【候选与兜底】射线那一格优先；它不可用（海里 / 被建筑占住 / 四邻全被挡 ——
+// 后者会让 HumanMove 被引擎按 nullPath 取消）时，绕锚点转 16 个方位取第一个
+// 可用的。与祭司撤退点的候选做法一致。返回 false 表示 16 个方位全不可用。
+static bool PriestFrontPostBlock(int anchorDR, int anchorUR, int priestDR,
+                                 int priestUR, int postDistance, int &outDR,
+                                 int &outUR)
+{
+    static const int kCos16[16] = {100, 92, 71, 38, 0, -38, -71, -92,
+                                   -100, -92, -71, -38, 0, 38, 71, 92};
+    static const int kSin16[16] = {0, 38, 71, 92, 100, 92, 71, 38,
+                                   0, -38, -71, -92, -100, -92, -71, -38};
+    // 祭司相对锚点的方位（16 分度，点积最大）
+    int base = 0;
+    {
+        const double dx = double(priestDR - anchorDR);
+        const double dy = double(priestUR - anchorUR);
+        const double len = sqrt(dx * dx + dy * dy);
+        if (len < 0.5)
+            return false;   // 与锚点重合，算不出方位：本帧不做
+        double bestDot = -1e18;
+        for (int i = 0; i < 16; ++i)
+        {
+            const double dot = double(kCos16[i]) * (dx / len) +
+                               double(kSin16[i]) * (dy / len);
+            if (dot > bestDot)
+            {
+                bestDot = dot;
+                base = i;
+            }
+        }
+    }
+    for (int step = 0; step < 16; ++step)
+    {
+        const int offset = ((step + 1) / 2) * ((step % 2 == 1) ? -1 : 1);
+        const int i = ((base + offset) % 16 + 16) % 16;
+        int dr = anchorDR + kCos16[i] * postDistance / 100;
+        int ur = anchorUR + kSin16[i] * postDistance / 100;
+        dr = max(1, min(MAP_L - 2, dr));
+        ur = max(1, min(MAP_U - 2, ur));
+        if (!IsPriestPointUsable(dr, ur))
+            continue;
+        if (!IsReachableAround(dr, ur, 1))
+            continue;
+        outDR = dr;
+        outUR = ur;
+        return true;
+    }
+    return false;
+}
+
 static void ManagePriest(UsrAI *ai)
 {
     const tagArmy *priest = FindPriest();
@@ -5229,6 +5308,62 @@ static void ManagePriest(UsrAI *ai)
                         priest->SN, (goalDR + 0.5) * double(BLOCKSIDELENGTH),
                         (goalUR + 0.5) * double(BLOCKSIDELENGTH));
                     priestEmergencyTarget = make_pair(goalDR, goalUR);
+                    priestEmergencyTargetFrame = g_frame;
+                    priestMoveFromDR = priest->BlockDR;
+                    priestMoveFromUR = priest->BlockUR;
+                    lastPriestOrderFrame = g_frame;
+                }
+                return;
+            }
+        }
+    }
+
+    // 【跟随军队出征：在敌方基地外 USR_PRIEST_FRONT_POST_DISTANCE(40) 格驻留】
+    //
+    // 做成【双向带】而不是单向的"推出去"：
+    //     距离 < 40 − BAND(6) → 朝外推（别闯进敌方基地）
+    //     距离 > 40 + BAND     → 朝里拉（别缩在家里，要跟队）
+    //     带内                 → 不动
+    // 只做单向的话两头都够不着：原 keepout 只保证"不进去"，所以祭司会一直待在
+    // 家里；只做"拉回来"又会一路冲进敌方基地。
+    //
+    // 【为什么放在这里】必须在「走向攻城厂」之后 —— 那一段才是获胜路径的最后
+    // 一段（无敌兵时走到厂边），站桩带不能把它拦在 40 格外。也必须在下面的
+    // keepout 与 priestPassive「守家」之前 —— 否则 30000 帧之后那条会让祭司
+    // 什么都不做，跟队规则永远执行不到。
+    // 同时它排在 keepout 之前，也就避免了两条规则方向相反时的来回跑
+    // （keepout 是"朝我方中心退"，而中心在 100+ 格外的另一头）。
+    //
+    // 【只在军队出征时生效】判据与总攻同口径：已侦察到敌方基地 + 过了
+    // USR_OFFENSIVE_FRAME(33000)。否则开局就把祭司往敌方基地拉，等于让它一个人
+    // 横穿半张地图。
+    if (enemyBaseDiscovered && g_frame >= USR_OFFENSIVE_FRAME)
+    {
+        int anchorDR = 0;
+        int anchorUR = 0;
+        if (EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+        {
+            const int dis2 = BlockDis2(priest->BlockDR, priest->BlockUR,
+                                       anchorDR, anchorUR);
+            const int nearRadius = USR_PRIEST_FRONT_POST_DISTANCE -
+                                   USR_PRIEST_FRONT_POST_BAND;
+            const int farRadius = USR_PRIEST_FRONT_POST_DISTANCE +
+                                  USR_PRIEST_FRONT_POST_BAND;
+            if (dis2 < nearRadius * nearRadius ||
+                dis2 > farRadius * farRadius)
+            {
+                int postDR = -1;
+                int postUR = -1;
+                if (PriestFrontPostBlock(anchorDR, anchorUR, priest->BlockDR,
+                                         priest->BlockUR,
+                                         USR_PRIEST_FRONT_POST_DISTANCE, postDR,
+                                         postUR) &&
+                    ShouldReissuePriestMove(priest, postDR, postUR))
+                {
+                    priestMoveOrderId = ai->HumanMove(
+                        priest->SN, (postDR + 0.5) * double(BLOCKSIDELENGTH),
+                        (postUR + 0.5) * double(BLOCKSIDELENGTH));
+                    priestEmergencyTarget = make_pair(postDR, postUR);
                     priestEmergencyTargetFrame = g_frame;
                     priestMoveFromDR = priest->BlockDR;
                     priestMoveFromUR = priest->BlockUR;
@@ -7043,8 +7178,9 @@ static bool ManageStandoff(UsrAI *ai)
         //   ① 它写道「推出去之后它就在圈外，下一帧不会再被这条规则碰到 ——
         //      环没有闭合点」。这个推理只约束了站桩自己，漏掉了自卫。自卫不是
         //      「只退不进」：敌方守军追到 DEFENSE_CHASE_LIMIT(25) 格处停下时，
-        //      离环上的我们正好 7 格，恰好等于 USR_FIELD_ARMY_AGGRO_RADIUS(7)
-        //      —— 几何上必然踩线，自卫每 12 帧就把部队拉回圈里一次，环照旧闭着。
+        //      离环上的我们正好 7 格 —— 早就在自卫的主动索敌半径
+        //      （USR_FIELD_ARMY_AGGRO_RADIUS）以内（7 格时相等，后来提到 12 更宽），
+        //      几何上必然踩线，自卫每 12 帧就把部队拉回圈里一次，环照旧闭着。
         //      退出去的那一程也因此走不完（见下面进度判据的说明）。
         //   ② 圈外一律不管，等于放弃了「半路被截停」的部队。推进指令是全有或
         //      全无的（ManageOffensiveArmy 一见视野里有敌人就 return），
@@ -7085,7 +7221,8 @@ static bool ManageStandoff(UsrAI *ai)
             // 槽位」。它和自卫是对撞的：那是一个硬位置阈值，单位一进 32 格就
             // 被推一次（每 60 帧），而自卫每 12 帧把它拉回来一次 —— 敌方守军
             // 追到 DEFENSE_CHASE_LIMIT(25) 格处停下时，离环上的我们正好 7 格，
-            // 恰好等于 USR_FIELD_ARMY_AGGRO_RADIUS(7)，几何上必然踩线。
+            // 在自卫的主动索敌半径 USR_FIELD_ARMY_AGGRO_RADIUS 以内
+            // （7 格时相等，后来提到 12 更宽），几何上必然踩线。
             // 方向相反 + 频率差 5 倍，部队就在 25~32 之间来回走，退不完。
             //
             // 【为什么挨打驱动就没有这个问题】没有位置阈值，就没有「一进阈值
