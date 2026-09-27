@@ -153,6 +153,22 @@ static const int USR_PRIEST_SIEGE_TOUCH_DIS2 = 4;
 // 走到最近距离为止，视野扫过的范围就一路扩过去。
 static const int USR_PRIEST_SIEGE_PROBE_STEP = 4;
 static const int USR_PRIEST_SIEGE_PROBE_MIN = 3;
+
+// 祭司【选取】攻城厂作为转换目标的最大距离（格）。
+//
+// 【12 → 40】原值 12 要求祭司先靠 HumanMove 精确走到厂 12 格以内，才肯把厂
+// 选为转换目标；走到那个位置的过程里最后要贴到厂边上（USR_PRIEST_SIEGE_TOUCH_DIS2），
+// 而厂边那两格极可能被我们自己的单位挤着 —— 拆塔的农民是【近战、必须贴到厂边上】，
+// 牵制箭塔的士兵也在那一带。IsReachableAround 只查建筑与地形、【不查单位】，
+// 所以这些落点会被判成"可用"，而 HumanMove 是纯坐标移动：目标格站着人就挤不
+// 进去 —— 表现为「祭司满血、原地不动」，日志里还看不出原因（实测一局它停在
+// (14,7) 整整 500 帧，[CONV] 与 [CONVBLOCK] 都没有输出）。
+//
+// 放宽到 40 格（= 祭司的前线驻留距离）之后，它在驻留带上就能对厂建立
+// HumanAction 关系，由【引擎】驱动它走完最后那一段：关系式移动会自己找到能
+// 转换的位置（祭司转建筑的判据是「贴邻 + 已建成」，见 Core_CondiFunc.cpp），
+// 不需要我们替它算精确落点，也就绕开了「落点被自己人占住」这件事。
+static const int USR_PRIEST_SIEGE_PICK_DISTANCE = 40;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
 //
@@ -1620,9 +1636,12 @@ static const tagBuilding *FindEnemySiege(const tagArmy &priest)
         if (building.Blood <= 0 || building.Type != BUILDING_SIEGE)
             continue;
         const int dis2 = BlockDis2(building.BlockDR, building.BlockUR, priest.BlockDR, priest.BlockUR);
-        if (dis2 >= 12 * 12)
+        // 距离上限见 USR_PRIEST_SIEGE_PICK_DISTANCE 的说明（12 → 40 的理由）。
+        if (dis2 >= USR_PRIEST_SIEGE_PICK_DISTANCE *
+                        USR_PRIEST_SIEGE_PICK_DISTANCE)
             continue;
-        // 攻城武器厂附近 5 格内有敌人则视为不安全，等军队清理后再转换。
+        // 攻城武器厂附近 2 格内有敌人则视为不安全，等军队清理后再转换。
+        // （注释原先写的是 5 格，与下面的 2*2 不符，以代码为准。）
         bool safe = true;
         for (const tagArmy &enemy : info.enemy_armies)
         {
