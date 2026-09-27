@@ -2379,7 +2379,16 @@ void MainWidget::judgeVictory()
         debugText("blue", " 游戏失败，未达成目标。最终得分为:" + QString::number(usrScore.getScore()));
 
         //弹出胜利提示
-        if (IsExamining || QMessageBox::information(this, QStringLiteral("游戏失败"), "很遗憾你没能成功保护部落。智慧之神为你惋惜~", QMessageBox::Ok))
+        // 附上地图与旋转：单局调试时一眼就知道输的是哪一组（--map / --rotate）。
+        if (IsExamining || QMessageBox::information(
+                               this, QStringLiteral("游戏失败"),
+                               QStringLiteral("很遗憾你没能成功保护部落。智慧之神为你惋惜~\n\n"
+                                              "地图: %1\n旋转: %2")
+                                   .arg(RuntimeConfig_FixedMapFile().isEmpty()
+                                            ? QStringLiteral("(随机)")
+                                            : RuntimeConfig_FixedMapFile())
+                                   .arg(RuntimeConfig_MapRotationDegrees()),
+                               QMessageBox::Ok))
         {
             HandleGameOver();
         }
@@ -2394,7 +2403,16 @@ void MainWidget::judgeVictory()
         debugText("blue", " 游戏胜利。最终得分为:" + QString::number(usrScore.getScore()));
 
         //弹出胜利提示
-        if (IsExamining || QMessageBox::information(this, QStringLiteral("游戏胜利"), "恭喜获胜，获得了纳西妲的青睐！", QMessageBox::Ok))
+        // 与失败对话框一致，附上地图与旋转 —— 批量跑完对结果时一眼能认出是哪一组。
+        if (IsExamining || QMessageBox::information(
+                               this, QStringLiteral("游戏胜利"),
+                               QStringLiteral("恭喜获胜，获得了纳西妲的青睐！\n\n"
+                                              "地图: %1\n旋转: %2")
+                                   .arg(RuntimeConfig_FixedMapFile().isEmpty()
+                                            ? QStringLiteral("(随机)")
+                                            : RuntimeConfig_FixedMapFile())
+                                   .arg(RuntimeConfig_MapRotationDegrees()),
+                               QMessageBox::Ok))
         {
             HandleGameOver();
         }
