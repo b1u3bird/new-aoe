@@ -9865,17 +9865,23 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   }
 }
 
-// 【总开关】农民护送祭司 + 人口满时自毁农民。
-//
-// 曾经整体停用过一次：自毁那套在一局里杀掉了 17 个农民（农民 20 → 2），
-// 它挑的是「不在护送队里的」零散农民，本意是牺牲多余劳动力换人口，实际却把
-// 市镇中心补产的新农民逐个清掉了。现在恢复启用 —— 但自毁的判据已经改成
-// 「人口真的卡住军队」（见 SacrificeExcessFarmers），不再是那个会把新农民
-// 当多余的代理指标。
-//
-// 【为什么用常量开关而不是直接注释掉调用】这样两个函数仍然被「引用」，
-// 不会产生 -Wunused-function 警告；停用只改这一个 true/false。
+// 【开关一：农民护送祭司】撤出经济 → 集结到敌方基地外 → 拆敌塔。
 static const bool USR_FARMER_ESCORT_ENABLED = true;
+// 【开关二：人口满时自毁农民腾人口】
+//
+// 【为什么和护送拆成两个开关】原来它们共用一个常量，于是「只要其中一个出
+// 问题就得把另一个也关掉」。这两件事的风险完全不同：护送是可逆的调度，
+// 自毁是不可逆的 —— 实测它在一局里杀掉了 17 个农民（农民 20 → 2）：它挑的是
+// 「不在护送队里的」零散农民，本意是牺牲多余劳动力换人口，实际把市镇中心
+// 补产的新农民逐个清掉了。
+//
+// 【现在的取值】自毁按需求关闭。判据虽然已经改成「人口真的卡住军队」
+// （见 SacrificeExcessFarmers：要求有靶场空闲，说明卡的是人口而不是产能），
+// 但连带的副作用（后期人口占满、军队补不上来）还没有实测验证过，先关着。
+//
+// 【为什么用常量开关而不是直接注释掉调用】函数仍然被「引用」，不会产生
+// -Wunused-function 警告；启用只改这一个 true/false。
+static const bool USR_FARMER_SACRIFICE_ENABLED = false;
 
 void UsrAI::processData()
 {
@@ -10093,8 +10099,8 @@ void UsrAI::processData()
     AssignFieldSelfDefense(this);
     // AssignFarmerSelfDefense(this);   // 无条件版已停用，见下方 30000 帧的门控
     //
-    // 【暂时停用，见 USR_FARMER_ESCORT_ENABLED】人口满时自毁农民腾人口。
-    if (USR_FARMER_ESCORT_ENABLED)
+    // 【默认关闭，见 USR_FARMER_SACRIFICE_ENABLED】人口满时自毁农民腾人口。
+    if (USR_FARMER_SACRIFICE_ENABLED)
         SacrificeExcessFarmers(this);
     // 农民自卫：30000 帧后启动（对应「第三波骚扰之后」，enemyai.cpp:45 的
     // TAT = 21000 已过）。此前农民遇袭一律靠撤离、不还手，避免早期被零星
