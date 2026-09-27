@@ -783,6 +783,17 @@ static pair<int, int> priestFrontierTarget = make_pair(-1, -1);
 static int priestFrontierStuckCount = 0;
 // 上一帧祭司是否正在转换。用于检测「转换刚刚结束」这一瞬间。
 static bool priestWasConverting = false;
+// 祭司当前【锁定】的转换目标 SN（-1 = 没有锁定）。
+//
+// 【为什么需要锁定】原先每次进 ManagePriest 都用 FindPriestConversionTarget
+// 按兵种优先级重选一遍，于是目标一变就重新下发 HumanAction —— 而每次重发都会
+// 经 Core_List::suspendRelation 中止并重建关系，转换进度清零。实测最新一局
+// 到 f=25274 为止新开了 15 次转换指令、换了 10 个目标，其中有两次间隔只有
+// 6~18 帧（f=13989→14007、f=21540→21546）—— 一个都没转完。
+// 锁定的语义：一旦选定，就一直转到「转换完成 / 目标死亡 / 目标离开视野」，
+// 中途不因为出现更高优先级的兵而改选。代价是放弃「优先转投石车」的机会，
+// 换来的是转换能真正完成（早期被骚扰时白赚一个兵）。
+static int priestConversionLockSN = -1;
 // 转换结束后的撤离窗口截止帧。窗口内优先回市镇中心，不再发起新转换。
 static int priestRetreatUntilFrame = USR_INVALID_FRAME;
 // 最近一次检测到祭司危险状态的游戏帧。
@@ -2411,6 +2422,9 @@ static void ProcessPendingGatherOrders()
         priestFrontierTarget = make_pair(-1, -1);
         priestFrontierStuckCount = 0;
         priestWasConverting = false;
+        // 转换目标的锁定也跨局失效：SN 在下一局会指向别的单位，
+        // 留着会让祭司一开局就去追一个不认识的目标。
+        priestConversionLockSN = -1;
         priestRetreatUntilFrame = USR_INVALID_FRAME;
         priestMoveFromDR = -1;
         priestMoveFromUR = -1;
@@ -5315,6 +5329,25 @@ static const tagArmy *FindPriestConversionTarget(const tagArmy &priest)
     return best;
 }
 
+// 取祭司当前锁定的转换目标。锁定失效（目标死亡 / 离开视野 / 已被转成我方的）
+// 时返回 nullptr —— 调用方会重新按优先级选一个并改写锁定。
+//
+// 【判据为什么就是「还在 info.enemy_armies 里」】info.enemy_armies 是引擎给的
+// 「当前可见的敌方军队」：目标走出视野就不在列表里，转换成功后归属改变、
+// 同样不再出现在敌方列表里（那正是我们想要的「转换完成」信号）。
+// 两个出口自动合一，不需要额外的状态跟踪。
+static const tagArmy *FindLockedConversionTarget()
+{
+    if (priestConversionLockSN == -1)
+        return nullptr;
+    for (const tagArmy &enemy : info.enemy_armies)
+    {
+        if (enemy.SN == priestConversionLockSN && enemy.Blood > 0)
+            return &enemy;
+    }
+    return nullptr;
+}
+
 // 返回敌方兵种的攻击射程（单位：地图格）；近战兵种返回 2。
 // 用途：判断攻击祭司的敌人是否已进入其有效射程。
 // 数值取自 config.json 的 DIS_* 配置；多级兵种取较大值以保证安全裕度。
@@ -5977,10 +6010,45 @@ static void ManagePriest(UsrAI *ai)
         // 「总攻阶段起始帧」的定义，而它自己的注释里写的就是「此后祭司进入只
         // 保存实力状态 —— 不再转换」。此前转士兵的分支在这条门槛之后仍然生效，
         // 注释与代码并不一致，这一条把行为对齐到注释。
-        const tagArmy *armyTarget =
-            (anyEnemyVisible && g_frame < USR_PRIEST_PASSIVE_FRAME)
-                ? FindPriestConversionTarget(*priest)
-                : nullptr;
+        // 【目标锁定：一旦选定就转到完成 / 死亡 / 离开视野】
+        //
+        // 原先这里是每次调用都重选一遍（FindPriestConversionTarget 按兵种优先级），
+        // 于是目标一变就重新 HumanAction —— 而每次重发都中止并重建关系、转换进度
+        // 清零。实测最新一局到 f=25274 为止新开了 15 次转换指令、换了 10 个目标，
+        // 其中有两次间隔只有 6~18 帧，一个都没转完。
+        //
+        // 现在改成：先看锁定的目标还在不在（FindLockedConversionTarget 的判据是
+        // 「仍在 info.enemy_armies 里且活着」—— 死亡、走出视野、被转成我方的
+        // 三种情况都会让它从列表里消失，自动落到重选分支）；不在才按优先级重选
+        // 并改写锁定。
+        const tagArmy *armyTarget = nullptr;
+        if (anyEnemyVisible && g_frame < USR_PRIEST_PASSIVE_FRAME)
+        {
+            armyTarget = FindLockedConversionTarget();
+            if (armyTarget == nullptr)
+            {
+                const int prevLock = priestConversionLockSN;
+                armyTarget = FindPriestConversionTarget(*priest);
+                priestConversionLockSN =
+                    armyTarget != nullptr ? armyTarget->SN : -1;
+                // 锁定发生变更（上一个目标死了 / 走出视野 / 被转成我方的）才记一行。
+                // 加锁之后【这行的出现频率就是「祭司一共换了几次转换目标」】——
+                // 加锁前那一局到 f=25274 换了 10 个目标，正是它要消掉的东西。
+                if (armyTarget != nullptr && armyTarget->SN != prevLock)
+                {
+                    char lockbuf[160];
+                    snprintf(lockbuf, sizeof(lockbuf),
+                             "[CONVLOCK] f=%d lock %d -> %d sort=%d", g_frame,
+                             prevLock, armyTarget->SN, armyTarget->Sort);
+                    AiDebugLog(lockbuf);
+                }
+            }
+        }
+        else
+        {
+            // 视野里没有敌兵、或已进入总攻阶段（不再转士兵）→ 解除锁定。
+            priestConversionLockSN = -1;
+        }
         const tagBuilding *buildingTarget = nullptr;
         if (!armyTarget && g_frame >= USR_PRIEST_PASSIVE_FRAME)
             buildingTarget = FindEnemySiege(*priest);
