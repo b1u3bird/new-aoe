@@ -331,12 +331,16 @@ static const int USR_ARMY_RALLY_ORDER_INTERVAL = 120;
 // 取 20 而不是更小：落点本身分布在 8~16 格的圈上（见下面两个常量），
 // 判定半径必须罩得住最外圈，否则外圈的单位会被反复要求「去中间」。
 static const int USR_ARMY_RALLY_ARRIVED_DIS2 = 400;
-// 集结圈的基准半径与层距（格）。16 个方位 × 3 圈 = 48 个互不相同的落点，
-// 够铺开一支部队。
+// 【当前未使用】集结圈的基准半径与层距（格）。
 //
-// 【为什么不能全发中心那一格】所有单位 HumanMove 到同一个坐标会挤成一堆：
-// 后来者进不去（那一格被先到的占住），引擎还会因为目标格四邻全被占而按
-// nullPath 反复取消指令。散开落点之后每人的目标格都是独立的。
+// 曾经用它们把部队铺成 16 方位 × 3 圈（48 个落点），但实现有 bug 已回退：
+// 槽位是按「遍历顺序」现算的，而到位的单位会被 `continue` 跳过、不占槽位 ——
+// 于是每有一个单位到位，后面所有单位就往前顶一格、集体换位置，表现为部队在
+// 中心来回跑。
+//
+// 【回退后的现状】所有单位 HumanMove 到地图中心同一格。这确实会挤：后来者
+// 进不去，引擎还会因为目标格四邻全被占而按 nullPath 反复取消指令。若要重新
+// 做散开，槽位必须按【单位 SN】固定映射、不能依赖遍历时到没到位。
 static const int USR_ARMY_RALLY_RING_BASE = 8;
 static const int USR_ARMY_RALLY_RING_STEP = 4;
 // 农民自卫的启动帧。此前的农民遇袭一律靠撤离，不还手 —— 早期被零星骚扰
@@ -9261,13 +9265,6 @@ static void ManageOffensiveArmy(UsrAI *ai)
       lastArmyRallyFrame = g_frame;
       const int cx = MAP_L / 2;
       const int cy = MAP_U / 2;
-      // 16 方向单位向量（×100 整数表），与 PriestFrontPostBlock / 站桩环
-      // 是同一套 —— 用整数表而不是 sin/cos，免去浮点取整带来的落点抖动。
-      static const int kCos16[16] = {100, 92, 71, 38, 0, -38, -71, -92,
-                                     -100, -92, -71, -38, 0, 38, 71, 92};
-      static const int kSin16[16] = {0, 38, 71, 92, 100, 92, 71, 38,
-                                     0, -38, -71, -92, -100, -92, -71, -38};
-      int slot = 0;
       for (const tagArmy &army : info.armies)
       {
         if (!IsOffensiveArmy(army))
@@ -9276,20 +9273,8 @@ static void ManageOffensiveArmy(UsrAI *ai)
         if (BlockDis2(army.BlockDR, army.BlockUR, cx, cy) <=
             USR_ARMY_RALLY_ARRIVED_DIS2)
           continue;
-        // 【散开落点】16 方位轮流取、每满一圈往外挪一层，所以每个单位拿到的
-        // 目标格都不同。全发中心那一格会挤成一堆：后来者进不去，引擎还会因为
-        // 目标格四邻全被占而按 nullPath 取消指令。
-        const int dir = slot % 16;
-        const int ring = (slot / 16) % 3;
-        ++slot;
-        const int radius =
-            USR_ARMY_RALLY_RING_BASE + ring * USR_ARMY_RALLY_RING_STEP;
-        const int tx =
-            max(1, min(MAP_L - 2, cx + kCos16[dir] * radius / 100));
-        const int ty =
-            max(1, min(MAP_U - 2, cy + kSin16[dir] * radius / 100));
-        ai->HumanMove(army.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
-                      (ty + 0.5) * double(BLOCKSIDELENGTH));
+        ai->HumanMove(army.SN, (cx + 0.5) * double(BLOCKSIDELENGTH),
+                      (cy + 0.5) * double(BLOCKSIDELENGTH));
       }
     }
     return;
