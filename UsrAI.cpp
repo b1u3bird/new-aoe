@@ -134,6 +134,25 @@ static bool priestExploreDone = false;
 // 【所以必须贴上去】，10 格处是绝对转不到的 —— 而且原实现"到 10 格就不管了"
 // 会让祭司停在厂外干等一个可见敌兵来触发转换（实测它停在 (15,77)、minDis=9999）。
 static const int USR_PRIEST_SIEGE_TOUCH_DIS2 = 4;
+// 攻城厂【还没被侦察到】时，祭司朝估算方位逐步接近的步长与最近距离（格）。
+//
+// 【为什么需要「走过去」这一步】转换攻城厂需要它的 SN，而 SN 只能从
+// info.enemy_buildings 拿 —— 也就是必须【已经看到】它。可祭司平时只在 40 格带上
+// 待命，那个距离的视野覆盖不到厂；而「走向厂」那段又要求 FindEnemySiegeBuilding()
+// 非空（同样要求已经看到它）。于是形成死锁：看不到就不走过去、不走过去就永远
+// 看不到。实测某局祭司停在 (14,7)、离锚点曼哈顿只有 6 格，满血、视野内无敌人，
+// 却整整 1500 帧没发起过一次转换。
+//
+// 【为什么朝估算方位走是可靠的】四张图的敌方基地都在我方市镇中心的对角线上
+// （实测偏移 map(-66,+64) / map1(+73,-65) / map2(-57,-83) / map3(+64,-58)，
+// 见 EstimateEnemySiegeAnchor 的注释），所以"往锚点方向走"这个方向不会错，
+// 只有估算误差（最差曼哈顿 26 格）会让厂晚一点进入视野。
+//
+// 【为什么是「逐步」而不是「走到固定距离」】固定距离的话，走到那儿还没看见厂
+// 就会永久停住 —— 而我们并不知道厂离锚点究竟有多远。每轮推进一个步长，
+// 走到最近距离为止，视野扫过的范围就一路扩过去。
+static const int USR_PRIEST_SIEGE_PROBE_STEP = 4;
+static const int USR_PRIEST_SIEGE_PROBE_MIN = 3;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
 //
@@ -5591,6 +5610,47 @@ static void ManagePriest(UsrAI *ai)
                     lastPriestOrderFrame = g_frame;
                 }
                 return;
+            }
+        }
+        else
+        {
+            // 【攻城厂还没被侦察到 → 朝估算的基地方位逐步探过去】
+            // 这一步是为了打破「看不到就不走过去、不走过去就永远看不到」的死锁，
+            // 完整理由见 USR_PRIEST_SIEGE_PROBE_STEP 上方的说明。
+            int anchorDR = 0;
+            int anchorUR = 0;
+            if (EstimateEnemySiegeAnchor(anchorDR, anchorUR))
+            {
+                const int curDis = BlockDis(priest->BlockDR, priest->BlockUR,
+                                            anchorDR, anchorUR);
+                // 每轮朝锚点推进一个步长，但不越过最近距离 —— 再往里就是敌方
+                // 基地核心了，而厂通常就在锚点附近（估算误差最差 26 格曼哈顿）。
+                const int probeDis =
+                    max(USR_PRIEST_SIEGE_PROBE_MIN,
+                        curDis - USR_PRIEST_SIEGE_PROBE_STEP);
+                if (curDis > probeDis)
+                {
+                    int goalDR = -1;
+                    int goalUR = -1;
+                    // 复用祭司驻留点那套取点：沿"祭司相对锚点"的方位取 probeDis
+                    // 格处的可站格，所以走的是它自己那条射线，不会横穿基地。
+                    if (PriestFrontPostBlock(anchorDR, anchorUR, priest->BlockDR,
+                                             priest->BlockUR, probeDis, goalDR,
+                                             goalUR) &&
+                        ShouldReissuePriestMove(priest, goalDR, goalUR))
+                    {
+                        priestMoveOrderId = ai->HumanMove(
+                            priest->SN,
+                            (goalDR + 0.5) * double(BLOCKSIDELENGTH),
+                            (goalUR + 0.5) * double(BLOCKSIDELENGTH));
+                        priestEmergencyTarget = make_pair(goalDR, goalUR);
+                        priestEmergencyTargetFrame = g_frame;
+                        priestMoveFromDR = priest->BlockDR;
+                        priestMoveFromUR = priest->BlockUR;
+                        lastPriestOrderFrame = g_frame;
+                    }
+                    return;
+                }
             }
         }
     }
