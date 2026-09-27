@@ -449,6 +449,13 @@ static const int USR_ARROWTOWER_TARGET = 4;
 // 注意 enemyai.cpp 的 FAT/SAT/TAT 是那个文件内部的宏，UsrAI.cpp 里看不到，
 // 所以这里是独立取值 —— 两处若要调整需要同步。
 static const int USR_ARROWTOWER_STOP_FRAME = 21000;
+// 过了 USR_ARROWTOWER_STOP_FRAME 之后，石头本来就没用了（箭塔停建）——
+// 但【修塔】还要花石头：内核按 REPAIR_COST_RATIO(0.5) × 本次回血比例 ×
+// 建筑原造价 扣料（Building.cpp:453），一座箭塔修满约耗 75 石。
+// 所以在这两个阈值之内额外保一条采石线：只要库存低于该值就继续采石。
+// 实测（改之前）石头在 f=42000 被修塔耗到 0，之后塔只能看着它烂。
+static const int USR_STONE_KEEP_FRAME = 24000;
+static const int USR_STONE_KEEP_AMOUNT = 300;
 // 靶场目标数量。本 AI 的全部兵力（战车弓兵）都由靶场训练，多一座靶场就是
 // 多一倍的出兵速度。策略文档《快速升级和取得胜利》第 71/75 行：
 // 「8 分多一点就可以两个靶场同时出兵，10 分钟前 3 个靶场同时出兵」。
@@ -2087,7 +2094,15 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     // 石头：造箭塔需要石头（每个 150），仅在箭塔还要建时高权重采石；
     // 箭塔建满、或过了第三波的停建帧之后石头无其他用途，
     // 停止采集把农民让给食物/木头/黄金。
-    if (ArrowTowerStillWanted())
+    //
+    // 【补一条：24000 帧前只要不足 300 就一直采】
+    // 上面那两条判据（ArrowTowerStillWanted = 21000 帧前 && 塔没建满）过了
+    // 就完全不采石 —— 而修塔是要花石头的：内核按 REPAIR_COST_RATIO(0.5)
+    // × 本次回血比例 × 建筑原造价 扣料（Building.cpp:453），一座箭塔修满
+    // 约耗 75 石、三人同修则按三倍速率消耗。实测石头在 f=42000 被修塔耗到 0，
+    // 之后塔只能看着它烂。所以在这两个阈值之内额外保一条供给线。
+    if (ArrowTowerStillWanted() ||
+        (g_frame < USR_STONE_KEEP_FRAME && info.Stone < USR_STONE_KEEP_AMOUNT))
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
