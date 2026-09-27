@@ -4527,13 +4527,7 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     bowmanTarget = 0;
     scoutTarget = 0;
   } else {
-    // 普通弓兵 5 个（40 食 + 20 木，便宜、前期即可产）。
-    // 【车轮科技完成后归零】普通弓兵是战车弓兵的下位替代（血 35 / 攻 3 /
-    // 射程 5 vs 血 70 / 攻 4 / 射程 7），科技一出来就把它整个让给主力 ——
-    // 下面 chariotArcherTarget 是按人口上限倒推的，bowmanTarget 归零后
-    // 那 5 个人口会自动落到战车弓兵上（20 → 25）。
-    // 已经在场上的普通弓兵不会因此消失，只是不再补充。
-    bowmanTarget = wheelTechReady ? 0 : 5;
+    bowmanTarget = 5;        // 普通弓兵 5 个（40 食 + 20 木，便宜、前期即可产）
     // 侦察骑兵：USR_SCOUT_FIRST_FRAME 后生产 1 个保命型（遇敌即撤回基地，
     // 不承担侦测）；USR_SCOUT_RECON_FRAME 后再补 1 个，由它专职侦测敌方基地
     // （见 DispatchScouts 的角色判定）。
