@@ -348,6 +348,17 @@ static const int USR_FARMER_TOWER_STUCK_MAX_TRIES = 3;
 // 这件事会持续得比较久（所有农民都往同一座塔挤），拉黑太短会立刻被重新选中。
 static const int USR_FARMER_TOWER_BLACKLIST_FRAMES = 900;
 
+// ── 士兵牵制敌方箭塔 ────────────────────────────────────────────────
+// 每座箭塔最多派几个士兵去牵制。取 4：
+//   · 塔一次只打一个目标（enemyai.cpp:447-453 打的是 Defend.back()），
+//     4 个已经足以把祭司的挨打概率压到 1/5 以下；
+//   · 士兵同时还是推基地的主力，不能全填进塔里。军队总数约 20，
+//     5 座塔 × 4 = 20 是上限，实际按塔数摊薄（填不满就少填）。
+//
+// 【这块挂在哪儿】不另起一路，而是 ManageOffensiveArmy 里「视野里没有敌方士兵
+// → 打建筑」那一段的目标选择 —— 所以视野里一出现敌兵，军队立刻丢下塔回去打敌人。
+static const int USR_ARMY_TOWER_PER_TARGET_MAX = 4;
+
 // 阶段 B 的时间兜底帧。取 42000 = 农民出发(38000)之后 4000 帧，也就是农民
 // 走完那 130 格（约 1500 帧）到达环上之后再过 2500 帧。
 // 【为什么需要】EstimateEnemySiegeAnchor 的注释记录过一个真实故障：攻城厂整局
@@ -8589,6 +8600,72 @@ static void KiteRangedBackFromMelee(UsrAI *ai)
     }
 }
 
+// 给一支部队挑一座敌方箭塔去牵制。
+//
+// 【为什么要「先认已有的锁」】重复对同一目标下 HumanAction 会中止并重建关系、
+// 把已经打出去的伤害进度清零（AssignArrowTowerTargets 的同一处注释）。
+// 而本函数每帧都会被调用（外层有 60 帧节流），如果每次都按「离谁近」重算，
+// 单位一边移动一边换目标，伤害永远攒不起来。所以第一优先是沿用已有的攻击锁。
+//
+// 【为什么「都满员了还要挑最近的」】宁可超员排队，也不能让士兵因为
+// 「塔都满了」而站着不动 —— 排队的那些会在外围等着，塔一没就补上。
+static int PickEscortTowerForArmy(const tagArmy &army,
+                                  const vector<const tagBuilding *> &towers,
+                                  map<int, int> &towerWorkers, int perTargetMax)
+{
+    // ① 已经锁着一座还活着的塔、且它还没满 → 继续打它
+    const int locked = GetLockedArmyTarget(army.SN);
+    if (locked != -1)
+    {
+        for (size_t t = 0; t < towers.size(); ++t)
+        {
+            if (towers[t]->SN == locked &&
+                towerWorkers[locked] < perTargetMax)
+            {
+                towerWorkers[locked]++;
+                return locked;
+            }
+        }
+    }
+
+    // ② 挑离自己最近、还有名额的那座
+    int bestSN = -1;
+    int bestDis2 = 1000000000;
+    for (size_t t = 0; t < towers.size(); ++t)
+    {
+        const int sn = towers[t]->SN;
+        if (towerWorkers[sn] >= perTargetMax)
+            continue;
+        const int d2 = BlockDis2(army.BlockDR, army.BlockUR,
+                                 towers[t]->BlockDR, towers[t]->BlockUR);
+        if (d2 < bestDis2)
+        {
+            bestDis2 = d2;
+            bestSN = sn;
+        }
+    }
+    if (bestSN != -1)
+    {
+        towerWorkers[bestSN]++;
+        return bestSN;
+    }
+
+    // ③ 全满员 → 仍然挑最近的那座（超员排队，不让人闲着）
+    for (size_t t = 0; t < towers.size(); ++t)
+    {
+        const int d2 = BlockDis2(army.BlockDR, army.BlockUR,
+                                 towers[t]->BlockDR, towers[t]->BlockUR);
+        if (d2 < bestDis2)
+        {
+            bestDis2 = d2;
+            bestSN = towers[t]->SN;
+        }
+    }
+    if (bestSN != -1)
+        towerWorkers[bestSN]++;
+    return bestSN;
+}
+
 static void ManageOffensiveArmy(UsrAI *ai)
 {
   // 进攻时机：过了 USR_OFFENSIVE_FRAME（33000）之后。此前军队只做接敌自卫
@@ -8666,27 +8743,58 @@ static void ManageOffensiveArmy(UsrAI *ai)
     return;
   }
 
+  // 【农民拆塔阶段：军队改为分散去牵制敌方箭塔】
+  //
+  // 【为什么就放在这里、不另起一路】这段代码只有「视野里没有敌方士兵」时才走得到
+  // —— 上面 `if (HasVisibleEnemyArmy()) { ...; return; }` 已经先返回了。
+  // 所以视野里一出现敌兵，军队就自动丢下塔回去打敌人（那是 AssignFieldDefense
+  // 的职责），不需要任何额外判据，也不会出现两套控制每帧互抢。
+  //
+  // 【为什么要把目标从 FindOffensiveTargetSN() 换掉】那个函数优先选敌方市镇中心，
+  // 全军会一起压过去 —— 而围着攻城厂的那几座箭塔没人管，祭司的进门条件
+  // （AllEnemyArrowTowersEngaged：每一座塔都要被牵制住）就永远不成立。
+  // 改成按单位分散到各座塔，才能让每一座都有人。
+  //
+  // 【士兵在这里的价值不只是拆塔】它们的伤害效率和农民一样是 1 点/次
+  // （战车弓兵 ATK 4 × 建筑 20% = 0.8 → 下限取 1；Development.cpp:47 那个
+  // 「军队打建筑 2 倍」的加成只给剑士/骑兵/改进弓兵，战车弓兵不在名单里）。
+  // 但它们【是唯一会被箭塔打的目标】—— 塔的目标取自 Defend 集合，
+  // 而那个集合只收我方军队（enemyai.cpp:238-241）。士兵在塔边，
+  // 塔的火力就不再全部落在只有 100 血的祭司身上。
+  vector<const tagBuilding *> escortTowers;
+  int escortAnchorDR = 0;
+  int escortAnchorUR = 0;
+  const bool towerAssault = (farmerEscortStage == FARMER_ESCORT_STAGE_TOWER);
+  if (towerAssault)
+    CollectEnemyArrowTowers(escortTowers, escortAnchorDR, escortAnchorUR);
+
   const int targetSN = FindOffensiveTargetSN();
   const int orderInterval = 60;
   if (g_frame - offensiveLastOrderFrame < orderInterval)
     return;
   offensiveLastOrderFrame = g_frame;
 
+  map<int, int> towerWorkers;  // 塔 SN -> 本轮已认领的士兵数
   bool issuedAttack = false;
   for (const tagArmy &army : info.armies) {
     if (!IsOffensiveArmy(army))
       continue;
 
-    if (targetSN != -1) {
-      if (GetLockedArmyTarget(army.SN) == targetSN)
+    int armyTarget = targetSN;
+    if (towerAssault && !escortTowers.empty())
+      armyTarget = PickEscortTowerForArmy(army, escortTowers, towerWorkers,
+                                          USR_ARMY_TOWER_PER_TARGET_MAX);
+
+    if (armyTarget != -1) {
+      if (GetLockedArmyTarget(army.SN) == armyTarget)
         continue;
       ClearArmyTargetLock(army.SN);
-      currentTarget[army.SN] = targetSN;
+      currentTarget[army.SN] = armyTarget;
       // 【不限距离】这里是刻意不做距离判断的：只要目标建筑已被侦察到，
       // 全军就出发，哪怕它在地图另一头。引擎会自己寻路过去
       // （目标建筑是 goalOb，不受「目标格四邻全被占就 nullPath」那条影响）。
       // 不要把「超过 N 格就放弃」加进来 —— 那是防守逻辑的取舍，不是进攻的。
-      ai->HumanAction(army.SN, targetSN);
+      ai->HumanAction(army.SN, armyTarget);
       issuedAttack = true;
     } else if (enemyBaseBlockDR >= 0 && enemyBaseBlockUR >= 0) {
       // 基地暂时离开视野时，先向最后已知位置推进，等待重新发现。
