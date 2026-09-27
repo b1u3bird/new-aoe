@@ -184,6 +184,11 @@ static const int USR_PRIEST_SIEGE_PICK_DISTANCE = 40;
 // 【半径为什么是 10】塔射程 7（config.json:261）；祭司贴到厂边时自己在厂的
 // 2 格内，所以「厂 10 格内的塔」正好覆盖"够得到祭司"的全部塔，再留 3 格余量
 // 应对贴邻判据的取整。
+//
+// 【当前已不使用】门控按需求改成了「所有敌方箭塔全部被摧毁」才放行
+// （见 SiegeTowersCleared），比这个半径严得多，所以这个常量不再参与判断 ——
+// 留着是为了记录下面那组实测数据与半径的推导，将来若要放宽回「只清厂周围」
+// 可以直接启用。
 static const int USR_PRIEST_SIEGE_TOWER_CLEAR = 10;
 // 祭司「正在转换」的判定距离（格）。取 config.json 的 DIS_PRIEST = 12，
 // 也就是它真正能转换的距离。
@@ -322,9 +327,18 @@ static const int USR_ARMY_RALLY_FRAME = 30000;
 // 2.236 走完约 1000 帧；这个间隔够走一段，又不至于频繁重发（每次 HumanMove
 // 都会经 suspendRelation 清一次路径）。
 static const int USR_ARMY_RALLY_ORDER_INTERVAL = 120;
-// 离地图中心的距离平方在这个值以内就算到位（10 格 = 100）。
-// 不取更小的值：部队走到中心附近会自然散开，要求太严会让他们在原地反复微调。
-static const int USR_ARMY_RALLY_ARRIVED_DIS2 = 100;
+// 离地图中心的距离平方在这个值以内就算到位（20 格 = 400）。
+// 取 20 而不是更小：落点本身分布在 8~16 格的圈上（见下面两个常量），
+// 判定半径必须罩得住最外圈，否则外圈的单位会被反复要求「去中间」。
+static const int USR_ARMY_RALLY_ARRIVED_DIS2 = 400;
+// 集结圈的基准半径与层距（格）。16 个方位 × 3 圈 = 48 个互不相同的落点，
+// 够铺开一支部队。
+//
+// 【为什么不能全发中心那一格】所有单位 HumanMove 到同一个坐标会挤成一堆：
+// 后来者进不去（那一格被先到的占住），引擎还会因为目标格四邻全被占而按
+// nullPath 反复取消指令。散开落点之后每人的目标格都是独立的。
+static const int USR_ARMY_RALLY_RING_BASE = 8;
+static const int USR_ARMY_RALLY_RING_STEP = 4;
 // 农民自卫的启动帧。此前的农民遇袭一律靠撤离，不还手 —— 早期被零星骚扰
 // 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
 // 再让农民挨打时就地反击。
@@ -8147,30 +8161,25 @@ static bool AllEnemyArrowTowersEngaged()
     return true;
 }
 
-// 攻城厂附近的箭塔是否都已【被摧毁】（不只是被牵制，理由见
+// 敌方箭塔是否已【全部被摧毁】（不只是被牵制，理由见
 // USR_PRIEST_SIEGE_TOWER_CLEAR 的说明：被牵制的塔照样开火，而祭司
 // 100 血、防御 0，扛不住几轮）。
 //
-// 已摧毁的塔 Blood<=0、根本不会进下面的循环，所以判据就是
-// 「厂周围这个半径内没有【活着的】箭塔」。
+// 【按需求改成「全部」】原先只查「攻城厂周围 USR_PRIEST_SIEGE_TOWER_CLEAR
+// 格以内」的塔，现在改成任何一座活着的敌方箭塔都会拦住祭司 —— 它会一直等到
+// 敌方塔被清光才去转化攻城厂。
 //
-// 【拿不到厂位置时不设限】EstimateEnemySiegeAnchor 给不出锚点时（没有我方
-// 中心、也没侦察到任何敌方建筑）无从判断远近，这时放行 —— 否则开局就会把
-// 祭司永久锁在门外。
+// 因为敌方塔的位置不一定都被侦察到，「已知的全清光」才是能执行的判据；
+// 这比只盯厂周围严得多，代价是如果有一座塔始终拆不掉（农民死光、或它在
+// 够不到的地方），祭司就会一直不进厂 —— 从「送死」变成「僵持」。
+//
+// 已摧毁的塔 Blood<=0、根本不会进下面的循环，所以判据就是「没有活着的塔」。
 static bool SiegeTowersCleared()
 {
-    int siegeDR = 0;
-    int siegeUR = 0;
-    if (!EstimateEnemySiegeAnchor(siegeDR, siegeUR))
-        return true;
-    const int r2 =
-        USR_PRIEST_SIEGE_TOWER_CLEAR * USR_PRIEST_SIEGE_TOWER_CLEAR;
     for (const tagBuilding &b : info.enemy_buildings)
     {
-        if (b.Blood <= 0 || b.Type != BUILDING_ARROWTOWER)
-            continue;
-        if (BlockDis2(b.BlockDR, b.BlockUR, siegeDR, siegeUR) <= r2)
-            return false;   // 厂旁边还有活着的塔
+        if (b.Blood > 0 && b.Type == BUILDING_ARROWTOWER)
+            return false;   // 还有塔活着
     }
     return true;
 }
@@ -8183,8 +8192,9 @@ static bool SiegeTowersCleared()
 //   ① 过了 USR_PRIEST_PASSIVE_FRAME —— 那之前军队还没成型，押上祭司是亏的；
 //   ② 视野里没有敌方军队 —— 有敌人时出门就是送（原设计）；
 //   ③ 所有已知箭塔都被牵制 —— 每座塔都有人在打，它们才不会专心招呼祭司；
-//   ④ 厂周围 USR_PRIEST_SIEGE_TOWER_CLEAR 格内的箭塔【已被摧毁】——
-//      ③ 只保证"有人在打它"，塔照样开火，而祭司 100 血、防御 0，扛不住几轮。
+//   ④ 敌方箭塔【全部已被摧毁】—— ③ 只保证"有人在打它"，塔照样开火，而祭司
+//      100 血、防御 0，扛不住几轮。按需求这里取「全部」而不是原来的「厂周围
+//      若干格内」：祭司要等到敌方塔被清光才去转化攻城厂。
 static bool CanPriestApproachSiege()
 {
     if (g_frame < USR_PRIEST_PASSIVE_FRAME)
@@ -9251,6 +9261,13 @@ static void ManageOffensiveArmy(UsrAI *ai)
       lastArmyRallyFrame = g_frame;
       const int cx = MAP_L / 2;
       const int cy = MAP_U / 2;
+      // 16 方向单位向量（×100 整数表），与 PriestFrontPostBlock / 站桩环
+      // 是同一套 —— 用整数表而不是 sin/cos，免去浮点取整带来的落点抖动。
+      static const int kCos16[16] = {100, 92, 71, 38, 0, -38, -71, -92,
+                                     -100, -92, -71, -38, 0, 38, 71, 92};
+      static const int kSin16[16] = {0, 38, 71, 92, 100, 92, 71, 38,
+                                     0, -38, -71, -92, -100, -92, -71, -38};
+      int slot = 0;
       for (const tagArmy &army : info.armies)
       {
         if (!IsOffensiveArmy(army))
@@ -9259,8 +9276,20 @@ static void ManageOffensiveArmy(UsrAI *ai)
         if (BlockDis2(army.BlockDR, army.BlockUR, cx, cy) <=
             USR_ARMY_RALLY_ARRIVED_DIS2)
           continue;
-        ai->HumanMove(army.SN, (cx + 0.5) * double(BLOCKSIDELENGTH),
-                      (cy + 0.5) * double(BLOCKSIDELENGTH));
+        // 【散开落点】16 方位轮流取、每满一圈往外挪一层，所以每个单位拿到的
+        // 目标格都不同。全发中心那一格会挤成一堆：后来者进不去，引擎还会因为
+        // 目标格四邻全被占而按 nullPath 取消指令。
+        const int dir = slot % 16;
+        const int ring = (slot / 16) % 3;
+        ++slot;
+        const int radius =
+            USR_ARMY_RALLY_RING_BASE + ring * USR_ARMY_RALLY_RING_STEP;
+        const int tx =
+            max(1, min(MAP_L - 2, cx + kCos16[dir] * radius / 100));
+        const int ty =
+            max(1, min(MAP_U - 2, cy + kSin16[dir] * radius / 100));
+        ai->HumanMove(army.SN, (tx + 0.5) * double(BLOCKSIDELENGTH),
+                      (ty + 0.5) * double(BLOCKSIDELENGTH));
       }
     }
     return;
