@@ -480,6 +480,15 @@ static const int USR_FARMER_TOWER_BLACKLIST_FRAMES = 900;
 // 【这块挂在哪儿】不另起一路，而是 ManageOffensiveArmy 里「视野里没有敌方士兵
 // → 打建筑」那一段的目标选择 —— 所以视野里一出现敌兵，军队立刻丢下塔回去打敌人。
 static const int USR_ARMY_TOWER_PER_TARGET_MAX = 4;
+// 【开关：军队打建筑时是否分散去牵制各座敌方箭塔】
+//
+// true  = 按单位把军队分配到各座塔上（每塔上限 USR_ARMY_TOWER_PER_TARGET_MAX）
+// false = 全军统一打 FindOffensiveTargetSN() 选出的那一个目标（优先市镇中心）
+//
+// 按需求取消均摊，取 false。保留开关而不是删掉那段调用，是为了让
+// PickEscortTowerForArmy 仍被「引用」，不产生 -Wunused-function 警告；
+// 想恢复分散牵制时只改这一个常量。
+static const bool USR_ARMY_TOWER_SPREAD_ENABLED = false;
 
 // 阶段 B 的时间兜底帧。取 39000 = 农民出发(35000)之后 4000 帧，也就是农民
 // 走完那 130 格（约 1500 帧）到达环上之后再过 2500 帧。
@@ -9407,7 +9416,7 @@ static void ManageOffensiveArmy(UsrAI *ai)
       continue;
 
     int armyTarget = targetSN;
-    if (towerAssault && !escortTowers.empty())
+    if (USR_ARMY_TOWER_SPREAD_ENABLED && towerAssault && !escortTowers.empty())
       armyTarget = PickEscortTowerForArmy(army, escortTowers, towerWorkers,
                                           USR_ARMY_TOWER_PER_TARGET_MAX);
 
