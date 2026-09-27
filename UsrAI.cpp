@@ -6494,9 +6494,31 @@ static bool IsScoutFrontierUsable(int blockDR, int blockUR)
     return true;
 }
 
+// 【朝敌方锚点方向加权 —— 优先侦察对角线】
+//
+// 需求是「侦察骑兵优先侦察对角线」。四张图的敌方基地都在我方市镇中心的对角线上
+// （实测偏移见 EstimateEnemySiegeAnchor 的注释：-66,+64 / +73,-65 / -57,-83 /
+// +64,-58），所以朝那个方向探最有可能最早发现敌方基地与攻城厂。
+//
+// 【为什么这件事是前置】攻城厂必须【已经进 info.enemy_buildings】，祭司才能转换
+// 它 —— 因为转换指令要的是它的 SN，而 SN 只能从那份已侦察列表里拿。侦察兵不去，
+// 厂就永远不出现在列表里，祭司整条获胜路径都无从执行（实测有一局祭司站在敌方
+// 锚点旁满血待命 1500 帧、一次转换都没发起过）。
+//
+// 【锚点为什么在循环外算一次】EstimateEnemySiegeAnchor 内部要遍历敌方建筑列表，
+// 放进 32×32 的双重循环里会白跑上千次。
+//
+// 【权重为什么取这个量级】原评分是 -dis2*10（就近贪婪），最坏 130²*10 ≈ 17 万；
+// 朝向项按同样的平方距离直接减（最坏 130² ≈ 1.7 万，约为就近项的十分之一）。
+// 这样「先探近处」仍然成立，但同等距离下朝敌方那一侧的点会胜出 ——
+// 效果是侦察兵一路朝对角线外扩，而不是围着基地四周均匀绕圈。
 static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR,
                                   int &targetUR)
 {
+    int anchorDR = 0;
+    int anchorUR = 0;
+    const bool haveAnchor = EstimateEnemySiegeAnchor(anchorDR, anchorUR);
+
     int bestScore = -2000000000;
     bool found = false;
     for (int dr = 2; dr < MAP_L - 2; ++dr)
@@ -6521,7 +6543,10 @@ static bool FindBestScoutFrontier(const tagArmy &scout, int &targetDR,
                     other.BlockUR == ur)
                     occupiedPenalty += 2500;
             }
-            const int score = -distance * 10 - recentPenalty - occupiedPenalty;
+            const int toAnchor =
+                haveAnchor ? BlockDis2(dr, ur, anchorDR, anchorUR) : 0;
+            const int score = -distance * 10 - toAnchor - recentPenalty -
+                              occupiedPenalty;
             if (!found || score > bestScore)
             {
                 bestScore = score;
