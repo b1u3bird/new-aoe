@@ -33,14 +33,7 @@ static const int USR_FIELD_SELF_DEFENSE_ORDER_INTERVAL = 12;
 // 挨打时才生效，不会因为「远处看得见敌人」就跑 —— 但 40 格确实比 12 格
 // 容易踩到，可能把正在推进的部队拽去救另一个方向的队友。
 // 如果实测发现部队因此散掉，往回收到 25~30 之间。
-// 【全图半径】地图边长最大 128（MAP_L / MAP_U 上限），999 覆盖任意两点。
-// 按需求把军队自卫的范围限制全部取消、改为全图索敌：
-//   · 协防：只要有友军在挨打（不论多远）就有人去救
-//   · 主动索敌：视野里任何位置的敌人都算候选
-//   · 打狮子：同理
-// 用一个大数而不是删掉距离判断，是为了保持判据形状不变、便于改回。
-static const int USR_FIELD_UNLIMITED_RADIUS = 999;
-static const int USR_FIELD_ASSIST_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
+static const int USR_FIELD_ASSIST_RADIUS = 40;
 // 普通军队【主动发现敌军】的最大欧氏距离（格）。这是 AssignFieldSelfDefense
 // 第 4 优先级（FindEnemyArmyInVision）的半径。
 //
@@ -52,9 +45,11 @@ static const int USR_FIELD_ASSIST_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
 // 20 格）的敌人，现在也会把部队从环上叫下去。
 // 代价：敌方远程（投石车射程 10）在这个距离上能打到我们，而我们战车弓兵只有 7
 // （研究完木材/工艺后 9）—— 会被迫在挨打的情况下靠近。
-static const int USR_FIELD_ARMY_AGGRO_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
-// 军队【主动去打狮子】的最大欧氏距离（格）。同样改为全图。
-static const int USR_FIELD_LION_AGGRO_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
+static const int USR_FIELD_ARMY_AGGRO_RADIUS = 12;
+// 军队【主动去打狮子】的最大欧氏距离（格）。
+// 原先与上面那条共用一个常量；上面从 7 提到 12 时把狮子一起放大会让部队为了打猎
+// 从阵线上跑开 12 格，所以拆出独立的一条，保持原值不动。
+static const int USR_FIELD_LION_AGGRO_RADIUS = 7;
 // 农民遭遇敌人时触发主动处理的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_FARMER_AGGRO_RADIUS = 7;
 // 箭塔重新选择攻击目标的最小间隔，单位为游戏帧。
