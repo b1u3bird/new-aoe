@@ -6056,6 +6056,46 @@ static void ManagePriest(UsrAI *ai)
             const int targetSN = armyTarget
                                      ? armyTarget->SN
                                      : (buildingTarget ? buildingTarget->SN : -1);
+            // 【诊断：为什么没发起转换】只在「有目标却没走到下发那一步」时记录。
+            //
+            // 【为什么必须加这一行】实测有过这样一局：祭司站在敌方锚点旁
+            // （(14,7)，离锚点曼哈顿 6 格）、满血 100、视野里一个敌兵都没有，
+            // 却整整 1500 帧没有发起过一次转换，[CONV] 一条都没有。
+            // 日志里能看到的只有「成功发起转换」的那几次，看不见「为什么没发起」，
+            // 于是只能靠猜（是没目标？冷却？还是有在途指令？）。
+            // 这一行把那几扇门的值一次摊开，直接定位。
+            if (targetSN == -1 || priest->ConvertCooldown > 0 ||
+                priestMoveOrderId != -1 || priest->WorkObjectSN == targetSN ||
+                closeThreat != nullptr)
+            {
+                static int lastConvBlockLogFrame = USR_INVALID_FRAME;
+                if (lastConvBlockLogFrame == USR_INVALID_FRAME ||
+                    g_frame - lastConvBlockLogFrame >= 500)
+                {
+                    lastConvBlockLogFrame = g_frame;
+                    // siegeSeen 是【已侦察到的】攻城厂数量。它为 0 而祭司又停在
+                    // 敌方基地旁边，就说明 FindEnemySiegeBuilding 拿不到厂
+                    // （敌方基地侦察到了、厂本身没有），祭司永远不会有转换目标。
+                    int siegeSeen = 0;
+                    for (const tagBuilding &b : info.enemy_buildings)
+                    {
+                        if (b.Blood > 0 && b.Type == BUILDING_SIEGE)
+                            ++siegeSeen;
+                    }
+                    char buf[288];
+                    snprintf(buf, sizeof(buf),
+                             "[CONVBLOCK] f=%d target=%d army=%d build=%d cd=%d "
+                             "mvId=%d wo=%d threat=%d siegeSeen=%d enemyB=%d "
+                             "priest=(%d,%d)",
+                             g_frame, targetSN, armyTarget ? 1 : 0,
+                             buildingTarget ? 1 : 0, priest->ConvertCooldown,
+                             priestMoveOrderId, priest->WorkObjectSN,
+                             closeThreat ? closeThreat->SN : -1, siegeSeen,
+                             (int)info.enemy_buildings.size(), priest->BlockDR,
+                             priest->BlockUR);
+                    AiDebugLog(buf);
+                }
+            }
             // 同一目标已有关系时不重复下达 HumanAction；重复指令会中止原关系。
             //
             // 【正在被威胁时不【新开】转换】上面那道「转换不被打断」保护的是
