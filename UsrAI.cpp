@@ -4490,6 +4490,30 @@ static bool IsUrgentRepairTarget(int buildingType)
     return buildingType == BUILDING_ARROWTOWER;
 }
 
+// 修理一座建筑最多同时派几个人。
+//
+// 【为什么可以多人同修】内核的修理进度是按「农民 ↔ 建筑」的关系记账的：
+// Core_List::manageRelationList（Core_List.cpp:471）每帧遍历所有 relation，
+// 每个处于 CoreDetail_UpdateRatio 阶段的农民各自执行一次 object_RatioChange
+// （Core_List.cpp:1405），里面【无条件】调用 buildGoalOb->update_Build()
+// （Building.cpp:494）。既没有「目标已被占用」的独占判据，也没有「每建筑
+// 每帧只推进一次」的合并 —— 所以 N 个人同修就是 N 倍速度。
+// 唯一的代价是资源也按 N 倍扣：tryDeductRepairHpCost（Building.cpp:453）
+// 按 REPAIR_COST_RATIO(0.5) × 本次回血比例 × 建筑原造价 扣木材/石料等，
+// 钱不够就 suspendRelation 当场停工（这是速度的唯一硬上限）。
+//
+// 注：config 里的 FARMER_CONSTRUCTSPEED(0.02) 是根【没接上的线】——
+// 除了定义与 json 那一行，全仓库没有任何地方读取它；真正的速率来自
+// Building::get_retio_Build()（Building.cpp:530），只看建筑自身的建造时长。
+//
+// 【为什么箭塔给 3 个、其余只给 1 个】箭塔是防守骨架，被打掉等于基地火力
+// 直接掉一档，值得为它多抽人；其余建筑（房屋、农场、市场）只等空闲农民
+// 顺手修，多抽等于用持续的采集产出换一次不紧急的修理。
+// 取值 3 的依据：单人修不住实测的那座塔（血线 86 → 27 → 11 一路掉到被拆），
+// 3 倍速才可能压过损耗；再高就要考虑石头消耗了（塔造价 150 石，修满约耗 75）。
+static const int USR_REPAIR_CREW_TOWER = 3;
+static const int USR_REPAIR_CREW_OTHER = 1;
+
 // 【诊断】空闲农民一个工作目标都没找出来时记录一行（节流）。
 //
 // 与 [FARFARM] 互补：[FARFARM] 记录「选了一个比近处农田更远的目标」，
@@ -4596,43 +4620,58 @@ static bool TryRepairDamagedBuilding(UsrAI *ai) {
     if (missing * 5 < building.MaxBlood)
       continue;
 
-    // 该建筑已有农民在修复（含正在赶路的）→ 跳过，避免多人挤同一建筑。
-    bool hasRepairer = false;
+    // 【统计当前有几个农民在修这座建筑】
+    //
+    // 原先这里是「只要有一个在修（含正在赶路的）就跳过」，等于每座建筑
+    // 永远只有一个人修。而内核是按 relation 逐人推进修理的、没有任何合并
+    // （理由见 USR_REPAIR_CREW_TOWER 上方的说明）—— 多人同修就是多倍速度，
+    // 那道判断把这条路堵死了。实测一座 125 血的塔，单人修的血线是
+    // 86 → 27 → 11 一路掉到被拆，修补量根本抵不过损耗。
+    const int crewLimit = IsUrgentRepairTarget(building.Type)
+                              ? USR_REPAIR_CREW_TOWER
+                              : USR_REPAIR_CREW_OTHER;
+    int repairers = 0;
     for (const tagFarmer &farmer : info.farmers) {
       if (farmer.Blood > 0 && farmer.WorkObjectSN == building.SN) {
-        hasRepairer = true;
-        break;
+        ++repairers;
       }
     }
-    if (hasRepairer)
+    if (repairers >= crewLimit)
       continue;
 
-    // 先找空闲农民；箭塔这类紧急目标在没人空闲时，再从采集队里抽最靠近的一个。
-    //
-    // 【原先只挑空闲农民】正常对局里农民几乎全在采集（TryAssignIdleFarmer
-    // 每帧都会把空闲农民派出去），空闲农民常年为 0 —— 于是这里恒为
-    // bestFarmerSN == -1，箭塔根本不会被修，一直掉血到被拆。
-    int bestFarmerSN = FindRepairFarmerSN(building, usedFarmers, true);
-    bool pulledFromWork = false;  // 诊断用：是不是从采集队里抽出来的
-    if (bestFarmerSN == -1 && IsUrgentRepairTarget(building.Type)) {
-      bestFarmerSN = FindRepairFarmerSN(building, usedFarmers, false);
-      pulledFromWork = (bestFarmerSN != -1);
-    }
-    if (bestFarmerSN == -1)
-      continue;  // 没人可派，处理下一个建筑
+    // 【一次把缺口补满，而不是每次只补一个人】
+    // 这个函数每 200 帧才跑一次；若一次只派一个，凑齐 3 个人要 600 帧，
+    // 塔早就没了。所以在这一轮里循环补齐到 crewLimit。
+    for (int slot = repairers; slot < crewLimit; ++slot) {
+      // 先找空闲农民；箭塔这类紧急目标在没人空闲时，再从采集队里抽最靠近的。
+      //
+      // 【原先只挑空闲农民】正常对局里农民几乎全在采集（TryAssignIdleFarmer
+      // 每帧都会把空闲农民派出去），空闲农民常年为 0 —— 于是这里恒为
+      // bestFarmerSN == -1，箭塔根本不会被修，一直掉血到被拆。
+      int bestFarmerSN = FindRepairFarmerSN(building, usedFarmers, true);
+      bool pulledFromWork = false;  // 诊断用：是不是从采集队里抽出来的
+      if (bestFarmerSN == -1 && IsUrgentRepairTarget(building.Type)) {
+        bestFarmerSN = FindRepairFarmerSN(building, usedFarmers, false);
+        pulledFromWork = (bestFarmerSN != -1);
+      }
+      if (bestFarmerSN == -1)
+        break;  // 没人可派了，剩下的名额留到下一轮
 
-    usedFarmers.insert(bestFarmerSN);
-    CancelPendingGatherOrder(bestFarmerSN);
-    ai->HumanAction(bestFarmerSN, building.SN);
-    farmerLastOrderFrame[bestFarmerSN] = g_frame;
-    repairedAny = true;
-    {
-      char buf[256];
-      snprintf(buf, sizeof(buf),
-               "[REPAIR] f=%d type=%d sn=%d blood=%d/%d farmer=%d pulled=%d",
-               g_frame, building.Type, building.SN, building.Blood,
-               building.MaxBlood, bestFarmerSN, (int)pulledFromWork);
-      AiDebugLog(buf);
+      usedFarmers.insert(bestFarmerSN);
+      CancelPendingGatherOrder(bestFarmerSN);
+      ai->HumanAction(bestFarmerSN, building.SN);
+      farmerLastOrderFrame[bestFarmerSN] = g_frame;
+      repairedAny = true;
+      {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "[REPAIR] f=%d type=%d sn=%d blood=%d/%d farmer=%d pulled=%d "
+                 "crew=%d/%d",
+                 g_frame, building.Type, building.SN, building.Blood,
+                 building.MaxBlood, bestFarmerSN, (int)pulledFromWork,
+                 slot + 1, crewLimit);
+        AiDebugLog(buf);
+      }
     }
   }
 
