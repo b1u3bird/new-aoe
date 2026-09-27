@@ -9745,6 +9745,18 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
   }
 }
 
+// 【总开关】农民护送祭司 + 人口满时自毁农民 —— 两个机制暂时停用。
+//
+// 停用的原因（实测）：自毁那套在一局里杀掉了 17 个农民（农民从 20 掉到 2），
+// 它挑的是「不在护送队里的」零散农民，本意是牺牲多余劳动力换人口，实际却把
+// 市镇中心补产的新农民逐个清掉了；农民死光之后没人拆敌塔，战局就卡在
+// 「撑到帧数上限判负」。护送机制本身（集结 + 拆塔）也需要在农民不被自毁的
+// 前提下重新验证。
+//
+// 【为什么用常量开关而不是直接注释掉调用】这样两个函数仍然被「引用」，
+// 不会产生 -Wunused-function 警告；恢复时只把这一个 false 改成 true。
+static const bool USR_FARMER_ESCORT_ENABLED = false;
+
 void UsrAI::processData()
 {
     info = getInfo();
@@ -9941,7 +9953,11 @@ void UsrAI::processData()
     // 必须排在 ManagePriest【之后】：它读祭司本帧的 WorkObjectSN / DR0 / UR0
     // 判阶段 B。排在 UpdateFarmerWatch【之后】：IsFarmerStuckWalking 依赖
     // 它刷新的位置记录，否则会把正常行进的农民误判成卡死。
-    ManageFarmerEscort(this);
+    //
+    // 【暂时停用，见 USR_FARMER_ESCORT_ENABLED】护送机制（农民撤出经济 →
+    // 集结 → 拆敌塔）。上面那些排序理由仍然成立，恢复时把开关改成 true 即可。
+    if (USR_FARMER_ESCORT_ENABLED)
+        ManageFarmerEscort(this);
     ManageEconomyAndProduction(this);
     // 猎手在整群清完之前只杀不采：引擎在猎物死后会自动把他跳到采集，
     // 这里做事后纠正，把他拉回群里还活着的瞪羚。
@@ -9956,7 +9972,10 @@ void UsrAI::processData()
     ManageOffensiveArmy(this);
     AssignFieldSelfDefense(this);
     // AssignFarmerSelfDefense(this);   // 无条件版已停用，见下方 30000 帧的门控
-    SacrificeExcessFarmers(this);
+    //
+    // 【暂时停用，见 USR_FARMER_ESCORT_ENABLED】人口满时自毁农民腾人口。
+    if (USR_FARMER_ESCORT_ENABLED)
+        SacrificeExcessFarmers(this);
     // 农民自卫：30000 帧后启动（对应「第三波骚扰之后」，enemyai.cpp:45 的
     // TAT = 21000 已过）。此前农民遇袭一律靠撤离、不还手，避免早期被零星
     // 骚扰牵着走、把采集力从食物/木头上拽开；进入后期农民挨打时则就地反击。
