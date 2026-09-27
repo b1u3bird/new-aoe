@@ -2730,11 +2730,23 @@ static int CountClusterHunters(int clusterId,
     return hunters;
 }
 
-// 农民禁区的半径（格）：到任何【已知】敌方建筑的这一距离以内，不派农民过去。
+// 农民禁区的半径（格）：到任何【已知】敌方建筑的这一距离以内，既不派农民去采集
+// 资源，也不在那里盖仓库/谷仓。
 //
-// 与站桩圈 USR_STANDOFF_RADIUS 同值 28 —— 那正是敌方守军够得到的范围
-// （DEFENSE_CHASE_LIMIT = 25，量到它们的攻城武器厂，远程还要减射程）。
-static const int USR_FARMER_ENEMY_BASE_KEEPOUT = 28;
+// 【28 → 50】原值 28 是照站桩圈 USR_STANDOFF_RADIUS 取的（那正是敌方守军够得到
+// 的范围：DEFENSE_CHASE_LIMIT = 25，量到它们的攻城武器厂）。但守军不是唯一的
+// 威胁 —— 敌方 AI 还会主动派出骚扰部队去打 Farmer（enemyai.cpp:440-442），
+// 它们不受那条 25 格折返线约束，可以追得更远。28 格只挡住了"守在基地里的敌人"，
+// 挡不住"出来巡逻的那批"。
+//
+// 50 格的意义：把整个敌方基地及其外围活动区一并划出去。后期农民本来就要全部
+// 撤出经济去护送祭司（USR_FARMER_ESCORT_FRAME），那之前也不该为了几片林子
+// 把采集力押到敌方门口的。
+//
+// 【代价】地图上如果有资源正好落在敌方基地 50 格内，那片资源就永久放弃。
+// 实测四张图的主矿区/林区都在我方一侧或中场，不受影响 —— 但若某张图上出现
+// "农民宁可干等也不去采"的闲置，先回来看这个值是不是划得太宽了。
+static const int USR_FARMER_ENEMY_BASE_KEEPOUT = 50;
 
 // 这个坐标是不是落在农民禁区里。
 //
@@ -2794,8 +2806,9 @@ static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
         if (bucket != desiredBucket || !IsGatherableResource(resource))
             continue;
 
-        // 【农民禁区】离任何已知敌方建筑 28 格以内的资源不派人 —— 采到一半被守军
-        // 杀掉，既丢农民又可能把部队牵过去。见 IsInsideEnemyKeepout。
+        // 【农民禁区】离任何已知敌方建筑 USR_FARMER_ENEMY_BASE_KEEPOUT 格以内的
+        // 资源不派人 —— 采到一半被守军杀掉，既丢农民又可能把部队牵过去。
+        // 半径的取值理由见那个常量上方的说明。见 IsInsideEnemyKeepout。
         if (IsInsideEnemyKeepout(resource.BlockDR, resource.BlockUR))
             continue;
 
