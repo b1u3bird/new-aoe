@@ -38,8 +38,16 @@ void Logger::init(LogLevel level) {
     elapsedTimer.start();
 
     // Create log file
+    //
+    // 路径可被环境变量 AOE_GAME_LOG 覆盖。默认仍是 cwd 下的 ./GameLog.log，
+    // 但并行跑多局评测时多个实例会把日志交织到一起 —— 而 cwd 又不能逐个换，
+    // 因为游戏要从 cwd 读 config.json / res.rcc 等资源。理由与 UsrAI.cpp 的
+    // AiDebugLog 完全相同，两处要一起改才能让一局的两份日志都落进自己的目录。
     logFile = new QFile;
-    logFile->setFileName("./GameLog.log");
+    const QByteArray overridePath = qgetenv("AOE_GAME_LOG");
+    logFile->setFileName(overridePath.isEmpty()
+                             ? QStringLiteral("./GameLog.log")
+                             : QString::fromLocal8Bit(overridePath));
     logFile->open(QIODevice::Append | QIODevice::Text);
 
     // Redirect logs to messageOutput

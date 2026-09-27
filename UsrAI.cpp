@@ -992,7 +992,16 @@ static int clubmanResultFrame = USR_INVALID_FRAME;
 
 // 调试日志：写入 ai_debug.log，用于离线分析 AI 决策与游戏状态。
 static void AiDebugLog(const char *msg) {
-  FILE *f = fopen("ai_debug.log", "a");
+  // 【日志路径可被环境变量覆盖，默认仍是项目根的 ai_debug.log】
+  //
+  // 并行跑多局评测时（scripts/run_one_map.sh），多个游戏实例共用同一个 cwd
+  // 会把日志交织进同一份文件、事后没法读。而 cwd 又【不能】换成各自的目录 ——
+  // 游戏要从 cwd 读 config.json / res.rcc 这些资源，换了就直接起不来
+  // （实测换 cwd 后进程在 initPlayers 阶段 segfault）。
+  //
+  // 所以反过来：cwd 保持项目根不动，让每个实例通过 AOE_AI_LOG 指定自己的日志。
+  const char *overridePath = getenv("AOE_AI_LOG");
+  FILE *f = fopen(overridePath != nullptr ? overridePath : "ai_debug.log", "a");
   if (f) {
     fprintf(f, "%s\n", msg);
     fclose(f);
