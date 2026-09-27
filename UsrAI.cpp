@@ -8368,6 +8368,14 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR)
 static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 // 每次后撤几格。
 static const int USR_MELEE_KITE_BLOCKS = 2;
+// 被近战贴上后撤到「离敌方锚点」多少格。取 30（比站桩环 USR_STANDOFF_RADIUS
+// 的 32 近 2 格）。
+//
+// 【为什么是 30 而不是 32】敌方守军的追击上限是 25 格（DEFENSE_CHASE_LIMIT，
+// 量到它们的攻城厂），退到 30 格拉开 5 格，仍然在守军够不到的位置；比站桩环
+// 近一点的好处是「一被贴就退到最外圈」不会让推进彻底停下来 —— 部队愿意在
+// 28~30 这一带跟守军拉锯，而不是每次都被顶回 32。
+static const int USR_MELEE_KITE_RETREAT_DISTANCE = 30;
 // 两次后撤之间至少间隔多少帧。每次后撤都发 HumanMove，而 HumanMove 会清空路径并
 // 打断攻击关系 —— 不加节流会变成「每帧后退 → 每帧被清空 → 原地不动」。
 // 取 40：速度 4.07 的战车弓兵走完两格约 20 帧，够它真的挪开。
@@ -9211,8 +9219,10 @@ static void KiteRangedBackFromMelee(UsrAI *ai)
                 const double len = sqrt(dx * dx + dy * dy);
                 if (len >= 0.5)
                 {
-                    tx = siegeDR + int(dx / len * USR_STANDOFF_RADIUS);
-                    ty = siegeUR + int(dy / len * USR_STANDOFF_RADIUS);
+                    tx = siegeDR +
+                         int(dx / len * USR_MELEE_KITE_RETREAT_DISTANCE);
+                    ty = siegeUR +
+                         int(dy / len * USR_MELEE_KITE_RETREAT_DISTANCE);
                 }
             }
         }
