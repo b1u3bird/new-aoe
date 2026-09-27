@@ -53,8 +53,14 @@ static const int USR_FIELD_ASSIST_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
 // 代价：敌方远程（投石车射程 10）在这个距离上能打到我们，而我们战车弓兵只有 7
 // （研究完木材/工艺后 9）—— 会被迫在挨打的情况下靠近。
 static const int USR_FIELD_ARMY_AGGRO_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
-// 军队【主动去打狮子】的最大欧氏距离（格）。同样改为全图。
-static const int USR_FIELD_LION_AGGRO_RADIUS = USR_FIELD_UNLIMITED_RADIUS;
+// 军队【主动去打狮子】的最大欧氏距离（格）。
+// 当前那条路径已按需求关闭（见 USR_FIELD_ATTACK_LION_ENABLED），这个常量
+// 只是被 FindNearbyEnemyLionToAttack 内部读着，保留原值以便恢复。
+static const int USR_FIELD_LION_AGGRO_RADIUS = 7;
+// 【开关：军队是否主动去打狮子】按需求取 false —— 狮子只是一处食物来源，
+// 让部队从阵线上跑开去打它不划算。关掉之后 AssignFieldSelfDefense 会跳过
+// 那一级优先级，继续往下找敌方农民 / 协防目标。
+static const bool USR_FIELD_ATTACK_LION_ENABLED = false;
 // 农民遭遇敌人时触发主动处理的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_FARMER_AGGRO_RADIUS = 7;
 // 箭塔重新选择攻击目标的最小间隔，单位为游戏帧。
@@ -9669,7 +9675,12 @@ static void AssignFieldSelfDefense(UsrAI *ai)
         if (targetSN == -1)
             targetSN = FindEnemyArmyInVision(army);
 
-        if (targetSN == -1)
+        // 【按需求取消主动打狮子】军队不再为了狮子改变目标 —— 它只是一处
+        // 食物来源，让部队从阵线上跑开去打它不划算（原注释里已经记过这个
+        // 取舍：狮子半径曾与敌军索敌半径共用，拆开就是为了不让部队为打猎
+        // 跑开）。用开关而不是删掉调用：FindNearbyEnemyLionToAttack 仍被
+        // 「引用」，不产生 -Wunused-function 警告，想恢复只改这一个常量。
+        if (USR_FIELD_ATTACK_LION_ENABLED && targetSN == -1)
             targetSN = FindNearbyEnemyLionToAttack(army);
 
         if (targetSN == -1)
