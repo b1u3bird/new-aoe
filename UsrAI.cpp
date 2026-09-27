@@ -277,6 +277,24 @@ static const int USR_SCOUT_FIRST_FRAME = 30000;
 // 必须按总数预留、而不是等它该出场时才留：实测人口在 f=30000 之前就已经
 // 顶到 50/50，那时再留已经来不及，「侦察兵一个都造不出来」就是这么来的。
 static const int USR_SCOUT_TOTAL = 2;
+// 【开关】是否保留「保命型」侦察兵。设为 false = 取消保命型，所有侦察兵都
+// 按侦测型行事。
+//
+// 保命型（`g_frame < USR_SCOUT_RECON_FRAME` 时出厂的那个）原本做两件事：
+//   ① 20 格内有敌人 → 先打一下建立仇恨，再撤回市镇中心当诱饵，把追兵引进
+//      箭塔与部队的火力圈（见 DispatchScouts 里「撤回市镇中心」那一段）；
+//   ② 9 格内有敌人 → 紧急撤离到 12/10/8/6 格外的安全点，撤离完成前探索挂起。
+// 侦测型两样都不做：硬闯敌方基地、专职探图。
+//
+// 为什么取消：那两套避险让侦察兵在敌方驻军面前反复被逼退，永远推进不到能
+// 看见攻城厂的位置 —— 而攻城厂不进 info.enemy_buildings，祭司的获胜路径就
+// 整个断了（转换指令要的是它的 SN，SN 只能从那份额已侦察列表里拿）。
+// 代价是侦察兵 33000 帧后进入敌方视野基本等于送死（60 血 / 3 攻 / 0 防御），
+// 而且不会补充。
+//
+// 【为什么用开关而不是直接把 isRecon 写成 true】那两段保命逻辑仍保持可达，
+// 不会产生 -Wunused-function 警告；恢复时只改这一个常量。
+static const bool USR_SCOUT_KEEP_ALIVE_TYPE_ENABLED = false;
 // 后期把农民上限压到 USR_FARMER_LATE_TARGET 的帧号。
 // 此时经济已成型、军队才是胜负手，把人口让出来给兵。
 // 注意：这不是「立刻裁到 5 个」——只是不再补产，多出来的由
@@ -7010,7 +7028,14 @@ static void DispatchScouts(UsrAI *ai)
         // （FAT=6000 / SAT=13500 / TAT=21000，第三波在 21000 就结束了），
         // 而 USR_SCOUT_RECON_FRAME(33000) 在那之后 —— 过了这个点，波次防御已经
         // 用不上它了，让它转去侦测敌方基地收益更大。
-        const bool isRecon = (g_frame >= USR_SCOUT_RECON_FRAME);
+        //
+        // 【按需求取消保命型】现在所有侦察兵一视同仁按侦测型行事，见
+        // USR_SCOUT_KEEP_ALIVE_TYPE_ENABLED 的说明。用开关而不是直接写 true：
+        // 那两段保命逻辑（勾引 + 双档撤离）仍保持可达，不会产生
+        // -Wunused-function 警告，将来想恢复只改这一个常量。
+        const bool isRecon =
+            !USR_SCOUT_KEEP_ALIVE_TYPE_ENABLED ||
+            (g_frame >= USR_SCOUT_RECON_FRAME);
 
         // 【谨慎型专用】勾引 + 撤回基地。
         // 用途：先在视野内挑一个最近的敌人打一下，建立「我在打它」的关系，
