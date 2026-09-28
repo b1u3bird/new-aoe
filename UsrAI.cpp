@@ -296,6 +296,22 @@ static const int USR_PRIEST_EXPLORE_RADIUS = 40;
 //   · 它【不会】让祭司真的走到 120 格 —— 那是时间上限在管。
 // 想靠祭司找到 130 格外的敌方基地是不现实的，那件事归侦察骑兵。
 static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
+// 【开关：祭司开局探路】2026-09-28 按要求停用 —— 祭司不再出去绕圈。
+//
+// 停用后它一帧都不出门：进入待机段后走的是「无敌人时别待在敌方基地附近」
+// 那条（见 ManagePriest 里的说明），而它本来就在基地里，所以等于原地待命。
+//
+// 【为什么值得停】祭司是全场最脆的单位（100 血、近战与远程防御都是 0、
+// 不能自愈、不可补充），而探路要求它离开市镇中心的箭塔覆盖圈、单独走到
+// 50~60 格外 —— 那段路正好压在敌方第一波骚扰（FAT=6000）的时间窗上。
+// 上面那条 5000 帧的时间上限就是为这个危险性设的；现在直接不出门，风险归零。
+//
+// 【代价，必须知道：开局视野会明显变小】祭司是全队唯一能走远的单位
+// （侦察骑兵要到 USR_SCOUT_FIRST_FRAME=25000 才出厂），它不探之后，开局到 25000 帧
+// 之间「已知」的区域基本只剩基地周围那一圈（农民的活动范围）。实测若发现
+// 「农民扎堆抢近处几片资源、或跑到很远处干活」，先回来看这个开关 ——
+// 那多半不是经济权重的问题，而是可用资源点变少了。
+static const bool USR_PRIEST_EXPLORE_ENABLED = false;
 // 【已删除】USR_PRIEST_HOME_RADIUS = 12（「离市镇中心超过 12 格就回家」的守家规则）。
 // 按需求改成以敌方基地为参照的 USR_PRIEST_ENEMY_BASE_KEEPOUT，见文件上方。
 // 第一个侦察骑兵的生产时间点。它执行「视野内出现敌人即撤回市镇中心」的
@@ -6914,9 +6930,15 @@ static void ManagePriest(UsrAI *ai)
         // （HasVisibleGazelle + FinishPriestExplore("gazelle")）。按需求去掉：
         // 探路的目的不再只是找食物，而是把外围探开 —— 瞪羚出现得早，
         // 按那个出口走的话祭司会刚出门就收工，外围根本没探。
+        // 【已停用，见 USR_PRIEST_EXPLORE_ENABLED】不再出去绕圈。
+        // 直接标记探路结束即可 —— FinishPriestExplore 会置 priestGoingHome，
+        // 祭司于是回家待命；下面那个 `if (!priestExploreDone)` 整段随之跳过。
+        if (!priestExploreDone && !USR_PRIEST_EXPLORE_ENABLED)
+            FinishPriestExplore("disabled");
         // 【时间截止】到帧就收工，与「半径内探干净」并列，谁先满足用谁。
         // 放在半径检查之前，保证即使外围还没探完也一定回家。
-        if (!priestExploreDone && g_frame >= USR_PRIEST_EXPLORE_UNTIL_FRAME)
+        else if (!priestExploreDone &&
+                 g_frame >= USR_PRIEST_EXPLORE_UNTIL_FRAME)
             FinishPriestExplore("timeout");
 
         if (!priestExploreDone)
