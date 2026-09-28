@@ -673,27 +673,37 @@ static const int USR_DEPOT_MAX_HOME_DISTANCE = 65;
 // TryBuild(BUILDING_GRANARY)】—— 建谷仓的唯一路径就是本函数（浆果丛 / 农田那两条
 // 候选，ReturnBuildingForResource(RESOURCE_BUSH) == BUILDING_GRANARY）。
 // 所以把整条路一起停掉会让箭塔永远造不出来。本开关【只停 STOCK】。
+// 【补充：对当前四张图，上面这段顾虑实际不成立】地图自带一座谷仓，所以谷仓那
+// 条路对本函数也是多余的 —— 详见 USR_DEPOT_ENABLED 上方「停掉它安全吗」那段
+// （那里有实测证据）。这段保留，是为了说明【假如某张图没有初始谷仓】时该保留
+// 哪一条。
 static const bool USR_DEPOT_STOCK_ENABLED = false;
 // 【上级开关：整个「为资源建交付建筑」的功能】2026-09-28 按要求全部停用。
 //
 // 它把上面那个 USR_DEPOT_STOCK_ENABLED 一起盖住。那个开关现在只在恢复时才有
 // 意义：把本开关改回 true 并保持 STOCK 为 false，就只恢复谷仓那条路。
 //
-// 【必须知道的完整后果：停掉它会断掉整条军事链】谷仓不只是「浆果丛的交付点」，
-// 它还是两处引擎前置的起点：
-//   · Development.cpp:635 —— 市场(BUILDING_MARKET)的前置是谷仓；
-//   · Development.cpp:583 —— 箭塔的建造科技 BUILDING_GRANARY_ARROWTOWER 在谷仓研发。
-// 于是（AI 侧的追踪函数一开头就是 `if (wheelTechReady || market == nullptr)
-// return;`，见 UsrAI.cpp:4397）：
-//     谷仓 → 市场 → 车轮科技 → wheelTechReady → 战车弓兵
-//                                        ↘ ManageOffensiveArmy 的 !wheelTechReady 门
-//     谷仓 → 箭塔科技 → 箭塔
-//     市场 → 农田（Development.cpp:688）
-// 所以没有谷仓 ⇒【一个战车弓兵都造不出来、ManageOffensiveArmy 永远在
-// `!wheelTechReady` 处返回 → 永不进攻】，并且没有箭塔、没有农田、没有仓库。
-// AI 只会一直采集到 GAME_LOSE_SEC（30 分钟）判负。
-// 【这是明确接受的取舍，不是 bug】实测若看到「不造兵、不进攻、不建塔」，先回来
-// 看这个开关，不要当故障查。恢复：把它改回 true。
+// 【停掉它安全吗：安全 —— 四张图【初始就带谷仓与仓库】，所以这条链不会断】
+// 【这里原先写的是「停掉它会断掉整条军事链」，那是错的，已被实测推翻】
+// 当时的推理是：谷仓是引擎前置的起点（Development.cpp:635 市场需要谷仓、
+// :583 箭塔科技在谷仓研发），所以没有谷仓 ⇒ 无市场 ⇒ 无车轮科技 ⇒ 无战车弓兵 ⇒
+// 永不进攻。推理本身没错，但【漏查了运行时的初始状态】：谷仓并不是本函数建的，
+// 它是地图自带的初始建筑。逐张解码 map*.njust，四张图完全一致：
+//     我方 = CENTER×1 + HOME×2 + 【GRANARY×1】 + 【STOCK×1】 + ARROWTOWER×1
+//     敌方 = ARROWTOWER×5 + SIEGE×1（没有市镇中心）
+// 也就是说：
+//   · 市场的引擎前置由【初始那座谷仓】满足，与本函数建的额外谷仓无关；
+//   · 农民交付木头/石头/黄金本来就有初始那座仓库（引擎还额外接受市镇中心，
+//     见 Core_List.cpp:738-757）。
+// 所以本函数建的交付建筑对这几张图【完全是多余的】—— 停掉它既堵住了「跑到对面
+// 建仓库」，又不影响市场 / 车轮科技 / 战车弓兵 / 箭塔 / 农田中的任何一项。
+//
+// 【实测印证，第二轮 16 局】market 在 f=2000 就已存在、wheel=1、carcher=15、
+// range=3、tower=1；enemyB 6→4→1（军队拆掉 5 座箭塔），f=44163 祭司转化厂获胜 ——
+// 设计中的获胜路径完整走通。
+//
+// 【若将来换一张【初始没有谷仓】的地图】上面那条链才会真的断掉。届时的做法：
+// 把本开关改回 true，或给那张图单独补一条建谷仓的路。
 static const bool USR_DEPOT_ENABLED = false;
 // 出兵建筑朝前线方向偏移的距离（格）。
 // 文档《快速升级和取得胜利》第 75 行：「建设靶场的时候也要考虑尽量往地图中间
