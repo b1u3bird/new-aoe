@@ -3031,6 +3031,15 @@ static int CountClusterHunters(int clusterId,
 // "农民宁可干等也不去采"的闲置，先回来看这个值是不是划得太宽了。
 static const int USR_FARMER_ENEMY_BASE_KEEPOUT = 50;
 
+// 「把已经陷在禁区里的农民撤出来」这条规则的重复下发间隔（帧）。
+//
+// 【为什么必须节流】撤离用的是 HumanMove，而它每次都经 suspendRelation 清空
+// 路径（Core_List.cpp:450-469）—— 逐帧重发等于让农民原地不动（站桩、集结那几处
+// 都因为同一原因做了节流）。取 120：与 TryAssignIdleFarmer 里那段安全滞后的
+// 120 帧同量级，也远大于走一格所需的帧数；真被挡路卡住时，最多 120 帧就会重发
+// 一次，能自愈。
+static const int USR_FARMER_KEEPOUT_ORDER_INTERVAL = 120;
+
 // 这个坐标是不是落在农民禁区里。
 //
 // 【为什么需要】农民的选点原先完全不看敌方位置：只要资源在那边就派人去 ——
@@ -3055,6 +3064,84 @@ static bool IsInsideEnemyKeepout(int blockDR, int blockUR)
             return true;
     }
     return false;
+}
+
+// 【硬保证：任何农民一旦落进敌方基地禁区，立刻把他撤向市镇中心】
+//
+// 【为什么光有「派工时不选禁区内的目标」不够】IsInsideEnemyKeepout 已经用在 5 处
+// 过滤目标点（采资源 / 建造点 / 猎物群 / 另外两处建筑与资源选址），但挡不住三种
+// 情况：
+//   ① 敌方建筑是【逐渐被侦察到】的 —— 一个农民早就在那片林子里伐木，而那座建筑
+//      要到后来才进 info.enemy_buildings（实测攻城厂 f≈36000 才发现）；
+//   ② 目标点在禁区外，但寻路会穿过禁区；
+//   ③ 猎物自己会走动，集群中心只是个缓存值。
+// 所以这里再加一道与「目标是谁」无关的判据：人在禁区里，就把他撤出来。
+//
+// 【为什么复用现成的两张表、不新造状态】farmerThreatLastFrame /
+// farmerSafeSinceFrame 本来就是为「敌袭撤离」设计的（见它们上方的注释），而且
+// TryAssignIdleFarmer 里已经有一段现成的滞后判定：带威胁标记的农民，在「恢复
+// 安全」之后 120 帧内不再被派活 —— 那正是这条规则需要的防抖。直接写这两张表，
+// 就自动获得那层滞后，既不必新增 map，也不必在派工处再加条件。
+//
+// 【落点为什么取市镇中心】它是唯一一个能【确定】离敌方基地足够远的固定点
+// （四张图敌方基地都在我方中心的对角线上，实测曼哈顿 122~140 格，远大于 50 格的
+// 禁区半径）。不做「撤到禁区边界最近点」那种精算：那要解约束，而多走几十格对
+// 农民没有额外代价。
+static void EvacuateFarmersFromEnemyKeepout(UsrAI *ai)
+{
+    const tagBuilding *home = FindCenter();
+
+    for (const tagFarmer &farmer : info.farmers)
+    {
+        if (farmer.Blood <= 0 || farmer.FarmerSort != FARMERTYPE_FARMER)
+            continue;
+        // 护送队是 latched 编制，它的位置本来就该在敌方基地附近（见
+        // USR_FARMER_ESCORT_ENABLED）。该机制当前已停用，这一句是为了将来恢复时
+        // 不被这条规则反复往家拽。
+        if (IsFarmerEscorting(farmer.SN))
+            continue;
+
+        if (!IsInsideEnemyKeepout(farmer.BlockDR, farmer.BlockUR))
+        {
+            // 已经在禁区外：清掉威胁标记，并记下「安全起始帧」—— 那 120 帧的滞后
+            // 从这一刻起算。erase 返回 0 表示本来就没有标记，不必再写时间戳。
+            if (farmerThreatLastFrame.erase(farmer.SN) > 0)
+                farmerSafeSinceFrame[farmer.SN] = g_frame;
+            continue;
+        }
+
+        if (home == nullptr)
+            continue;   // 没有市镇中心（开局头几帧）就没法给撤离方向
+
+        const map<int, int>::const_iterator lastIt =
+            farmerThreatLastFrame.find(farmer.SN);
+        const bool hadThreat = (lastIt != farmerThreatLastFrame.end());
+        const int prevThreatFrame = hadThreat ? lastIt->second : USR_INVALID_FRAME;
+        const bool needOrder =
+            !hadThreat ||
+            (g_frame - prevThreatFrame >= USR_FARMER_KEEPOUT_ORDER_INTERVAL);
+        // 标记每帧刷新（不只是下发那一刻）—— 这样「他还在禁区里」对
+        // TryAssignIdleFarmer 的滞后判定始终成立，不会有空隙被派回经济。
+        farmerThreatLastFrame[farmer.SN] = g_frame;
+        if (!needOrder)
+            continue;
+
+        // 手上那条采集指令要撤掉：不撤的话 pendingGatherOrders 会继续替它记账，
+        // 别的农民可能被重复派去同一处，他自己也会被当成「正在采集」。
+        CancelPendingGatherOrder(farmer.SN);
+        ai->HumanMove(farmer.SN, (home->BlockDR + 0.5) * double(BLOCKSIDELENGTH),
+                      (home->BlockUR + 0.5) * double(BLOCKSIDELENGTH));
+        {
+            char buf[224];
+            snprintf(buf, sizeof(buf),
+                     "[KEEPOUT] f=%d farmer=%d pos=(%d,%d) home=(%d,%d) "
+                     "inZoneFrames=%d",
+                     g_frame, farmer.SN, farmer.BlockDR, farmer.BlockUR,
+                     home->BlockDR, home->BlockUR,
+                     hadThreat ? g_frame - prevThreatFrame : 0);
+            AiDebugLog(buf);
+        }
+    }
 }
 
 static int FindBestResourceSN(const tagFarmer &farmer, int desiredBucket,
@@ -10414,6 +10501,12 @@ void UsrAI::processData()
     // 集结 → 拆敌塔）。上面那些排序理由仍然成立，恢复时把开关改成 true 即可。
     if (USR_FARMER_ESCORT_ENABLED)
         ManageFarmerEscort(this);
+    // 【禁止农民进敌方基地 50 格】必须排在 ManageEconomyAndProduction【之前】——
+    // 与上面护送那条同理：撤离会把农民写进 farmerThreatLastFrame，而
+    // TryAssignIdleFarmer 正是靠这张表跳过被威胁的农民；排在后面的话，本帧他会
+    // 先领到一条采集指令（可能又往禁区方向去），下一帧才被我们覆盖，白走一次
+    // 清路径。也必须排在 UpdateFarmerWatch【之后】：本规则依赖的位置数据来自它。
+    EvacuateFarmersFromEnemyKeepout(this);
     ManageEconomyAndProduction(this);
     // 猎手在整群清完之前只杀不采：引擎在猎物死后会自动把他跳到采集，
     // 这里做事后纠正，把他拉回群里还活着的瞪羚。
