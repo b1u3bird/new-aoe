@@ -237,6 +237,26 @@ static const int USR_PRIEST_SIEGE_TOWER_CLEAR = 10;
 //   · 选取目标时不做这个距离限制：祭司本来就需要先走过去再转换，
 //     按 12 格过滤会把「主动接近」这条路整个废掉。
 static const int USR_PRIEST_CONVERTING_RADIUS = 12;
+// 【开关：祭司是否转换敌方【士兵】】
+//
+// false = 祭司整局都不再主动把敌方士兵转成我方的，只保留三件事：
+//   ① 转换敌方【攻城武器厂】—— isWin() 的唯一判据（MainWidget.cpp:2361-2369）；
+//   ② 治疗受伤友军（TryPriestHeal）；③ 挨打时撤退。
+//
+// 【为什么关】祭司只有 100 血、近战与远程防御都是 0、不能自愈、不可补充，
+// 死一次就永久少一条获胜路径；而转来的一个士兵对胜负没有贡献 —— 获胜条件只认
+// 那座被转换的攻城武器厂。原先这条分支只在第三波骚扰打完（IsThirdWaveCleared，
+// 即 g_frame >= 25000）之后才自动关闭，也就是说前面三波里它一直在拿命换兵。
+//
+// 【关掉后会不会连累获胜路径】不会。转士兵与转建筑是同一个 if 的两条分支
+// （armyTarget / buildingTarget）；armyTarget 恒为 nullptr 时，下面那句
+// `if (!armyTarget && CanPriestApproachSiege())` 就等价于只判
+// CanPriestApproachSiege() —— 冲厂那套门控（塔清光 + 有人在拆塔）一字未动。
+//
+// 【为什么用开关而不是删掉那段】函数仍被引用，不产生 -Wunused-function 警告；
+// priestConversionLockSN 也仍被写入，不产生 -Wunused-but-set-variable。
+// 恢复只改这一个 true/false。
+static const bool USR_PRIEST_CONVERT_ARMY_ENABLED = false;
 // 祭司的位置约束：不得进入【敌方基地】周围 USR_PRIEST_ENEMY_BASE_KEEPOUT 格以内。
 //
 // 【取代了原先的两条】祭司原来有两条以【我方市镇中心】为参照的位置规则：
@@ -7039,16 +7059,21 @@ static void ManagePriest(UsrAI *ai)
         // 于是祭司走到了厂边上却永远不发起转换。实测日志：它停在 (15,77)、
         // mvTgt=(11,86)（那是厂的位置）、minDis=9999，直到被别的敌人打死。
         // 获胜路径要求"把敌人打光之后去把厂转掉"，所以这一条必须放开。
-        // 【第三波骚扰打完后不再转换敌方士兵】总攻阶段（priestPassive）起，
+        // 【转士兵的时间门槛】总攻阶段（priestPassive，即第三波骚扰打完）之后
         // 祭司只做一件事：把敌方攻城武器厂转掉 —— 那是唯一的获胜条件。
         // 转换士兵会把它按在敌方基地里读条换血，而它只有 100 血、近战与远程
         // 防御都是 0、且不可补充；换来的一个士兵对胜负没有贡献。
         //
-        // 【为什么用 priestPassive 而不另立判据】它本来就是「总攻阶段」的定义，
-        // 而它的注释里写的就是「此后祭司进入只保存实力状态 —— 不再转换」。
+        // 【本门槛现已叠加开关】这道时间门槛（即 !IsThirdWaveCleared()）之上的
+        // if 现在还要过 USR_PRIEST_CONVERT_ARMY_ENABLED —— 按需求它整局为 false，
+        // 所以本分支是死代码；保留它是为了让开关能一键恢复。恢复后生效的仍然
+        // 是「第三波之前才转士兵」这条时间门槛。
+        //
+        // 【为什么原先用 priestPassive 而不另立判据】它本来就是「总攻阶段」的
+        // 定义，而它的注释里写的就是「此后祭司进入只保存实力状态 —— 不再转换」。
         // 此前转士兵的分支在这条门槛之后仍然生效，注释与代码并不一致，这一条把
         // 行为对齐到注释。（该阶段的起点原先是个绝对帧号 26000，现已按需求换成
-        // 第三波骚扰打完这个里程碑。）
+        // 第三波骚扰打完这个里程碑，又由 IsThirdWaveCleared 统一成 25000 帧。）
         // 【目标锁定：一旦选定就转到完成 / 死亡 / 离开视野】
         //
         // 原先这里是每次调用都重选一遍（FindPriestConversionTarget 按兵种优先级），
@@ -7060,8 +7085,12 @@ static void ManagePriest(UsrAI *ai)
         // 「仍在 info.enemy_armies 里且活着」—— 死亡、走出视野、被转成我方的
         // 三种情况都会让它从列表里消失，自动落到重选分支）；不在才按优先级重选
         // 并改写锁定。
+        // 【转士兵的开关】关掉时 armyTarget 恒为 nullptr，lock 每帧被清成 -1，
+        // 于是本块只剩下面那条 buildingTarget 分支 —— 祭司只转攻城武器厂。
+        // 见 USR_PRIEST_CONVERT_ARMY_ENABLED 上方的说明。
         const tagArmy *armyTarget = nullptr;
-        if (anyEnemyVisible && !IsThirdWaveCleared())
+        if (USR_PRIEST_CONVERT_ARMY_ENABLED && anyEnemyVisible &&
+            !IsThirdWaveCleared())
         {
             armyTarget = FindLockedConversionTarget();
             if (armyTarget == nullptr)
@@ -7085,7 +7114,8 @@ static void ManagePriest(UsrAI *ai)
         }
         else
         {
-            // 视野里没有敌兵、或已进入总攻阶段（不再转士兵）→ 解除锁定。
+            // 转士兵已关闭（USR_PRIEST_CONVERT_ARMY_ENABLED=false）、视野里没有
+            // 敌兵、或已进入总攻阶段 → 解除锁定。
             priestConversionLockSN = -1;
         }
         // 【转换分支同样要过进厂门控】原先这里只判「过了 26000 帧」，
