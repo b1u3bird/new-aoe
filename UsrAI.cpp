@@ -797,8 +797,24 @@ static const int USR_INVALID_FRAME = -1000000000;
 // 【关闭后的预期症状，都是上面那条语义的直接后果，不是新 bug】
 //   农民不采集 / 不建造 / 不修塔；单位原地不动或抖；被近战贴住的远程兵撤不走；
 //   卡住的农民永远停住；帧率下降。
-// 【恢复】改回 true，各处判据立即生效（不需要改别的地方）。
-static const bool USR_THROTTLES_ENABLED = false;
+//
+// 【取值】当前 true（已从 false 回退）—— 两次实测故障都证明「一次全关」走不通：
+//   ① 祭司逐帧被重下一遍移动指令：游戏日志里每 40ms 一条
+//      `HumanMove:祭司 91166 移动至 (697.653,661.876)`，坐标恒定、无限刷屏，而
+//      祭司永远走不到（每次下发都清路径）。根因是无威胁路径上那处
+//      priestEmergencyTarget 清零 —— 有 40 帧节流时被掩盖，节流一关就暴露。
+//      那一处已单独修好（删掉清零），修复保留。
+//   ② 判题侧 SIGKILL（报 Possibly OOM / Memory Limit）：AI 对每个单位每帧重新
+//      下发指令，每条被执行到的指令都要重建关系 + 写两行日志（Core.cpp 的 qInfo
+//      与 call_debugText），于是帧率崩塌、判题侧被杀。SIGKILL 本身是含糊的
+//      （OOM killer 与判题自己的超时/资源上限都会报它），以这个洪流的规模，
+//      超时被杀的可能性更大。
+// 【结论】必须【逐个】补上状态守卫、验证过再单独去掉那一处的节流 —— 每处节流背后
+// 都可能有被它掩盖的守卫缺陷（① 就是活生生的例子）。已完成并保留的取消有四处：
+// 农民派工的 IDLE 路径 / 修复建筑 / 恢复工地（守卫现成：IDLE 判定、crew 满员跳过、
+// WorkObjectSN 已在做）与研发通道（改回执驱动 + 资源预检）。
+// 【恢复全部节流】把下面改回 true —— 当前就是 true，即全部节流生效。
+static const bool USR_THROTTLES_ENABLED = true;
 // 建筑研发「已结束」判定的防抖窗口：观察到 Project 离开研发项后连续空闲这么多帧，
 // 才认定研发真的完成。研发被中断（suspendRelation）时 Project 会短暂回到 0，
 // 窗口太短会把中断误判成完成 —— 实测就是因此让 wheelTechReady 提前变真，
@@ -3753,65 +3769,42 @@ static pair<int, int> GetEnemyDirection()
 // 没有建筑时退到敌方部队。每帧调用一次。
 // 只在真的看到敌人时才覆盖 —— 「敌人从哪个方向来」这个信息在敌人离开视野后
 // 仍然有意义，所以不做超时清除。
-// ── 「第三波骚扰打完了」的状态。含义与实测依据见 TrackEnemyContact 里那段。 ──
-static int enemyWaveStartedCount = 0;                  // 观察到第几波开始
-static int enemyWaveDoneCount = 0;                     // 已确认结束的波数
-static int enemyWaveLastSeenFrame = USR_INVALID_FRAME; // 最后一次看到敌兵的帧
-static bool lastFrameSawEnemyArmy = false;
-// 「一波退去」的确认窗口：连续这么多帧没再看到敌兵，才算这一波结束。
-// 取 500：三波之间敌兵消失的间隔正是这个量级（实测 18000~22000 之间是空的），
-// 取太短会把「守军暂时退回迷雾」误判成波次结束。
-static const int USR_WAVE_CLEAR_HYSTERESIS = 500;
 // 军队「已经在中间集结过」的 latch。见 ManageOffensiveArmy 的集结段。
 // 【为什么是 latch 而不是实时判据】实时判据（每个单位都在中心附近）在军队被打散、
 // 有单位阵亡时可能永远不成立，那样总攻就再也不会启动 —— 那是比"没有集结"更糟的
 // 故障模式。集结过一次就够了。
 static bool armyRalliedAtCenter = false;
 
-// 第三波骚扰是否已打完 —— 后期那一串动作（侦察兵 / 集结 / 总攻 / 祭司转保守 /
-// 农民压上限 / 停建箭塔 / 停保底采石）的统一局势里程碑。
-static bool IsThirdWaveCleared() { return enemyWaveDoneCount >= 3; }
+// 【「第三波骚扰打完」= 第 25000 帧】后期那一串动作的统一时间点。
+//
+// 【为什么用固定帧号，而不再数「视野内敌兵的波次」】原设计想用观察式判据
+// （0→有 = 一波开始；有→0 且连续 500 帧不再出现 = 一波结束；满 3 波 = 打完），
+// 理由是「绝对帧号会随局势与机器快慢漂移」。实测那样行不通，有两个必然的失效
+// 场景 —— 任一个都会让里程碑【永不成立】，而它一不成立，军队就永不集结、
+// 永不总攻（实测症状正是「没有人进军」）：
+//   · 敌方只要始终有 ≥1 个单位可见，「0→有」的跃迁就凑不满 3 次；
+//   · 三波之间的空窗不足 500 帧时，「一波结束」也永不确认（守军在视野边缘进出
+//     就会打断连续零计数）。
+// 按需求统一改回定值。
+//
+// 【为什么取 25000】敌方第三波骚扰是 TAT = 21000（enemyai.cpp:44），25000 是
+// 「第三波打完、收拾完战场」的近似点，也正好等于原设计里侦察兵与集结那两个
+// 25000；同时远早于 30 分钟判负线（45000），给后半程（侦察敌基地 → 集结 →
+// 总攻 → 清塔 → 祭司进厂）留足时间。
+static const int USR_THIRD_WAVE_CLEARED_FRAME = 25000;
+
+// 「第三波骚扰打完」这个里程碑是否已到 —— 后期那一串动作（侦察兵 / 集结 / 总攻 /
+// 祭司转保守 / 农民压上限 / 停建箭塔 / 停保底采石）共用它。
+static bool IsThirdWaveCleared() {
+    return g_frame >= USR_THIRD_WAVE_CLEARED_FRAME;
+}
 
 static void TrackEnemyContact()
 {
-    // ── 【波次计数：第三波骚扰打完了没有】────────────────────────────
-    //
-    // 【为什么需要】原先后期那一串动作各自写了一个绝对帧号（侦察兵 25000/28000、
-    // 集结 25000、祭司转保守 26000、总攻 28000、农民压上限 35000……）。绝对帧号
-    // 有两个毛病：
-    //   · 它假定「打到第 N 帧时局势一定到了某个程度」，而局势是变的（敌方三波被
-    //     挡得快慢不同、我方发育快慢不同）；
-    //   · 机器快慢与丢帧会直接改变它落在什么局势上（AI 会被丢帧，见
-    //     AI::startProcessing），同一份代码在不同构建/负载下表现就不同。
-    // 按需求改成统一的【局势里程碑】：第三波骚扰打完之后，才启动那一串后期动作。
-    //
-    // 【怎么数出波次】引擎不暴露波次，但可以从视野里的敌方军队数量推：
-    //     0 → 有      = 一波开始（enemyWaveStartedCount++）
-    //     有 → 0      = 这一波退去，但要连续 USR_WAVE_CLEAR_HYSTERESIS 帧都没再
-    //                   出现，才算「结束」（防抖：守军在视野边缘进出会让这个量抖）
-    //     累计结束 3 波 = 第三波打完
-    // 【实测依据】日志里 enemyA（视野内敌兵数）确实呈波次状：14000→2、18000→0、
-    // 22000→7、26000→0、28000→21…… 与敌方 FAT=6000 / SAT=13500 / TAT=21000 对应。
-    //
-    // 【它必须放在本函数最前面】本函数在下面会提前 return（找到第一个目标就走），
-    // 而波次统计要每帧都跑。
-    {
-        const bool sawEnemyArmy = HasVisibleEnemyArmy();
-        if (sawEnemyArmy)
-        {
-            if (!lastFrameSawEnemyArmy)
-                ++enemyWaveStartedCount; // 0 → 有：一波开始
-            enemyWaveLastSeenFrame = g_frame;
-        }
-        else if (enemyWaveStartedCount > enemyWaveDoneCount &&
-                 enemyWaveLastSeenFrame != USR_INVALID_FRAME &&
-                 g_frame - enemyWaveLastSeenFrame >= USR_WAVE_CLEAR_HYSTERESIS)
-        {
-            enemyWaveDoneCount = enemyWaveStartedCount; // 这一波确认结束
-        }
-        lastFrameSawEnemyArmy = sawEnemyArmy;
-    }
-
+    // 【原先这里有一段「波次计数」：数视野内敌兵数的 0→有 / 有→0 跃迁，累计
+    //   3 波就算「第三波打完」。已删除 —— 它有两个必然的失效场景（敌方始终有
+    //   ≥1 个单位可见、或三波空窗不足 500 帧），任一都会让里程碑永不成立、
+    //   军队永不进军。现在改用固定帧号，见 USR_THIRD_WAVE_CLEARED_FRAME。】
     for (const tagBuilding &building : info.enemy_buildings)
     {
         if (building.Blood > 0)
