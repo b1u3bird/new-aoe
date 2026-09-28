@@ -9219,49 +9219,48 @@ static int FindOffensiveTargetSN() {
   // 关系、把已经打出去的伤害进度清零】（见 :7976 与 :9256 两处警告）—— 表现就是
   // 「场上还有箭塔、军队却在几座塔之间来回走，一座都拆不掉」。
   //
-  // 【为什么圆心用「已知敌方建筑的质心」而不是 EstimateEnemySiegeAnchor】
-  //   · 质心是【求和】，与 info.enemy_buildings 的遍历顺序无关 —— 正合上面那条
-  //     「不能依赖洗牌」的要求；
-  //   · EstimateEnemySiegeAnchor 在真攻城厂尚未被侦察到时，返回的是「SN 最小的
-  //     那座敌建筑」（见 UpdateEnemyBaseDiscovery）。那个位置本身可能就是一座
-  //     【外围】箭塔 —— 拿它当圆心，会把「最外围」判到基地对面去，军队反而要
-  //     穿过整个基地。质心没有这个偏差。
+  // 【判据：取「离地图边缘最远」的那座塔，不需要任何圆心/锚点估算】
   //
-  // 【判据】取距质心【最远】的活箭塔，同距再按 SN 升序 —— 与洗牌无关，确定。
-  // 一座拆掉（Blood<=0）后自动落到下一座，天然形成「由外向内逐座集中拆除」。
-  // 锚点类信息一概不需要，所以不存在「估算失败退化成乱序」的退化路径。
+  // 依据是这四张图的地形：敌方基地都贴着我方对角的那条地图边（实测敌方基地离
+  // 我方中心曼哈顿 122~140 格，见 EstimateEnemySiegeAnchor 的实测记录）。所以在
+  // 敌方那一片塔里，「离最近的地图边最远」＝「离我方最近」＝朝我方的那座外围塔。
+  //
+  // 【为什么比之前两版都稳】
+  //   · 不需要 EstimateEnemySiegeAnchor —— 它在真攻城厂尚未被侦察到时返回的是
+  //     「SN 最小的那座敌建筑」（见 UpdateEnemyBaseDiscovery），那个位置本身可能
+  //     就是一座【外围】箭塔，拿它当圆心会把「最外围」判到基地对面去；
+  //   · 不需要先算敌方建筑的质心；
+  //   · 只用到塔自己的坐标与地图尺寸，与 info.enemy_buildings 的遍历顺序无关 ——
+  //     正合上面那条「不能依赖洗牌」（GlobalVariate.cpp:1086）的硬要求；
+  //   · 没有任何「估算失败就退化」的路径。
+  //
+  // 【假设与它的边界】这条判据依赖「敌方基地区域比任何别处都更靠近同一条地图边」。
+  // 若将来出现一张图把敌方基地放在靠近地图中心的位置，这里会取到【最靠里】的塔，
+  // 顺序就反了 —— 那时改用「以已知敌方建筑的质心为圆心、取最远者」的写法。
+  //
+  // 【判据细节】到最近那条边的距离 = 四边距离取最小；离边缘越远者胜，同距取 SN
+  // 小的 —— 与洗牌无关，确定。一座拆掉（Blood<=0）后自动落到下一座，天然形成
+  // 「由外向内逐座集中拆除」。
   {
-    int sumDR = 0;
-    int sumUR = 0;
-    int aliveEnemyBuildings = 0;
+    int towerBestSN = -1;
+    int towerBestEdgeDis = -1;
     for (const tagBuilding &building : info.enemy_buildings) {
-      if (building.Blood <= 0)
+      if (building.Blood <= 0 || building.Type != BUILDING_ARROWTOWER)
         continue;
-      sumDR += building.BlockDR;
-      sumUR += building.BlockUR;
-      ++aliveEnemyBuildings;
-    }
-    if (aliveEnemyBuildings > 0) {
-      // 整数除法取整：仍然确定（同样的输入必然得同样的圆心）。
-      const int baseDR = sumDR / aliveEnemyBuildings;
-      const int baseUR = sumUR / aliveEnemyBuildings;
-      int towerBestSN = -1;
-      int towerBestDis2 = 0;
-      for (const tagBuilding &building : info.enemy_buildings) {
-        if (building.Blood <= 0 || building.Type != BUILDING_ARROWTOWER)
-          continue;
-        const int dis2 =
-            BlockDis2(building.BlockDR, building.BlockUR, baseDR, baseUR);
-        // 最远者胜（`>`，不是 `<`）；同距取 SN 小的那个。
-        if (towerBestSN == -1 || dis2 > towerBestDis2 ||
-            (dis2 == towerBestDis2 && building.SN < towerBestSN)) {
-          towerBestSN = building.SN;
-          towerBestDis2 = dis2;
-        }
+      const int toLeft = building.BlockDR;
+      const int toRight = MAP_L - 1 - building.BlockDR;
+      const int toTop = building.BlockUR;
+      const int toBottom = MAP_U - 1 - building.BlockUR;
+      const int edgeDis = min(min(toLeft, toRight), min(toTop, toBottom));
+      // 离边缘越远者胜（`>`）；同距取 SN 小的那个。
+      if (towerBestSN == -1 || edgeDis > towerBestEdgeDis ||
+          (edgeDis == towerBestEdgeDis && building.SN < towerBestSN)) {
+        towerBestSN = building.SN;
+        towerBestEdgeDis = edgeDis;
       }
-      if (towerBestSN != -1)
-        return towerBestSN;
     }
+    if (towerBestSN != -1)
+      return towerBestSN;
   }
   // 1. 敌方市镇中心（推平基地）。
   for (const tagBuilding &building : info.enemy_buildings) {
