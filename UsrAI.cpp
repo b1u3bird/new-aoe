@@ -1299,8 +1299,31 @@ static int armyCampResultFrame = USR_INVALID_FRAME;
 // 棍棒兵生产指令返回结果对应的游戏帧。
 static int clubmanResultFrame = USR_INVALID_FRAME;
 
+// 【总开关：AI 调试日志】一处控制 UsrAI 的全部日志输出。
+//
+// 【为什么一个开关就够】UsrAI.cpp 里有 40+ 处日志，但它们【全部】经本函数写入
+// （文件里没有别的输出口：没有 call_debugText，也没有 qDebug）。所以只要在函数
+// 入口挡一道，所有日志就一起关掉，不需要去改那 40 多处。
+//
+// 【关掉它的两个用处】
+//   · 省 I/O：本函数是【每条日志 fopen + fprintf + fclose 一次】（见下面的实现），
+//     一局下来上千条，关掉能省掉可观的系统调用 —— 而 AI 的耗时是直接进帧循环的。
+//   · 做对照实验：确认某次结果差异不是「日志 I/O 带来的时序扰动」造成的
+//     （这一点在本项目里不是空想：AI 会被丢帧，而丢帧比例受机器负载影响）。
+//
+// 【取值】默认 true = 保持原有行为。要安静就把这里改成 false。
+//
+// 【与 AOE_AI_LOG 环境变量的区别】那个管的是「写到哪个文件」（并行评测时每个实例
+// 一份日志），本开关管的是「写不写」—— 两件事，互不影响。
+//
+// 【提醒】关掉之后【所有】调试信息都没了，包括评测脚本依赖的 [AI] 行
+// （scripts/run_ai_trials.py 留下的 .ai.log 会是空的）。做评测时别关。
+static const bool USR_AI_LOG_ENABLED = true;
+
 // 调试日志：写入 ai_debug.log，用于离线分析 AI 决策与游戏状态。
 static void AiDebugLog(const char *msg) {
+  if (!USR_AI_LOG_ENABLED)
+    return;
   // 【日志路径可被环境变量覆盖，默认仍是项目根的 ai_debug.log】
   //
   // 并行跑多局评测时（scripts/run_one_map.sh），多个游戏实例共用同一个 cwd
