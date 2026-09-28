@@ -7162,28 +7162,30 @@ static void ManagePriest(UsrAI *ai)
         return;
     }
 
-    // 【这里原先写着 `priestEmergencyTarget = make_pair(-1, -1);`，已删除】
+    // 【这里原先每帧执行一句 `priestEmergencyTarget = make_pair(-1, -1);`，
+    //   现在改成【只在脱离危险的那一刻】清一次】
     //
-    // 原理由：「无威胁时清除撤退点记录，否则下次遇到同方向的威胁时，算出的撤退点
-    // 与残留记录相同，会因『点位未变化』而不再下达移动指令」。
+    // 原写法的意图是对的：「无威胁时清掉撤退点记录，否则下次遇到同方向的威胁时，
+    // 算出的撤退点与残留记录相同，会因『点位未变化』而不再下达移动指令」。
+    // 但它【每帧执行】有个致命副作用：把「我上次下发的目标」这条记录彻底废掉，
+    // 于是 ShouldReissuePriestMove 每次都判成「目标变了」。有 40 帧节流当刹车时
+    // 看不出问题；节流一关（USR_THROTTLES_ENABLED=false）就成了【每帧重发同一个
+    // 坐标】—— 实测游戏日志里祭司每 40ms 被下一次 HumanMove 到固定坐标、路径每帧
+    // 被 suspendRelation 清空、永远走不到，而且它该撤退时也撤不动（这正是
+    // 「祭司死得太早」的直接原因）。
     //
-    // 【为什么那个理由是错的】「同一个目标要不要重发」已经由 ShouldReissuePriestMove
-    // 的第三条判据覆盖了：目标相同 → 只在「超过 USR_PRIEST_STUCK_FRAMES 且一直没
-    // 靠近」时才重发。所以不清记录也不会漏发，只会晚 150 帧——而那正是要的行为。
+    // 【只改成「不清」也不对】新威胁的撤退点与上次相同时，要等卡住判据
+    // （USR_PRIEST_STUCK_FRAMES = 150 帧）才重发 —— 祭司在劣势下多站 150 帧，
+    // 同样会把命送掉。
     //
-    // 【为什么清空是有害的，而且这个害处一直存在】它在【无威胁路径上每帧执行】，
-    // 于是下一帧任何一次 ShouldReissuePriestMove 比较都判成「目标变了」。
-    // 以前看不出问题，是因为「目标变了」那条路还有一道 40 帧的节流当刹车
-    // （USR_PRIEST_ORDER_INTERVAL）。节流总开关一关（USR_THROTTLES_ENABLED=false）
-    // 刹车就没了 —— 实测游戏日志里祭司每 40ms（= 每帧）被下一次 HumanMove 到
-    // 【同一个坐标】，而每次下发都经 suspendRelation 清空路径，于是它永远走不到，
-    // 日志无限刷屏。
-    //
-    // 【真正的病因：一个变量担了两个语义】priestEmergencyTarget 同时当
-    //   (i) 「我上次下发的目标」—— 判「目标变了」要【保留】；
-    //   (ii)「我现在是否处于紧急撤退」—— 安全后要【清空】。
-    // ②的清空破坏①的语义。这里按①的语义用（不清），紧急状态另有
-    // priestDangerTargetSN / priestSafeSinceFrame 两个变量在管，不缺这一处。
+    // 【所以取中间：只在「脱离危险」这个边沿清一次】
+    //   · 安全期间不再反复清 → 记录一直有效 → 不会每帧重发；
+    //   · 一旦重新遇险，记录已是 (-1,-1) → 判成「目标变了」→ 最多 40 帧
+    //     （USR_PRIEST_ORDER_INTERVAL）内就重发，撤退响应快回来。
+    // 判据借用 priestDangerTargetSN：它非 -1 表示「上一帧还在危险中」，
+    // 正好就是「脱离危险」这个边沿（下面那句会把它置回 -1）。
+    if (priestDangerTargetSN != -1)
+        priestEmergencyTarget = make_pair(-1, -1);
 
     // 安全后不再追加移动，避免移动指令反复中止转换关系。
     priestDangerTargetSN = -1;
