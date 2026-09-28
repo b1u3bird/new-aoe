@@ -20,6 +20,11 @@ build/
 # 日志文件
 *.log
 
+# 游戏运行时写出的回放/录制文件
+# 它每跑一局都会被重写，被跟踪的话 git status 里会常驻一条「已修改」，
+# 掩盖真正的改动。文件本身没有版本意义（上一次是随 fd9180f 的同步混进来的）。
+GameReplayOrRecord.video
+
 # CursorAI相关文件
 .cursor
 
