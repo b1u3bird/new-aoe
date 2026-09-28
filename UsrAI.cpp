@@ -730,6 +730,36 @@ static const int USR_FORWARD_BUILD_RADIUS = 10;
 static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
 // 表示尚未发生过相关事件的哨兵帧值。
 static const int USR_INVALID_FRAME = -1000000000;
+
+// 【总开关：AI 内部所有「重复下发同一类指令」的按帧节流】2026-09-28 按要求全部停用。
+//
+// 停用后每一处节流判据都被短路（各处的判据都写成了 `USR_THROTTLES_ENABLED && …`），
+// AI 于是【每次被调用都重新评估、并重新下发】。
+//
+// 【停用前请读完这段：这些节流不是性能优化，是引擎语义要求】
+// 引擎在每次下发指令时都会先走 suspendRelation（Core_List.cpp:450-468）：
+//     moveOb->setPath(stack<Point>(), ...);          // 清空路径
+//     object->initAction();                          // 行动重置
+//     relate_AllObject[object].resetGatherTimer();   // gatherNextFrame = -1
+//     relate_AllObject[object].isExist = false;      // 关系作废
+// 而采集/攻击/建造的【唯一产出】发生在「关系存在 + 计时到期」那一刻
+// （Core_List.cpp:1256-1310，那行 updateCnt_byGather 是全函数唯一产出资源的地方）。
+// 所以对同一个单位逐帧重发会：
+//   · 采集 / 建造 / 修复：计时器每帧被推后到 g_frame+interval → 产出那行永远执行
+//     不到 → 农民一直停在"准备中"，一点资源都不产；
+//   · 移动类（集结 / 站桩 / 风筝 / 祭司 / 散开）：路径每帧被清空 → 单位走不成线，
+//     而且引擎每帧要为每个单位重新寻路 → 帧率下降 → AI 被丢帧更多 → 整体更差。
+// 换句话说：这些节流是「别打断正在进行的工作」，不是可以随便压掉的开销。
+//
+// 【为什么还是做成了开关】需求要求「把所有节流都取消」，而这件事的最优做法与
+// 引擎语义冲突。做成开关的价值是：可以一次性全关、亲眼看后果、再一键恢复，
+// 而不是把它当成一个长期配置。
+//
+// 【关闭后的预期症状，都是上面那条语义的直接后果，不是新 bug】
+//   农民不采集 / 不建造 / 不修塔；单位原地不动或抖；被近战贴住的远程兵撤不走；
+//   卡住的农民永远停住；帧率下降。
+// 【恢复】改回 true，各处判据立即生效（不需要改别的地方）。
+static const bool USR_THROTTLES_ENABLED = false;
 // 建筑研发「已结束」判定的防抖窗口：观察到 Project 离开研发项后连续空闲这么多帧，
 // 才认定研发真的完成。研发被中断（suspendRelation）时 Project 会短暂回到 0，
 // 窗口太短会把中断误判成完成 —— 实测就是因此让 wheelTechReady 提前变真，
@@ -3217,7 +3247,7 @@ static void EvacuateFarmersFromEnemyKeepout(UsrAI *ai)
         const bool hadThreat = (lastIt != farmerThreatLastFrame.end());
         const int prevThreatFrame = hadThreat ? lastIt->second : USR_INVALID_FRAME;
         const bool needOrder =
-            !hadThreat ||
+            !USR_THROTTLES_ENABLED || !hadThreat ||
             (g_frame - prevThreatFrame >= USR_FARMER_KEEPOUT_ORDER_INTERVAL);
         // 标记每帧刷新（不只是下发那一刻）—— 这样「他还在禁区里」对
         // TryAssignIdleFarmer 的滞后判定始终成立，不会有空隙被派回经济。
@@ -3952,7 +3982,8 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
         {
             map<int, int>::const_iterator orderIt =
                 farmerLastOrderFrame.find(farmer.SN);
-            if (orderIt != farmerLastOrderFrame.end() &&
+            if (USR_THROTTLES_ENABLED &&
+                orderIt != farmerLastOrderFrame.end() &&
                 g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
                 continue;
         }
@@ -4115,7 +4146,8 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     buildFailCodes[typeIdx] = 1; // 上一个建造指令还没结算
     return false;
   }
-  if (g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL) {
+  if (USR_THROTTLES_ENABLED &&
+      g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL) {
     buildFailCodes[typeIdx] = 2; // 建造冷却中
     return false;
   }
@@ -6077,7 +6109,8 @@ static bool ShouldReissuePriestMove(const tagArmy *priest, int tx, int ty,
   if (priest == nullptr)
     return false;
   if (priestEmergencyTarget.first != tx || priestEmergencyTarget.second != ty)
-    return g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL;
+    return !USR_THROTTLES_ENABLED ||
+           g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL;
   // 目标没变：判据是「这段时间有没有在靠近」，而不是「位置有没有变」。
   //
   // 【为什么不能用位置】原判据是「当前位置 == 下发时的位置」，也就是只有
@@ -9268,7 +9301,8 @@ static bool ManageStandoff(UsrAI *ai)
         standoffEngagedSince = g_frame;
 
     const int orderInterval = 60;
-    if (g_frame - offensiveLastOrderFrame < orderInterval)
+    if (USR_THROTTLES_ENABLED &&
+        g_frame - offensiveLastOrderFrame < orderInterval)
         return true; // 还在节流窗口里，但阶段判定已经做完
     offensiveLastOrderFrame = g_frame;
 
@@ -9705,7 +9739,8 @@ static bool IsMeleeAttackerSort(int sort)
 //   里那段说明。）
 static void KiteRangedBackFromMelee(UsrAI *ai)
 {
-    if (g_frame - lastKiteFrame < USR_MELEE_KITE_INTERVAL)
+    if (USR_THROTTLES_ENABLED &&
+        g_frame - lastKiteFrame < USR_MELEE_KITE_INTERVAL)
         return;
 
     // ① 找出「正在被近战兵打的远程兵」，顺便记下那个近战兵的位置当参照点。
@@ -9897,7 +9932,8 @@ static void ManageOffensiveArmy(UsrAI *ai)
   // 「车轮科技完成」「兵力 ≥ 8」这些出击条件 —— 早点开始走，到点正好能压上。
   if (g_frame >= USR_ARMY_RALLY_FRAME && g_frame < USR_OFFENSIVE_FRAME)
   {
-    if (lastArmyRallyFrame == USR_INVALID_FRAME ||
+    if (!USR_THROTTLES_ENABLED ||
+        lastArmyRallyFrame == USR_INVALID_FRAME ||
         g_frame - lastArmyRallyFrame >= USR_ARMY_RALLY_ORDER_INTERVAL)
     {
       lastArmyRallyFrame = g_frame;
@@ -10028,7 +10064,8 @@ static void ManageOffensiveArmy(UsrAI *ai)
 
   const int targetSN = FindOffensiveTargetSN();
   const int orderInterval = 60;
-  if (g_frame - offensiveLastOrderFrame < orderInterval)
+  if (USR_THROTTLES_ENABLED &&
+      g_frame - offensiveLastOrderFrame < orderInterval)
     return;
   offensiveLastOrderFrame = g_frame;
 
@@ -10127,7 +10164,8 @@ static void KeepHuntersOnLiveGazelles(UsrAI *ai)
 
         map<int, int>::const_iterator lastIt =
             hunterRedirectFrame.find(farmer.SN);
-        if (lastIt != hunterRedirectFrame.end() &&
+        if (USR_THROTTLES_ENABLED &&
+            lastIt != hunterRedirectFrame.end() &&
             g_frame - lastIt->second < USR_HUNT_REDIRECT_INTERVAL)
             continue;
 
@@ -10385,7 +10423,9 @@ static void AssignArrowTowerTargets(UsrAI *ai)
     {
         if (building.Type != BUILDING_ARROWTOWER)
             continue;
-        if (g_frame - towerLastOrderFrame[building.SN] < USR_TOWER_ORDER_INTERVAL)
+        if (USR_THROTTLES_ENABLED &&
+            g_frame - towerLastOrderFrame[building.SN] <
+                USR_TOWER_ORDER_INTERVAL)
             continue;
 
         const int targetSN = FindArrowTowerTarget(building);
