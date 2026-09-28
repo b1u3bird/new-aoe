@@ -3933,10 +3933,29 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
                 continue;
         }
 
-        map<int, int>::const_iterator orderIt = farmerLastOrderFrame.find(farmer.SN);
-        if (orderIt != farmerLastOrderFrame.end() &&
-            g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
-            continue;
+        // 【节流只留给「僵尸农民救援」这一条路，空闲农民不再等】
+        //
+        // 走到这里只有两类农民：真正的 IDLE，和「WALKING 但卡住」的僵尸
+        // （见上面 3916 行那个判据）。
+        //   · IDLE 农民手上【没有关系】—— 有采集关系的人必然是工作中/在途，
+        //     所以给他下发不会清掉任何东西（suspendRelation 里
+        //     `if (relate_AllObject[object].isExist)` 直接跳过），节流纯属多余：
+        //     去掉后派工不再平白延迟最多 USR_ECONOMY_ORDER_INTERVAL 帧。
+        //   · 僵尸农民相反：他【已经有目的地关系】，只是走不动。逐帧重发会
+        //     每帧清一次路径（suspendRelation → setPath 空栈），他反而永远
+        //     挪不动 —— 所以这条必须保留节流，让每次重发之间留出真实行走时间。
+        //
+        // 两类以外的人（在途、工作中、建造中、有 pending 订单）上面都已经
+        // continue 掉了，所以这里的判据就是「是否僵尸」。
+        const bool zombieRescue = (farmer.NowState != HUMAN_STATE_IDLE);
+        if (zombieRescue)
+        {
+            map<int, int>::const_iterator orderIt =
+                farmerLastOrderFrame.find(farmer.SN);
+            if (orderIt != farmerLastOrderFrame.end() &&
+                g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
+                continue;
+        }
 
         int desiredBucket = 0;
         int largestDeficit = 0;
@@ -4012,9 +4031,11 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
 
 static bool TryResumeIncompleteBuilding(UsrAI *ai)
 {
-    const int recoveryInterval = 80;
-    if (g_frame - lastConstructionRecoveryFrame < recoveryInterval)
-        return false;
+    // 【原先这里有一道 80 帧的节流，已取消】理由同 TryRepairDamagedBuilding：
+    // 下面已经用 `farmer.WorkObjectSN == building.SN` 判断「这个工地是否已经有人
+    // 在恢复」，有人接手就直接返回 —— 既不会重发、也不会打断施工进度，所以那道
+    // 节流是多余的。去掉后工地一旦失去建造者（阵亡、或被抢去做别的），下一帧就有
+    // 人补上，不必再等最多 80 帧。
 
     const tagBuilding *target = nullptr;
     for (const tagBuilding &building : info.buildings)
@@ -5145,11 +5166,14 @@ static int FindRepairFarmerSN(const tagBuilding &building,
 }
 
 static bool TryRepairDamagedBuilding(UsrAI *ai) {
-  static int lastRepairFrame = USR_INVALID_FRAME;
-  const int repairInterval = 200;
-  if (lastRepairFrame != USR_INVALID_FRAME &&
-      g_frame - lastRepairFrame < repairInterval)
-    return false;
+  // 【原先这里有一道 200 帧的节流，已取消；配套的 lastRepairFrame 时间戳一并删除】
+  // 它用「上次修过就等 200 帧」来限流，但本函数【自己就有正确的守卫】——
+  // 下面按 `farmer.WorkObjectSN == building.SN` 数出已经在修的班底，满员就
+  // continue，只把缺口补齐到 crewLimit。所以它【永远不会重发给同一个修复者】，
+  // 「重发打断修复进度」这件事不会发生，那道节流纯属多余。
+  // 去掉之后的好处很直接：修复者阵亡、或又有建筑被打坏时，班底在【下一帧】就被
+  // 补齐，而不是最多等 200 帧（游戏时间 8 秒）—— 塔正在挨打时，这 8 秒很贵。
+  // 代价：本函数每帧都扫一遍建筑与农民（几十项），相对每帧总工作量可忽略。
 
   bool repairedAny = false;
   set<int> usedFarmers;  // 本轮已分配的农民，避免多个建筑抢同一个农民
@@ -5217,8 +5241,6 @@ static bool TryRepairDamagedBuilding(UsrAI *ai) {
     }
   }
 
-  if (repairedAny)
-    lastRepairFrame = g_frame;
   return repairedAny;
 }
 
