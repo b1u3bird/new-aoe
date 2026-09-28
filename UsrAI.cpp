@@ -885,10 +885,15 @@ static bool IsFarmerRelationEstablished(int farmerSN, int targetSN);
 // 前向声明放在这里：建造 / 恢复工地 / 修塔 / 经济派工四处都要读它，
 // 而它的定义在 IsAliveFarmerSN 旁边（与本块其余判据一致）。
 static bool IsFarmerEscorting(int farmerSN);
-// 上次提交建筑研发、升级或生产动作的游戏帧。
-static int lastBuildingActionFrame = USR_INVALID_FRAME;
-// 上次提交单位生产动作的游戏帧。
-static int lastProductionActionFrame = USR_INVALID_FRAME;
+// 【已停用：以下 2 个是死变量】见文件下方「新对局重置块」那段 #if 0 的说明。
+// 全文件 grep 过：除了自己的声明，它们没有任何引用 —— 用它们的「建筑动作 /
+// 单位生产的节流」代码已经不在了，唯一还引用它们的地方就是那段重置块。
+// 重置块被注释掉之后，它们就触发了 -Wunused-variable。与下面 researchedTechCount
+// 前后那 6 个同批处理（那里有完整的排查记录与恢复方法）。
+// // 上次提交建筑研发、升级或生产动作的游戏帧。
+// static int lastBuildingActionFrame = USR_INVALID_FRAME;
+// // 上次提交单位生产动作的游戏帧。
+// static int lastProductionActionFrame = USR_INVALID_FRAME;
 // 上次提交祭司移动或转换指令的游戏帧。
 static int lastPriestOrderFrame = USR_INVALID_FRAME;
 // 主力开始总攻后的祭司跟随门控状态。
@@ -901,6 +906,8 @@ static int offensiveAttackStartFrame = USR_INVALID_FRAME;
 // 新对局回退后那个差是【负数】、条件恒成立，两条分支会每帧 return，新对局里军队
 // 一次进攻指令都不下发（与 lastArmyRallyFrame 是同一个坑，见重置块里的说明）。
 // 重置块在文件靠前处，所以声明也得在它之前。
+// （该块目前已 #if 0 停用 —— 判据在本项目里永不成立，见其上方说明；位置保持不动，
+//   这样将来恢复它时不用再挪声明。）
 static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 // 上一次下发「向地图中间集结」指令的帧。见 ManageOffensiveArmy 开头那一段。
 static int lastArmyRallyFrame = USR_INVALID_FRAME;
@@ -982,18 +989,30 @@ static map<pair<int, int>, int> badBuildSpot;
 // 坏点的有效期（帧）。照搬另一套实现的 badPlace 机制，取值也一致。
 static const int USR_BAD_BUILD_SPOT_FRAMES = 1500;
 static int buildFarmerSN = -1;
-static int stableOrderFrame = USR_INVALID_FRAME;
-// 最近一次非生产建筑动作的异步指令 ID。
-static int technologyOrderId = -1;
-// 最近一次非生产建筑动作提交时的游戏帧。
-static int technologyOrderFrame = USR_INVALID_FRAME;
-// 最近一次非生产建筑动作的动作枚举，用于异步成功后推进科技里程碑。
-static int technologyPendingAction = -1;
+// 【已停用：以下 6 个是死变量】用它们的代码（市场 / 兵营那条科技链：市场研发、
+// 兵营升级、后勤研究）早已被注释掉，唯一还引用它们的地方是文件上方那段
+// 「新对局重置块」—— 那个块因为判据在本项目里永不成立也已被 #if 0 停用。
+// 于是它们成了「定义了但没有任何引用」，触发 -Wunused-variable。
+//
+// 【逐个核对过】stableOrderFrame / technologyOrderId / technologyOrderFrame /
+// technologyPendingAction 全文件只剩自己的声明；clubmanUpgradeOrderId /
+// broadswordUpgradeOrderId 另各有一处引用，但那两处在研究链那段里是
+// // 注释掉的 ResearchTech 调用，不算活的引用。
+//
+// 【恢复方法】把这 6 行、上面 IsFarmerEscorting 附近那 2 行、以及重置块里对应的
+// 赋值一起解开 —— 只解重置块会因变量未定义而编译不过。
+// static int stableOrderFrame = USR_INVALID_FRAME;
+// // 最近一次非生产建筑动作的异步指令 ID。
+// static int technologyOrderId = -1;
+// // 最近一次非生产建筑动作提交时的游戏帧。
+// static int technologyOrderFrame = USR_INVALID_FRAME;
+// // 最近一次非生产建筑动作的动作枚举，用于异步成功后推进科技里程碑。
+// static int technologyPendingAction = -1;
 // 研发完成的兵种科技数量，全部完成后解锁兵力生产上限并开始进攻。
 static int researchedTechCount = 0;
 // 各兵种科技的研发订单 ID（-1 表示无 pending）。
-static int clubmanUpgradeOrderId = -1;
-static int broadswordUpgradeOrderId = -1;
+// static int clubmanUpgradeOrderId = -1;
+// static int broadswordUpgradeOrderId = -1;
 // 研发订单 ID → 下单帧。Core::logActionResult 只把「成功」指令写入
 // info.ins_ret， 被拒绝的指令不会留下任何结果，因此不能仅凭 orderId != -1
 // 判断在途， 必须配合下单帧做超时判定，否则该研发通道会永久卡死。
@@ -2523,6 +2542,40 @@ static void CleanupFarmerResourceState()
 
 static void ProcessPendingGatherOrders()
 {
+    // 【已停用：新对局重置块】
+    //
+    // 这段代码原本用来「检测到换了一局，就把上一局残留的状态全部清掉」，判据是
+    // 帧号倒退（g_frame < farmerResourceStateFrame）。但实测当前代码里
+    // 【一个进程只跑一局，这个判据永远不成立】：
+    //   · MainWidget 只在 main() 里构造一次（main.cpp:52），initMap/initAI 也只在
+    //     它的构造函数里被调用（MainWidget.cpp:132/136），没有第二条重新初始化的
+    //     路径；
+    //   · gameframe 是 MainWidget 成员、初值 0，全文件只有 gameframe++，
+    //     没有任何地方清零或回退（MainWidget.cpp:2639）；
+    //   · 一局结束就 HandleGameOver() → exit(0)（MainWidget.cpp:2628）直接结束进程；
+    //   · 评测脚本也是一次 run 起一个进程（run_ai_trials.py:156）。
+    // 既然判据不成立，这段清理就是死代码 —— 注释掉它不改变任何行为。
+    //
+    // 【为什么整体留着而不是删掉】里面每一行都是一次实测踩坑的记录（见各个
+    // 变量的注释），删掉就把「哪些状态是跨局敏感的」这份清单弄丢了。将来真加了
+    // 重开一局的入口，把它解开就能直接用。
+    //
+    // 【恢复要做的三件事，缺一不可】
+    //   (i) 把下面这段 #if 0 解开；
+    //   (ii) 确认 #endif 之后那句 `farmerResourceStateFrame = g_frame;` 仍在
+    //        if 之外 —— 它是检测器本身的上弦动作；
+    //   (iii) 恢复被一并注释掉的【8 个声明】：lastBuildingActionFrame /
+    //        lastProductionActionFrame（在 IsFarmerEscorting 前向声明之后那一段，
+    //        标注「【已停用：以下 2 个是死变量】」），以及 stableOrderFrame /
+    //        technologyOrderId / technologyOrderFrame / technologyPendingAction /
+    //        clubmanUpgradeOrderId / broadswordUpgradeOrderId（在
+    //        researchedTechCount 前后那一段，标注「【已停用：以下 6 个是死变量】」）。
+    //        搜这两个标注就能定位。这一步不做，本段会因变量未定义而编译不过 ——
+    //        那 8 个变量在别处没有任何引用，就是靠这段重置块「活着」的。
+    //
+    // 【不要动下面那句 farmerResourceStateFrame = g_frame】它在 if 之外，
+    // 是检测器本身的上弦动作，解开这段代码时它必须原样存在。
+#if 0
     if (farmerResourceStateFrame != USR_INVALID_FRAME &&
         g_frame < farmerResourceStateFrame)
     {
@@ -2648,6 +2701,7 @@ static void ProcessPendingGatherOrders()
         farmerEscortStuckTries.clear();
         farmerEscortTowerBadForFarmer.clear();
     }
+#endif
     farmerResourceStateFrame = g_frame;
 
     CleanupFarmerResourceState();
