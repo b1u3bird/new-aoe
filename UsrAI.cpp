@@ -632,6 +632,27 @@ static const int USR_HUNT_HUNTERS_PER_CLUSTER = 1;
 //   · 这条是【固定流程】——「这群猎物清完了，就在这里收尸」，不该被距离否掉。
 // 只要不是紧贴着已有的交付建筑（再建一座纯属浪费）就该建。
 static const int USR_HUNT_DEPOT_MIN_DIS2 = 36;
+// 交付建筑（仓库 / 谷仓）离我方市镇中心的【最大】距离（格，曼哈顿）。
+//
+// 【为什么必须有这条上限】TryBuildReturnDepot 的选点判据是「谁离现有的交付建筑
+// 最远谁赢」（见那两处 `dis2 > worstReturnDis2`），而它【只有下限】（> 20 格才
+// 值得多建一座），没有上限 —— 于是离我方最远的那片林子/矿区永远是赢家，仓库就
+// 建到那儿去了。而资源评分里又【刻意不含「农民到资源的距离」】（见
+// FindBestResourceSN 里那段「已取消距离项」的说明），仓库一落成、那片资源的交付
+// 距离归零，它在评分里立刻反超近处的林子 —— 农民于是横穿半张地图去砍树。
+// 实测症状就是「农民跑到对面家旁边建仓库、然后在那里砍树」。
+//
+// 【为什么是 65 格】敌方基地离我方中心曼哈顿 122~140 格（四张图，见
+// EstimateEnemySiegeAnchor 的实测记录），65 大致是中场。取它就把交付建筑挡在
+// 我方半场＋中场之内，农民的活动半径随之被压住。
+// 【关键：这条判据不依赖侦察】从开局第一帧就生效 —— 不像
+// USR_FARMER_ENEMY_BASE_KEEPOUT 要等敌方建筑被发现（实测前 ~30000 帧
+// enemyB=0，那段时间禁区整段失效）。
+//
+// 【代价】若某张图把主矿区/主林区放在离我方中心 65 格以外，那片资源就不会有自己
+// 的交付建筑，农民走得远一些（但不会再横穿到敌方那侧）。真出现「农民跑很远去采
+// 近处明明有的资源」，先回来看这个值是不是划得太紧。
+static const int USR_DEPOT_MAX_HOME_DISTANCE = 65;
 // 出兵建筑朝前线方向偏移的距离（格）。
 // 文档《快速升级和取得胜利》第 75 行：「建设靶场的时候也要考虑尽量往地图中间
 // 建，兵造出来很快就能加入战斗」。取 10：比箭塔近圈（6 格）远、比远圈（12 格）
@@ -4031,11 +4052,29 @@ static bool TryBuild(UsrAI *ai, int buildingType)
 }
 
 // 在离交付建筑较远的资源群旁建仓库/谷仓，缩短交付往返距离。
+// 交付建筑的候选落点是否**够靠近我方**。
+//
+// 见 USR_DEPOT_MAX_HOME_DISTANCE：没有这条上限时，「谁离现有交付建筑最远谁赢」
+// 会把仓库一路推到敌方那一侧，随后那片资源在评分里反超近处的资源、农民横穿地图。
+//
+// home == nullptr（开局头几帧、市镇中心还没进 info.buildings）时一律放行：
+// 那个时刻本来就还没得挑，卡住这里只会让前置建筑凑不齐、拖慢升时代。
+static bool IsDepotSpotNearHome(const tagBuilding *home, int blockDR, int blockUR)
+{
+    if (home == nullptr)
+        return true;
+    return BlockDis(home->BlockDR, home->BlockUR, blockDR, blockUR) <=
+           USR_DEPOT_MAX_HOME_DISTANCE;
+}
+
 static void TryBuildReturnDepot(UsrAI *ai)
 {
     if (buildOrderId != -1 ||
         g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL)
         return;
+
+    // 我方市镇中心 —— 下面每一处候选都要用它挡一道「别建到敌方那侧去」。
+    const tagBuilding *home = FindCenter();
 
     // ── 候选一：猎物群（优先，不参与下面的距离比较）────────────────────
     // 文档第 24 行：「要点是全部打死之后再建设仓库，选择离所有死羚羊位置最近
@@ -4068,6 +4107,10 @@ static void TryBuildReturnDepot(UsrAI *ai)
             // 【农民禁区】在敌方基地旁边建仓库＝给禁区里的资源盖交付点，
             // 农民根本不会去采（FindBestResourceSN 已挡），白花 120 木。
             if (IsInsideEnemyKeepout(it->second.centerDR, it->second.centerUR))
+                continue;
+            // 【只在我方半场】见 USR_DEPOT_MAX_HOME_DISTANCE。
+            if (!IsDepotSpotNearHome(home, it->second.centerDR,
+                                     it->second.centerUR))
                 continue;
             const int dis2 = FindNearestReturnBuildingDistance(
                 BUILDING_STOCK, it->second.centerDR, it->second.centerUR);
@@ -4102,6 +4145,10 @@ static void TryBuildReturnDepot(UsrAI *ai)
             // 建在那儿纯属浪费。见 IsInsideEnemyKeepout。
             if (IsInsideEnemyKeepout(resource.BlockDR, resource.BlockUR))
                 continue;
+            // 【只在我方半场】见 USR_DEPOT_MAX_HOME_DISTANCE。这道是这条循环的
+            // 关键：不加的话「离现有交付建筑最远」会把落点一路推到敌方那一侧。
+            if (!IsDepotSpotNearHome(home, resource.BlockDR, resource.BlockUR))
+                continue;
             // 建哪座交付建筑由资源类型决定：浆果丛要的是【谷仓】。原先一律当成
             // 仓库，于是会在浆果丛旁边盖一座对它毫无用处的仓库，而 AI 自己的评分
             // 立刻变「近」、继续往那儿派人 —— 自我强化的假象，也是野外那些多余
@@ -4123,6 +4170,9 @@ static void TryBuildReturnDepot(UsrAI *ai)
                 continue;
             // 【农民禁区】同资源循环。
             if (IsInsideEnemyKeepout(building.BlockDR, building.BlockUR))
+                continue;
+            // 【只在我方半场】见 USR_DEPOT_MAX_HOME_DISTANCE。
+            if (!IsDepotSpotNearHome(home, building.BlockDR, building.BlockUR))
                 continue;
             const int dis2 = FindNearestReturnBuildingDistance(
                 BUILDING_GRANARY, building.BlockDR, building.BlockUR);
