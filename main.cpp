@@ -45,9 +45,21 @@ int main(int argc, char* argv[])
     //安装全局事件器
     eventFilter=new EventFilter();
     app.installEventFilter(eventFilter);
-    // 添加排除文件，这些文件不会被Logger处理
+    // 添加排除文件，这些文件不会被Logger写进日志文件（改为直接 fprintf 到 stdout）
     Logger::addExcludedFile("EnemyAI.cpp");
     Logger::addExcludedFile("UsrAI.cpp");
+    // 【为什么把 Qt 渲染模块也排除掉：--offscreen 下它们会刷爆日志】
+    // 无画面（offscreen）模式下渲染设备与位图资源是空的，于是每一次绘制都报一次
+    //     QPixmap::scaled: Pixmap is a null pixmap          （qpixmap.cpp）
+    //     QPainter::begin: Paint device returned engine == 0 （qpainter.cpp）
+    // 实测【约每帧 12 条】，一局 26695 帧就是 32 万条；而 Logger 每行都
+    // write()+flush()，于是帧循环被 I/O 拖住（74 帧/秒，有画面时约 190），
+    // 一次 16 局评测里多局撞满超时，日志文件也涨到 34~58 MB/局。
+    // 排除后这些消息改走 stdout（无 flush 的缓冲写），评测脚本再把 stdout 丢掉，
+    // 洪流的代价就归零了；日志文件里留下的仍然是有诊断价值的 AI / 引擎信息。
+    Logger::addExcludedFile("qpixmap.cpp");
+    Logger::addExcludedFile("qpainter.cpp");
+    Logger::addExcludedFile("qimage.cpp");
     //运行窗口
     MainWidget w;
     w.show();

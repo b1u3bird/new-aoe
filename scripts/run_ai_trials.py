@@ -169,7 +169,12 @@ def run_trial(
         ) as stderr_stream:
             completed = subprocess.run(
                 command,
-                stdout=stdout_stream,
+                # 【stdout 丢掉：它是噪音，不是结果】
+                # 引擎在 --offscreen 下会每帧报十几条 Qt 渲染警告（null pixmap /
+                # Painter not active）。Logger 把它们从日志文件里排除掉、改写到
+                # stdout —— 一局 32 万行。结果数据全部走 --ResultLogFile 的 jsonl，
+                # 这里不需要 stdout，丢掉可以省下 30~50 MB/局的输出。
+                stdout=subprocess.DEVNULL,
                 stderr=stderr_stream,
                 timeout=timeout_seconds,
                 check=False,
