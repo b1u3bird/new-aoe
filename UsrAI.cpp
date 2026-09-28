@@ -109,7 +109,17 @@ static const int USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
 // 第二个），总攻期间让它待在箭塔覆盖圈里，比跟部队出去换血更稳。
 // 【转士兵为什么也必须停】换来的一个士兵对胜负没有贡献，却会把祭司按在
 // 敌方基地里读条换血；它挨不起这个交换。
-static const int USR_PRIEST_PASSIVE_FRAME = 30000;
+//
+// 【改动历史】原为 30000（第三波骚扰 TAT=21000 之后的总攻起点），2026-09-28
+// 按要求提前到 26000。
+// 【为什么必须跟着军队总攻一起提前】军队总攻已提前到 USR_OFFENSIVE_FRAME = 28000
+// （见那里）。而祭司在这一帧【之前】是「主动走出去转换敌方士兵」的状态 —— 两个
+// 时间点若仍按原先那样差 2000 帧（28000 打、30000 才收敛），就会出现
+// 28000~30000 这 2000 帧「军队已经在拆塔、祭司还在满地图追着转换士兵」：它会被
+// 按在敌方基地里读条换血，而它只有 100 血、近战与远程防御都是 0、不可补充。
+// 【取值理由】26000 比总攻(28000)早 2000 帧，与「集结(25000) → 祭司先收手回位 →
+// 军队压上」的顺序一致。
+static const int USR_PRIEST_PASSIVE_FRAME = 26000;
 // 挨打时触发撤退的敌人搜索半径（格，欧氏）。
 // 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
 // （tE2=82 对阈值 81），而锁定祭司的近战兵从 10~20 格外走过来。
@@ -293,8 +303,8 @@ static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
 //
 // 【改动历史】原为 33000 → 按要求提前到 30000（= 祭司进入「保存实力」的时间点）
 // → 2026-09-28 按要求再提前到 25000，与军队集结（USR_ARMY_RALLY_FRAME）同帧。
-// 【注意它现在早于祭司保存实力】USR_PRIEST_PASSIVE_FRAME 仍为 30000，也就是说
-// 侦察兵出厂后 5000 帧，祭司才进入保存实力阶段 —— 这次提前带来的已知错位。
+// 【与祭司保存实力的关系】侦察兵 25000 出厂，祭司 26000 进入保存实力
+// （USR_PRIEST_PASSIVE_FRAME，已从 30000 提前到 26000），两者相差 1000 帧。
 static const int USR_SCOUT_FIRST_FRAME = 25000;
 // 侦察骑兵的【总数】。用于在人口上限里给它们始终预留位置 ——
 // 必须按总数预留、而不是等它该出场时才留：实测人口在 f=30000 之前就已经
@@ -352,8 +362,9 @@ static const int USR_OFFENSIVE_FRAME = 28000;
 // 【必须严格早于 USR_OFFENSIVE_FRAME】集结分支的判据是
 // `g_frame >= USR_ARMY_RALLY_FRAME && g_frame < USR_OFFENSIVE_FRAME` ——
 // 一旦反超（集结帧 ≥ 总攻帧），这个区间恒为空，集结永远不会执行、而且不报错。
-// 【已知错位】它现在不再与 USR_PRIEST_PASSIVE_FRAME(30000) 同帧：军队 28000 就
-// 压上去了，祭司要到 30000 才进入保存实力，中间 2000 帧祭司仍在探图状态。
+// 【与祭司保存实力的关系】它不再与 USR_PRIEST_PASSIVE_FRAME 同帧 —— 该常量已从
+// 30000 提前到 26000，所以现在的顺序是「集结 25000 → 祭司 26000 收手回位 →
+// 军队 28000 压上」：祭司先收敛、军队后出发。
 //
 // 【为什么要有集结这一步】USR_OFFENSIVE_FRAME 一到，ManageOffensiveArmy 会让
 // 全军直奔目标建筑。而部队是零散生产出来的、散在基地各处，一起出发会拉成一条
@@ -390,7 +401,7 @@ static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // 一次性投入前线（USR_FARMER_ESCORT_MAX = 20），此后经济不再有采集力。
 // 三条既有设计正好接住这个取舍：
 //   · USR_FARMER_LATE_FRAME(35000) 之后本来就只保留 5 个农民；
-//   · 祭司 30000 帧后进入「保存实力」，唯一的获胜路径是转换敌方攻城厂
+//   · 祭司 26000 帧后进入「保存实力」，唯一的获胜路径是转换敌方攻城厂
 //     （MainWidget::isWin 只认 isConverted() 的 BUILDING_SIEGE）；
 //   · 敌方箭塔【不会攻击农民】—— enemyai.cpp:238-241 的 Defend 集合只收
 //     enemyInfo.enemy_armies（我方军队），农民与建筑那两行 push_back 都被
@@ -5845,7 +5856,7 @@ static void ManagePriest(UsrAI *ai)
     //
     // 【为什么要求「没有敌人」】有敌人在的时候让祭司出门就是送；而且一旦它靠近
     // 敌方基地，守军进入视野会让这个条件自动失效、它就会退回来，天然自限。
-    // 保留原先的 g_frame >= USR_PRIEST_PASSIVE_FRAME(30000) 门槛：在那之前
+    // 保留原先的 g_frame >= USR_PRIEST_PASSIVE_FRAME(26000) 门槛：在那之前
     // 军队还没成型，这时候押上祭司去换基地是亏的。
     //
     // 【为什么还要加 WorkObjectSN == -1】这一段发的是 HumanMove，而 HumanMove
@@ -6032,7 +6043,7 @@ static void ManagePriest(UsrAI *ai)
     //
     // 【为什么放在这里】必须在「走向攻城厂」之后 —— 那一段才是获胜路径的最后
     // 一段（无敌兵时走到厂边），站桩带不能把它拦在 40 格外。也必须在下面的
-    // keepout 与 priestPassive「守家」之前 —— 否则 30000 帧之后那条会让祭司
+    // keepout 与 priestPassive「守家」之前 —— 否则 26000 帧之后那条会让祭司
     // 什么都不做，跟队规则永远执行不到。
     // 同时它排在 keepout 之前，也就避免了两条规则方向相反时的来回跑
     // （keepout 是"朝我方中心退"，而中心在 100+ 格外的另一头）。
@@ -6372,7 +6383,7 @@ static void ManagePriest(UsrAI *ai)
             return;  // 撤离期间不做转换 / 治疗
     }
 
-    // 【总攻阶段（priestPassive = f >= USR_PRIEST_PASSIVE_FRAME，即 30000）
+    // 【总攻阶段（priestPassive = f >= USR_PRIEST_PASSIVE_FRAME，即 26000）
     //   之后，祭司守家，不追出去转换】
     //
     // 【为什么必须放在转换之前】原先「回基地待机」那段逻辑裹在下面的
@@ -6441,7 +6452,7 @@ static void ManagePriest(UsrAI *ai)
         // 于是祭司走到了厂边上却永远不发起转换。实测日志：它停在 (15,77)、
         // mvTgt=(11,86)（那是厂的位置）、minDis=9999，直到被别的敌人打死。
         // 获胜路径要求"把敌人打光之后去把厂转掉"，所以这一条必须放开。
-        // 【30000 帧后不再转换敌方士兵】总攻阶段（USR_PRIEST_PASSIVE_FRAME）起，
+        // 【26000 帧后不再转换敌方士兵】总攻阶段（USR_PRIEST_PASSIVE_FRAME）起，
         // 祭司只做一件事：把敌方攻城武器厂转掉 —— 那是唯一的获胜条件。
         // 转换士兵会把它按在敌方基地里读条换血，而它只有 100 血、近战与远程
         // 防御都是 0、且不可补充；换来的一个士兵对胜负没有贡献。
@@ -6489,7 +6500,7 @@ static void ManagePriest(UsrAI *ai)
             // 视野里没有敌兵、或已进入总攻阶段（不再转士兵）→ 解除锁定。
             priestConversionLockSN = -1;
         }
-        // 【转换分支同样要过进厂门控】原先这里只判「过了 30000 帧」，
+        // 【转换分支同样要过进厂门控】原先这里只判「过了 26000 帧」，
         // 于是它可以绕过冲厂分支的那套门控直接对厂建立关系、把祭司带进塔的
         // 火力网 —— 实测致命一局就是这样：祭司在 convB=1（正在转换建筑）的
         // 状态下被三座 15/15/34 血的箭塔从 100 打到 13。
@@ -6831,7 +6842,7 @@ static void ManagePriest(UsrAI *ai)
 
     // 转换全程保留，不因总攻阶段停用。
     // 转换敌方攻城武器厂是唯一的获胜条件，关掉它就等于关掉获胜路径——
-    // 而且原先挂在上面的 `g_frame >= 30000` 与 priestPassive 的门槛相同，
+    // 而且原先挂在上面的 `g_frame >= 26000` 与 priestPassive 的门槛相同，
     // 两条规则互相抵消，FindEnemySiege 那行从来没有被执行过。
     // 代价：FindPriestConversionTarget 没有距离限制，祭司可能为此跑到离基地
     // 30~50 格处（实测被 3 个敌人锁定后既撤不回来也打不过）。这是已知取舍。
@@ -7870,7 +7881,7 @@ static bool IsPriestSiegeCommitted(const tagArmy *priest, int &outTriggerKind)
 {
     if (priest == nullptr)
         return false;
-    // 与 ManagePriest 那条冲厂分支同门槛：30000 帧之前祭司不主动出门。
+    // 与 ManagePriest 那条冲厂分支同门槛：26000 帧之前祭司不主动出门。
     if (g_frame < USR_PRIEST_PASSIVE_FRAME)
         return false;
     if (!enemyBaseDiscovered)
