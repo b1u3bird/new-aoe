@@ -101,7 +101,10 @@ static const int USR_PRIEST_HEAL_RADIUS = 12;
 // 第三波时间点（enemyai.cpp 的 TAT = 21000）。在此之前，视野内没有敌人时
 // 祭司留在基地：它只有 100 血、近战与远程防御都是 0、且不能自愈，
 // 待在基地的箭塔覆盖圈里最安全。
-static const int USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
 // 总攻阶段起始帧：此后祭司进入「只保存实力」状态 —— 不再治疗、不再【转换
 // 敌方士兵】，视野内没有敌人时留在基地；唯一保留的动作是转换敌方攻城武器厂
 // （那是获胜条件本身，见 ManagePriest 里那段转换分支）。
@@ -119,7 +122,10 @@ static const int USR_PRIEST_HOLD_HOME_UNTIL_FRAME = 21000;
 // 按在敌方基地里读条换血，而它只有 100 血、近战与远程防御都是 0、不可补充。
 // 【取值理由】26000 比总攻(28000)早 2000 帧，与「集结(25000) → 祭司先收手回位 →
 // 军队压上」的顺序一致。
-static const int USR_PRIEST_PASSIVE_FRAME = 26000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_PRIEST_PASSIVE_FRAME = 26000;
 // 挨打时触发撤退的敌人搜索半径（格，欧氏）。
 // 比各兵种射程更远：实测真正打伤祭司的战车弓箭手恰好停在判定边缘
 // （tE2=82 对阈值 81），而锁定祭司的近战兵从 10~20 格外走过来。
@@ -295,7 +301,10 @@ static const int USR_PRIEST_EXPLORE_RADIUS = 40;
 //     让祭司把 5000 帧用满、走到时间上限才回，而不是探完 50 格就停；
 //   · 它【不会】让祭司真的走到 120 格 —— 那是时间上限在管。
 // 想靠祭司找到 130 格外的敌方基地是不现实的，那件事归侦察骑兵。
-static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
 // 【开关：祭司开局探路】2026-09-28 按要求停用 —— 祭司不再出去绕圈。
 //
 // 停用后它一帧都不出门：进入待机段后走的是「无敌人时别待在敌方基地附近」
@@ -321,7 +330,10 @@ static const bool USR_PRIEST_EXPLORE_ENABLED = false;
 // → 2026-09-28 按要求再提前到 25000，与军队集结（USR_ARMY_RALLY_FRAME）同帧。
 // 【与祭司保存实力的关系】侦察兵 25000 出厂，祭司 26000 进入保存实力
 // （USR_PRIEST_PASSIVE_FRAME，已从 30000 提前到 26000），两者相差 1000 帧。
-static const int USR_SCOUT_FIRST_FRAME = 25000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_SCOUT_FIRST_FRAME = 25000;
 // 侦察骑兵的【总数】。用于在人口上限里给它们始终预留位置 ——
 // 必须按总数预留、而不是等它该出场时才留：实测人口在 f=30000 之前就已经
 // 顶到 50/50，那时再留已经来不及，「侦察兵一个都造不出来」就是这么来的。
@@ -345,7 +357,10 @@ static const bool USR_SCOUT_KEEP_ALIVE_TYPE_ENABLED = true;
 // 此时经济已成型、军队才是胜负手，把人口让出来给兵。
 // 注意：这不是「立刻裁到 5 个」——只是不再补产，多出来的由
 // SacrificeExcessFarmers 逐步自毁腾出人口（每 300 帧一个）。
-static const int USR_FARMER_LATE_FRAME = 35000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_FARMER_LATE_FRAME = 35000;
 static const int USR_FARMER_LATE_TARGET = 5;
 // 专职侦测敌方基地的侦察骑兵的生产时间点。
 // 在 USR_SCOUT_FIRST_FRAME 之后产出的侦察兵执行「视野内出现敌人即撤回市镇中心」
@@ -358,7 +373,10 @@ static const int USR_FARMER_LATE_TARGET = 5;
 // `if (!enemyBaseDiscovered) return;` —— 基地没被发现时总攻根本不启动，而专职
 // 侦测兵是发现敌方基地的主要手段。它若留在 33000，28000 这个总攻时间点就只是
 // 摆设（军队会一直等到基地被发现为止）。
-static const int USR_SCOUT_RECON_FRAME = 28000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_SCOUT_RECON_FRAME = 28000;
 // 开始允许军队主动进攻敌方建筑的帧号。
 // 此前军队只做接敌自卫（AssignFieldSelfDefense：看到谁打谁，从不主动推进）；
 // 过了这一帧之后，已经侦察到的敌方建筑会被列为攻击目标。
@@ -370,7 +388,10 @@ static const int USR_SCOUT_RECON_FRAME = 28000;
 // 【提前它的实际效果有上限】上面那道 `!enemyBaseDiscovered` 门控：敌方基地在
 // 28000 之前没被侦察到的话，军队仍要等到发现它的那一帧才动。判据看 [AI] 行的
 // baseKnown=。
-static const int USR_OFFENSIVE_FRAME = 28000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_OFFENSIVE_FRAME = 28000;
 // 军队开始向【地图中间】集结的帧号。取 25000 —— 2026-09-28 总攻提前到 28000 后
 // 一并前移，保持原来的 3000 帧集结窗口（25000~28000）。原先取 30000，与侦察骑兵
 // 出厂（USR_SCOUT_FIRST_FRAME）、祭司「保存实力」（USR_PRIEST_PASSIVE_FRAME）同帧。
@@ -386,7 +407,10 @@ static const int USR_OFFENSIVE_FRAME = 28000;
 // 全军直奔目标建筑。而部队是零散生产出来的、散在基地各处，一起出发会拉成一条
 // 长线，先到的被守军逐个吃掉。先在地图中心（双方基地之间的中点，四张图的敌方
 // 基地都在我方市镇中心的对角线上）把队伍收拢，到点再整体压上。
-static const int USR_ARMY_RALLY_FRAME = 25000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_ARMY_RALLY_FRAME = 25000;
 // 集结指令的下发间隔。取 120：基地到地图中心约 60~70 格，按 HUMAN_SPEED
 // 2.236 走完约 1000 帧；这个间隔够走一段，又不至于频繁重发（每次 HumanMove
 // 都会经 suspendRelation 清一次路径）。
@@ -410,7 +434,10 @@ static const int USR_ARMY_RALLY_RING_STEP = 4;
 // 农民自卫的启动帧。此前的农民遇袭一律靠撤离，不还手 —— 早期被零星骚扰
 // 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
 // 再让农民挨打时就地反击。
-static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // 【开关：农民是否参与战斗】2026-09-28 按要求关闭 —— 农民不还手、也不去救祭司。
 //
 // 【关掉的是哪三件事】AssignFarmerSelfDefense 一个函数同时管三件，会一起停：
@@ -454,7 +481,10 @@ static const bool USR_FARMER_SELF_DEFENSE_ENABLED = false;
 // 【与军队总攻(USR_OFFENSIVE_FRAME = 28000)相差 7000 帧是有意的】：军队先出发
 // 去清守军，农民后走，避免在完全没有掩护的情况下先撞上敌方军队。
 // （这个机制目前已由 USR_FARMER_ESCORT_ENABLED=false 停用，消息仅供参考。）
-static const int USR_FARMER_ESCORT_FRAME = 35000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_FARMER_ESCORT_FRAME = 35000;
 
 // 祭司【跟随军队出征】到前线驻留带的帧号。取 35000 = USR_FARMER_ESCORT_FRAME，
 // 也就是「农民和祭司一起出发」—— 两者同帧动身、路程与移速都相近（农民 2.236、
@@ -569,7 +599,10 @@ static const bool USR_ARMY_TOWER_SPREAD_ENABLED = false;
 // 因为 FindEnemySiegeBuilding() == nullptr 永远不执行，阶段 B 的 ①②③ 条全部关死，
 // 护送队会在环上白站到底。到这一帧时军队已压了近 6000 帧、敌方建筑必然已进
 // info.enemy_buildings，此时让农民去拆塔至少能替军队与祭司分担火力。
-static const int USR_FARMER_TOWER_FALLBACK_FRAME = 39000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_FARMER_TOWER_FALLBACK_FRAME = 39000;
 
 // 农民去救祭司的最大距离（格，欧氏）。
 //
@@ -600,13 +633,19 @@ static const int USR_ARROWTOWER_TARGET = 4;
 // 石头与采集力让给兵力与科技。
 // 注意 enemyai.cpp 的 FAT/SAT/TAT 是那个文件内部的宏，UsrAI.cpp 里看不到，
 // 所以这里是独立取值 —— 两处若要调整需要同步。
-static const int USR_ARROWTOWER_STOP_FRAME = 21000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_ARROWTOWER_STOP_FRAME = 21000;
 // 过了 USR_ARROWTOWER_STOP_FRAME 之后，石头本来就没用了（箭塔停建）——
 // 但【修塔】还要花石头：内核按 REPAIR_COST_RATIO(0.5) × 本次回血比例 ×
 // 建筑原造价 扣料（Building.cpp:453），一座箭塔修满约耗 75 石。
 // 所以在这两个阈值之内额外保一条采石线：只要库存低于该值就继续采石。
 // 实测（改之前）石头在 f=42000 被修塔耗到 0，之后塔只能看着它烂。
-static const int USR_STONE_KEEP_FRAME = 24000;
+// 【已废弃：已无任何代码引用】该节点现在由局势里程碑 IsThirdWaveCleared()
+//   （第三波骚扰打完）驱动，见它的定义与 TrackEnemyContact 里的波次统计。
+//   保留下面这行只为记录历史取值与演进，它不是活常量。
+// USR_STONE_KEEP_FRAME = 24000;
 static const int USR_STONE_KEEP_AMOUNT = 300;
 // 靶场目标数量。本 AI 的全部兵力（战车弓兵）都由靶场训练，多一座靶场就是
 // 多一倍的出兵速度。策略文档《快速升级和取得胜利》第 71/75 行：
@@ -1060,6 +1099,10 @@ static bool AllEnemyArrowTowersEngaged();
 static bool SiegeTowersCleared();
 // 祭司现在可不可以冲向攻城厂（冲厂 / 转换 / 驻留三条分支共用）。见定义处。
 static bool CanPriestApproachSiege();
+// 【第三波骚扰是否已打完】—— 后期那一串动作的统一局势里程碑。
+// 定义在 TrackEnemyContact 之前；这里前向声明是因为 ArrowTowerStillWanted
+// 等更早的函数也要读它。详见它的定义与上方那组波次状态。
+static bool IsThirdWaveCleared();
 // 敌方基地锚点：侦察到就用真的，否则用「我方市镇中心的地图对极点」估。
 // 定义在 ManageStandoff 之前，但 ManagePriest 的禁区判定也要用它。
 static bool EstimateEnemySiegeAnchor(int &anchorDR, int &anchorUR);
@@ -1912,7 +1955,7 @@ static int CountBuilding(int type) {
 // 农民会一直采石（塔数永远停在目标值以下），把采集力浪费在没有用途的石头上。
 static bool ArrowTowerStillWanted()
 {
-  return g_frame < USR_ARROWTOWER_STOP_FRAME &&
+  return !IsThirdWaveCleared() &&
          CountBuilding(BUILDING_ARROWTOWER) < USR_ARROWTOWER_TARGET;
 }
 
@@ -2419,7 +2462,7 @@ static void CalculateFarmerTargets(int targets[4], int current[4])
     // 约耗 75 石、三人同修则按三倍速率消耗。实测石头在 f=42000 被修塔耗到 0，
     // 之后塔只能看着它烂。所以在这两个阈值之内额外保一条供给线。
     if (ArrowTowerStillWanted() ||
-        (g_frame < USR_STONE_KEEP_FRAME && info.Stone < USR_STONE_KEEP_AMOUNT))
+        (!IsThirdWaveCleared() && info.Stone < USR_STONE_KEEP_AMOUNT))
       weight[2] += 12;
 
     // const bool nearPopulationCap = info.Human_Num + 1 >= info.Human_MaxNum;
@@ -3710,8 +3753,65 @@ static pair<int, int> GetEnemyDirection()
 // 没有建筑时退到敌方部队。每帧调用一次。
 // 只在真的看到敌人时才覆盖 —— 「敌人从哪个方向来」这个信息在敌人离开视野后
 // 仍然有意义，所以不做超时清除。
+// ── 「第三波骚扰打完了」的状态。含义与实测依据见 TrackEnemyContact 里那段。 ──
+static int enemyWaveStartedCount = 0;                  // 观察到第几波开始
+static int enemyWaveDoneCount = 0;                     // 已确认结束的波数
+static int enemyWaveLastSeenFrame = USR_INVALID_FRAME; // 最后一次看到敌兵的帧
+static bool lastFrameSawEnemyArmy = false;
+// 「一波退去」的确认窗口：连续这么多帧没再看到敌兵，才算这一波结束。
+// 取 500：三波之间敌兵消失的间隔正是这个量级（实测 18000~22000 之间是空的），
+// 取太短会把「守军暂时退回迷雾」误判成波次结束。
+static const int USR_WAVE_CLEAR_HYSTERESIS = 500;
+// 军队「已经在中间集结过」的 latch。见 ManageOffensiveArmy 的集结段。
+// 【为什么是 latch 而不是实时判据】实时判据（每个单位都在中心附近）在军队被打散、
+// 有单位阵亡时可能永远不成立，那样总攻就再也不会启动 —— 那是比"没有集结"更糟的
+// 故障模式。集结过一次就够了。
+static bool armyRalliedAtCenter = false;
+
+// 第三波骚扰是否已打完 —— 后期那一串动作（侦察兵 / 集结 / 总攻 / 祭司转保守 /
+// 农民压上限 / 停建箭塔 / 停保底采石）的统一局势里程碑。
+static bool IsThirdWaveCleared() { return enemyWaveDoneCount >= 3; }
+
 static void TrackEnemyContact()
 {
+    // ── 【波次计数：第三波骚扰打完了没有】────────────────────────────
+    //
+    // 【为什么需要】原先后期那一串动作各自写了一个绝对帧号（侦察兵 25000/28000、
+    // 集结 25000、祭司转保守 26000、总攻 28000、农民压上限 35000……）。绝对帧号
+    // 有两个毛病：
+    //   · 它假定「打到第 N 帧时局势一定到了某个程度」，而局势是变的（敌方三波被
+    //     挡得快慢不同、我方发育快慢不同）；
+    //   · 机器快慢与丢帧会直接改变它落在什么局势上（AI 会被丢帧，见
+    //     AI::startProcessing），同一份代码在不同构建/负载下表现就不同。
+    // 按需求改成统一的【局势里程碑】：第三波骚扰打完之后，才启动那一串后期动作。
+    //
+    // 【怎么数出波次】引擎不暴露波次，但可以从视野里的敌方军队数量推：
+    //     0 → 有      = 一波开始（enemyWaveStartedCount++）
+    //     有 → 0      = 这一波退去，但要连续 USR_WAVE_CLEAR_HYSTERESIS 帧都没再
+    //                   出现，才算「结束」（防抖：守军在视野边缘进出会让这个量抖）
+    //     累计结束 3 波 = 第三波打完
+    // 【实测依据】日志里 enemyA（视野内敌兵数）确实呈波次状：14000→2、18000→0、
+    // 22000→7、26000→0、28000→21…… 与敌方 FAT=6000 / SAT=13500 / TAT=21000 对应。
+    //
+    // 【它必须放在本函数最前面】本函数在下面会提前 return（找到第一个目标就走），
+    // 而波次统计要每帧都跑。
+    {
+        const bool sawEnemyArmy = HasVisibleEnemyArmy();
+        if (sawEnemyArmy)
+        {
+            if (!lastFrameSawEnemyArmy)
+                ++enemyWaveStartedCount; // 0 → 有：一波开始
+            enemyWaveLastSeenFrame = g_frame;
+        }
+        else if (enemyWaveStartedCount > enemyWaveDoneCount &&
+                 enemyWaveLastSeenFrame != USR_INVALID_FRAME &&
+                 g_frame - enemyWaveLastSeenFrame >= USR_WAVE_CLEAR_HYSTERESIS)
+        {
+            enemyWaveDoneCount = enemyWaveStartedCount; // 这一波确认结束
+        }
+        lastFrameSawEnemyArmy = sawEnemyArmy;
+    }
+
     for (const tagBuilding &building : info.enemy_buildings)
     {
         if (building.Blood > 0)
@@ -4964,11 +5064,12 @@ static void ProduceIfBelowTarget(UsrAI *ai, bool nearPopulationCap,
 // 各写一遍的话，改了帧号常量只改一处就会静默失效。
 static int ScoutTargetCount()
 {
-    if (g_frame >= USR_SCOUT_RECON_FRAME)
-        return USR_SCOUT_TOTAL;
-    if (g_frame >= USR_SCOUT_FIRST_FRAME)
-        return 1;
-    return 0;
+    // 【原来是两段：25000 出 1 个、28000 出满】按需求改成统一里程碑 ——
+    // 第三波骚扰打完之前一个都不出，打完就把两个都排上。
+    // 注意这不会导致「没人去侦察敌方基地」：第三波的判定靠的是敌兵主动上门
+    // （视野里敌兵数的波次），不需要侦察兵参与；而打完这一波之后侦察兵才出厂，
+    // 也正是需求「打完第三波再开始那一串后期动作」的顺序。
+    return IsThirdWaveCleared() ? USR_SCOUT_TOTAL : 0;
 }
 
 static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
@@ -5000,8 +5101,10 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
   // 这只是「是否继续补产」——已有农民不会被主动裁掉，只会随战损与
   // SacrificeExcessFarmers（人口顶到 50 后启动）逐步减少。
   //
-  // 【35000 帧之后降到 5】见 USR_FARMER_LATE_FRAME 的说明：后期人口让给军队。
-  const int farmerTarget = (g_frame >= USR_FARMER_LATE_FRAME)
+  // 【第三波骚扰打完之后降到 5】见 USR_FARMER_LATE_TARGET 的说明：后期人口让给军队。
+  // 【原来是 USR_FARMER_LATE_FRAME(35000)】按需求改成统一里程碑：第三波打完
+  // 才把农民上限压到 5（此前保持 20 一直补产）。
+  const int farmerTarget = (IsThirdWaveCleared())
                                ? USR_FARMER_LATE_TARGET
                                : USR_FARMER_TARGET;
 
@@ -5026,8 +5129,9 @@ static void ManageWeightedProduction(UsrAI *ai, bool nearPopulationCap) {
     // 那 5 个人口会自动落到战车弓兵上（20 → 25）。
     // 已经在场上的普通弓兵不会因此消失，只是不再补充。
     bowmanTarget = wheelTechReady ? 0 : 5;
-    // 侦察骑兵：USR_SCOUT_FIRST_FRAME 后生产 1 个保命型（遇敌即撤回基地，
-    // 不承担侦测）；USR_SCOUT_RECON_FRAME 后再补 1 个，由它专职侦测敌方基地
+    // 侦察骑兵：第三波骚扰打完之后一次排满 2 个（原先是 25000 出 1 个、28000 再
+    // 补 1 个，两个帧号已按需求统一成 IsThirdWaveCleared()）。
+    // 第一个是保命型（遇敌即撤回基地，不承担侦测），第二个专职侦测敌方基地
     // （见 DispatchScouts 的角色判定）。
     scoutTarget = ScoutTargetCount();
     // 【战车配额 2 → 0，让给战车弓兵】原先是「保留 2 个速度 4.07 的前排挡远程」，
@@ -5426,8 +5530,8 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     }
     // 箭塔防守：围绕市镇中心三圈 × 四方向分散布置
     // （方向与距离的理由见 GetBuildCandidate 里箭塔那一段），
-    // 须等箭塔科技研发完成后才建造，且第三波骚扰之后不再建造
-    // （USR_ARROWTOWER_STOP_FRAME，与采石权重共用 ArrowTowerStillWanted）。
+    // 须等箭塔科技研发完成后才建造，且第三波骚扰打完就不再建造
+    // （判据在 ArrowTowerStillWanted 里，与采石权重共用同一个里程碑）。
     if (arrowTowerTechnologyReady && ArrowTowerStillWanted() &&
         info.Stone >= 150) {
       TryBuild(ai, BUILDING_ARROWTOWER);
@@ -6260,8 +6364,8 @@ static void ManagePriest(UsrAI *ai)
     //
     // 【为什么要求「没有敌人」】有敌人在的时候让祭司出门就是送；而且一旦它靠近
     // 敌方基地，守军进入视野会让这个条件自动失效、它就会退回来，天然自限。
-    // 保留原先的 g_frame >= USR_PRIEST_PASSIVE_FRAME(26000) 门槛：在那之前
-    // 军队还没成型，这时候押上祭司去换基地是亏的。
+    // 门槛是 priestPassive（= 第三波骚扰打完）：在那之前军队还没成型，
+    // 这时候押上祭司去换基地是亏的。
     //
     // 【为什么还要加 WorkObjectSN == -1】这一段发的是 HumanMove，而 HumanMove
     // 会经 suspendRelation 打断既有的工作关系。它是唯一排在「转换不打断」
@@ -6664,7 +6768,9 @@ static void ManagePriest(UsrAI *ai)
     }
 
     // 总攻阶段：祭司停止治疗、无敌人时留在基地（转换保留，见下方）。
-    const bool priestPassive = g_frame >= USR_PRIEST_PASSIVE_FRAME;
+    // 【原来是 USR_PRIEST_PASSIVE_FRAME(26000)】按需求改成统一里程碑：
+    // 第三波骚扰打完，祭司才转为「保存实力」（不再出去转换敌兵 / 不再治疗）。
+    const bool priestPassive = IsThirdWaveCleared();
 
     // 撤退：只对「正在攻击祭司」的敌人反应（WorkObjectSN 指向祭司），
     // 且该敌人已进入自身射程（含 2 格提前量）时才撤；避免被路过或攻击
@@ -6805,8 +6911,7 @@ static void ManagePriest(UsrAI *ai)
             return;  // 撤离期间不做转换 / 治疗
     }
 
-    // 【总攻阶段（priestPassive = f >= USR_PRIEST_PASSIVE_FRAME，即 26000）
-    //   之后，祭司守家，不追出去转换】
+    // 【总攻阶段（priestPassive = 第三波骚扰打完）之后，祭司守家，不追出去转换】
     //
     // 【为什么必须放在转换之前】原先「回基地待机」那段逻辑裹在下面的
     // `if (!enemyVisible)` 里面，而转换判断排在它【前面】—— 所以只要视野里出现
@@ -6874,15 +6979,16 @@ static void ManagePriest(UsrAI *ai)
         // 于是祭司走到了厂边上却永远不发起转换。实测日志：它停在 (15,77)、
         // mvTgt=(11,86)（那是厂的位置）、minDis=9999，直到被别的敌人打死。
         // 获胜路径要求"把敌人打光之后去把厂转掉"，所以这一条必须放开。
-        // 【26000 帧后不再转换敌方士兵】总攻阶段（USR_PRIEST_PASSIVE_FRAME）起，
+        // 【第三波骚扰打完后不再转换敌方士兵】总攻阶段（priestPassive）起，
         // 祭司只做一件事：把敌方攻城武器厂转掉 —— 那是唯一的获胜条件。
         // 转换士兵会把它按在敌方基地里读条换血，而它只有 100 血、近战与远程
         // 防御都是 0、且不可补充；换来的一个士兵对胜负没有贡献。
         //
-        // 【为什么用 USR_PRIEST_PASSIVE_FRAME 而不另立常量】那个常量本来就是
-        // 「总攻阶段起始帧」的定义，而它自己的注释里写的就是「此后祭司进入只
-        // 保存实力状态 —— 不再转换」。此前转士兵的分支在这条门槛之后仍然生效，
-        // 注释与代码并不一致，这一条把行为对齐到注释。
+        // 【为什么用 priestPassive 而不另立判据】它本来就是「总攻阶段」的定义，
+        // 而它的注释里写的就是「此后祭司进入只保存实力状态 —— 不再转换」。
+        // 此前转士兵的分支在这条门槛之后仍然生效，注释与代码并不一致，这一条把
+        // 行为对齐到注释。（该阶段的起点原先是个绝对帧号 26000，现已按需求换成
+        // 第三波骚扰打完这个里程碑。）
         // 【目标锁定：一旦选定就转到完成 / 死亡 / 离开视野】
         //
         // 原先这里是每次调用都重选一遍（FindPriestConversionTarget 按兵种优先级），
@@ -6895,7 +7001,7 @@ static void ManagePriest(UsrAI *ai)
         // 三种情况都会让它从列表里消失，自动落到重选分支）；不在才按优先级重选
         // 并改写锁定。
         const tagArmy *armyTarget = nullptr;
-        if (anyEnemyVisible && g_frame < USR_PRIEST_PASSIVE_FRAME)
+        if (anyEnemyVisible && !IsThirdWaveCleared())
         {
             armyTarget = FindLockedConversionTarget();
             if (armyTarget == nullptr)
@@ -7102,7 +7208,7 @@ static void ManagePriest(UsrAI *ai)
         // 【时间截止】到帧就收工，与「半径内探干净」并列，谁先满足用谁。
         // 放在半径检查之前，保证即使外围还没探完也一定回家。
         else if (!priestExploreDone &&
-                 g_frame >= USR_PRIEST_EXPLORE_UNTIL_FRAME)
+                 IsThirdWaveCleared())
             FinishPriestExplore("timeout");
 
         if (!priestExploreDone)
@@ -7239,7 +7345,7 @@ static void ManagePriest(UsrAI *ai)
         // 只有 100 血、防御 0、不能自愈，待在箭塔圈里最安全）。按需求改成以
         // 敌方基地为参照的红线 —— 祭司在别处可以自由活动，只要不进
         // USR_PRIEST_ENEMY_BASE_KEEPOUT 圈就行。
-        if (priestPassive || g_frame < USR_PRIEST_HOLD_HOME_UNTIL_FRAME)
+        if (priestPassive || !IsThirdWaveCleared())
         {
             int awayDR = 0;
             int awayUR = 0;
@@ -7634,7 +7740,7 @@ static void DispatchScouts(UsrAI *ai)
         // -Wunused-function 警告，将来想恢复只改这一个常量。
         const bool isRecon =
             !USR_SCOUT_KEEP_ALIVE_TYPE_ENABLED ||
-            (g_frame >= USR_SCOUT_RECON_FRAME);
+            IsThirdWaveCleared();
 
         // 【谨慎型专用】勾引 + 撤回基地。
         // 用途：先在视野内挑一个最近的敌人打一下，建立「我在打它」的关系，
@@ -8238,7 +8344,7 @@ static void RecruitFarmersForEscort()
 {
     // 与军队总攻同门槛（帧号 + 已侦察到敌方基地）。没有基地信息就编队，
     // 只会得到一支不知道往哪走的队伍。
-    if (g_frame < USR_FARMER_ESCORT_FRAME)
+    if (!IsThirdWaveCleared())
         return;
     if (!enemyBaseDiscovered)
         return;
@@ -8310,7 +8416,7 @@ static bool IsPriestSiegeCommitted(const tagArmy *priest, int &outTriggerKind)
     if (priest == nullptr)
         return false;
     // 与 ManagePriest 那条冲厂分支同门槛：26000 帧之前祭司不主动出门。
-    if (g_frame < USR_PRIEST_PASSIVE_FRAME)
+    if (!IsThirdWaveCleared())
         return false;
     if (!enemyBaseDiscovered)
         return false;
@@ -8354,7 +8460,7 @@ static bool IsPriestSiegeCommitted(const tagArmy *priest, int &outTriggerKind)
     //    FindEnemySiegeBuilding() == nullptr 永远不执行，①②③ 全部关死，
     //    护送队会在环上白站到底。到兜底帧之后放开：此时总攻已经打了很久，
     //    敌方建筑必然已进 info.enemy_buildings。
-    if (g_frame >= USR_FARMER_TOWER_FALLBACK_FRAME && HasKnownEnemyArrowTower())
+    if (IsThirdWaveCleared() && HasKnownEnemyArrowTower())
     {
         outTriggerKind = 3;
         return true;
@@ -8761,7 +8867,7 @@ static bool SiegeTowersCleared()
 // 实测祭司就是这样在塔还活着的时候冲进去转换、被打死的）。
 //
 // 四条同时成立才放行：
-//   ① 过了 USR_PRIEST_PASSIVE_FRAME —— 那之前军队还没成型，押上祭司是亏的；
+//   ① 第三波骚扰已打完（IsThirdWaveCleared）—— 那之前军队还没成型，押上祭司是亏的；
 //   ② 视野里没有敌方军队 —— 有敌人时出门就是送（原设计）；
 //   ③ 所有已知箭塔都被牵制 —— 每座塔都有人在打，它们才不会专心招呼祭司；
 //   ④ 敌方箭塔【全部已被摧毁】—— ③ 只保证"有人在打它"，塔照样开火，而祭司
@@ -8769,7 +8875,7 @@ static bool SiegeTowersCleared()
 //      若干格内」：祭司要等到敌方塔被清光才去转化攻城厂。
 static bool CanPriestApproachSiege()
 {
-    if (g_frame < USR_PRIEST_PASSIVE_FRAME)
+    if (!IsThirdWaveCleared())
         return false;
     if (HasVisibleEnemyArmy())
         return false;
@@ -9942,18 +10048,25 @@ static int PickEscortTowerForArmy(const tagArmy &army,
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
-  // 【集结阶段：USR_ARMY_RALLY_FRAME(25000) 之后，先全军到地图中间收拢】
+  // 【集结阶段：第三波骚扰打完之后，先把全军收到地图中间】
   //
   // 地图中心是双方基地之间的中点（四张图的敌方基地都在我方市镇中心的对角线上，
-  // 见 EstimateEnemySiegeAnchor 的实测数据）。先在那儿把队伍收齐，等
-  // USR_OFFENSIVE_FRAME(28000) 再整体压上去 —— 部队是零散生产出来的、平时散在
-  // 基地各处，直接出发会拉成一条长线，先到的被守军逐个吃掉。
+  // 见 EstimateEnemySiegeAnchor 的实测数据）。先在那儿把队伍收齐，等集结完成再
+  // 整体压上去 —— 部队是零散生产出来的、平时散在基地各处，直接出发会拉成一条
+  // 长线，先到的被守军逐个吃掉。
   //
-  // 【为什么放在这里、不放进下面的进攻分支】下面第一行就是
-  // `if (g_frame < USR_OFFENSIVE_FRAME) return;`，集结必须发生在它之前。
-  // 同时也排在那些兵力/科技门控之前：集结只是把人往中间挪，不需要满足
-  // 「车轮科技完成」「兵力 ≥ 8」这些出击条件 —— 早点开始走，到点正好能压上。
-  if (g_frame >= USR_ARMY_RALLY_FRAME && g_frame < USR_OFFENSIVE_FRAME)
+  // 【为什么放在这里、不放进下面的进攻分支】下面那道门要「第三波打完 + 集结完成」，
+  // 集结必须发生在它之前。同时也排在那些兵力/科技门控之前：集结只是把人往中间挪，
+  // 不需要满足「车轮科技完成」「侦察到敌基地」这些出击条件 —— 早点开始走，到点
+  // 正好能压上。
+  //
+  // 【为什么从「窗口」改成「先集结、再总攻」】原来这里是
+  // `g_frame >= USR_ARMY_RALLY_FRAME(25000) && g_frame < USR_OFFENSIVE_FRAME(28000)`
+  // —— 一个固定 3000 帧的窗口。按需求两个节点现在都换成「第三波骚扰打完」这个
+  // 里程碑，若总攻仍写成「非第三波打完」，窗口 `A && !A` 会恒空、集结永远不执行
+  // （这正是本项目踩过的坑）。所以总攻的门改成「集结已完成」，顺序关系由构造保证，
+  // 不再依赖两个帧号的差。
+  if (IsThirdWaveCleared() && !armyRalliedAtCenter)
   {
     if (!USR_THROTTLES_ENABLED ||
         lastArmyRallyFrame == USR_INVALID_FRAME ||
@@ -9962,6 +10075,7 @@ static void ManageOffensiveArmy(UsrAI *ai)
       lastArmyRallyFrame = g_frame;
       const int cx = MAP_L / 2;
       const int cy = MAP_U / 2;
+      bool anyOutOfPlace = false;
       for (const tagArmy &army : info.armies)
       {
         if (!IsOffensiveArmy(army))
@@ -9970,16 +10084,22 @@ static void ManageOffensiveArmy(UsrAI *ai)
         if (BlockDis2(army.BlockDR, army.BlockUR, cx, cy) <=
             USR_ARMY_RALLY_ARRIVED_DIS2)
           continue;
+        anyOutOfPlace = true;
         ai->HumanMove(army.SN, (cx + 0.5) * double(BLOCKSIDELENGTH),
                       (cy + 0.5) * double(BLOCKSIDELENGTH));
       }
+      // 全员到位（或一个兵都没有）→ 记下「集结完成」，总攻的门随之打开。
+      // 【为什么用 latch】见 armyRalliedAtCenter 的说明：实时判据在军队被打散时
+      // 可能永远不成立，那会让总攻再也不会启动 —— 比「没集结」更糟。
+      if (!anyOutOfPlace)
+        armyRalliedAtCenter = true;
     }
     return;
   }
 
-  // 进攻时机：过了 USR_OFFENSIVE_FRAME（28000）之后。此前军队只做接敌自卫
+  // 进攻时机：第三波骚扰打完 + 军队已在中间集结完成。此前军队只做接敌自卫
   // —— AssignFieldSelfDefense 是「看到谁打谁」，从不主动推进。
-  if (g_frame < USR_OFFENSIVE_FRAME)
+  if (!IsThirdWaveCleared() || !armyRalliedAtCenter)
     return;
 
   // 升时代前不进攻；升时代后需等【关键兵种科技】完成 —— 也就是车轮科技，
@@ -10859,7 +10979,7 @@ void UsrAI::processData()
     // 【已停用，见 USR_FARMER_SELF_DEFENSE_ENABLED】农民不还手、也不救祭司，
     // 遇袭只撤离。帧号门槛保留：将来恢复时行为与停用前完全一致。
     if (USR_FARMER_SELF_DEFENSE_ENABLED &&
-        g_frame >= USR_FARMER_SELF_DEFENSE_FRAME)
+        IsThirdWaveCleared())
         AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
