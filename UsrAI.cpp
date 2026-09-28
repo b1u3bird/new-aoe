@@ -395,6 +395,27 @@ static const int USR_ARMY_RALLY_RING_STEP = 4;
 // 牵着走会白白损失采集力；三波骚扰过后（enemyai.cpp:45 的 TAT = 21000 已过）
 // 再让农民挨打时就地反击。
 static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
+// 【开关：农民是否参与战斗】2026-09-28 按要求关闭 —— 农民不还手、也不去救祭司。
+//
+// 【关掉的是哪三件事】AssignFarmerSelfDefense 一个函数同时管三件，会一起停：
+//   ① 挨打就反击（FindDirectThreatToFarmerSN）；
+//   ② 去救正在被敌人攻击的祭司（FindThreatToPriestForFarmer，半径
+//      USR_FARMER_PRIEST_HELP_RADIUS = 8）—— 按需求一并取消；
+//   ③ 3 格内的任意敌人就打（FindNearbyEnemyForFarmer）。
+//
+// 【为什么用开关而不是注释掉调用】函数仍被引用，不产生 -Wunused-function 警告；
+// 也不至于让 USR_FARMER_SELF_DEFENSE_FRAME 变成未使用的常量。恢复只改一个
+// true/false。注意要恢复的只有 ①③ 的话，得改函数内部（把 ② 那一段挪出开关），
+// 单改这个常量做不到。
+//
+// 【关掉之后农民遇袭会怎样】仍然会撤离 —— 那是【另一套机制】
+// （farmerThreatLastFrame / farmerSafeSinceFrame 两个表驱动的那段撤离判定），
+// 与自卫无关、不受本开关影响。所以是「不还手、只跑」，不是「站着挨打」。
+//
+// 【代价，已知取舍】祭司从此失去最后一条被救的路径：农民护送已停用，这里再关掉，
+// 祭司挨打时不会有任何农民去支援 —— 而它只有 100 血、近战与远程防御都是 0、
+// 不可补充。
+static const bool USR_FARMER_SELF_DEFENSE_ENABLED = false;
 // ── 农民护送祭司：总攻阶段的第二支力量 ──────────────────────────────
 //
 // 【这条机制的赌注，必须先知道】到 USR_FARMER_ESCORT_FRAME 会把【全部农民】
@@ -10385,7 +10406,11 @@ void UsrAI::processData()
     // 农民自卫：30000 帧后启动（对应「第三波骚扰之后」，enemyai.cpp:45 的
     // TAT = 21000 已过）。此前农民遇袭一律靠撤离、不还手，避免早期被零星
     // 骚扰牵着走、把采集力从食物/木头上拽开；进入后期农民挨打时则就地反击。
-    if (g_frame >= USR_FARMER_SELF_DEFENSE_FRAME)
+    //
+    // 【已停用，见 USR_FARMER_SELF_DEFENSE_ENABLED】农民不还手、也不救祭司，
+    // 遇袭只撤离。帧号门槛保留：将来恢复时行为与停用前完全一致。
+    if (USR_FARMER_SELF_DEFENSE_ENABLED &&
+        g_frame >= USR_FARMER_SELF_DEFENSE_FRAME)
         AssignFarmerSelfDefense(this);
     DispatchScouts(this);
     AssignArrowTowerTargets(this);
