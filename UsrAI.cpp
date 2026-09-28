@@ -52,12 +52,15 @@ static const int USR_FIELD_ARMY_AGGRO_RADIUS = 12;
 static const int USR_FIELD_LION_AGGRO_RADIUS = 7;
 // 农民遭遇敌人时触发主动处理的最大欧氏距离，单位为地图格。
 static const int USR_FIELD_FARMER_AGGRO_RADIUS = 7;
+// 【已废弃：已无代码引用】箭塔索敌原先靠这个 20 帧的间隔限流，现已去掉 ——
+// AssignArrowTowerTargets 自己就有「目标没变就 continue」的守卫，重发本就不会发生，
+// 那道节流纯属多余（去掉后塔能当帧换目标）。保留这一行只为记录历史取值。
 // 箭塔重新选择攻击目标的最小间隔，单位为游戏帧。
-static const int USR_TOWER_ORDER_INTERVAL = 20;
+// static const int USR_TOWER_ORDER_INTERVAL = 20;
 // 经济采集指令的最小发送间隔，单位为游戏帧。
-static const int USR_ECONOMY_ORDER_INTERVAL = 80;
+static const int USR_ECONOMY_ORDER_INTERVAL = 30;
 // 建造指令的最小发送间隔，单位为游戏帧。
-static const int USR_BUILD_ORDER_INTERVAL = 100;
+static const int USR_BUILD_ORDER_INTERVAL = 40;
 // 建筑研发或升级动作之间的最小发送间隔，单位为游戏帧。
 ;
 // 同一生产通道没有收到异步结果时，允许恢复的超时帧数。
@@ -419,7 +422,7 @@ static const int USR_FARMER_LATE_TARGET = 5;
 // 集结指令的下发间隔。取 120：基地到地图中心约 60~70 格，按 HUMAN_SPEED
 // 2.236 走完约 1000 帧；这个间隔够走一段，又不至于频繁重发（每次 HumanMove
 // 都会经 suspendRelation 清一次路径）。
-static const int USR_ARMY_RALLY_ORDER_INTERVAL = 120;
+static const int USR_ARMY_RALLY_ORDER_INTERVAL = 30;
 // 离地图中心的距离平方在这个值以内就算到位（20 格 = 400）。
 // 取 20 而不是更小：落点本身分布在 8~16 格的圈上（见下面两个常量），
 // 判定半径必须罩得住最外圈，否则外圈的单位会被反复要求「去中间」。
@@ -1502,7 +1505,7 @@ static set<int> aliveGazelleSN;                     // 当前活着的瞪羚 SN
 static int gazelleClusterFrame = USR_INVALID_FRAME;
 // 猎手被「从尸体拉回活瞪羚」的最近一次帧。见 KeepHuntersOnLiveGazelles：
 // 那里要防止指令生效前的一两帧里连发多次、把刚建立的攻击关系打断。
-static const int USR_HUNT_REDIRECT_INTERVAL = 60;
+static const int USR_HUNT_REDIRECT_INTERVAL = 20;
 static map<int, int> hunterRedirectFrame;
 
 static void MarkOccupied(int blockDR, int blockUR, int size)
@@ -3290,7 +3293,7 @@ static const int USR_FARMER_ENEMY_BASE_KEEPOUT = 50;
 // 都因为同一原因做了节流）。取 120：与 TryAssignIdleFarmer 里那段安全滞后的
 // 120 帧同量级，也远大于走一格所需的帧数；真被挡路卡住时，最多 120 帧就会重发
 // 一次，能自愈。
-static const int USR_FARMER_KEEPOUT_ORDER_INTERVAL = 120;
+static const int USR_FARMER_KEEPOUT_ORDER_INTERVAL = 30;
 
 // 这个坐标是不是落在农民禁区里。
 //
@@ -9096,7 +9099,7 @@ static const int USR_MELEE_KITE_RETREAT_DISTANCE = 30;
 // 两次后撤之间至少间隔多少帧。每次后撤都发 HumanMove，而 HumanMove 会清空路径并
 // 打断攻击关系 —— 不加节流会变成「每帧后退 → 每帧被清空 → 原地不动」。
 // 取 40：速度 4.07 的战车弓兵走完两格约 20 帧，够它真的挪开。
-static const int USR_MELEE_KITE_INTERVAL = 40;
+static const int USR_MELEE_KITE_INTERVAL = 30;
 // 「被近战打到」的贴身判定：两格（欧氏距离平方）。敌人有 WorkObjectSN 指向我方
 // 单位只说明它锁了目标，还要真的贴上来才算打到。
 static const int USR_MELEE_KITE_TRIGGER_DIS2 = 4;
@@ -9502,7 +9505,7 @@ static bool ManageStandoff(UsrAI *ai)
     if (standoffEngagedSince == USR_INVALID_FRAME)
         standoffEngagedSince = g_frame;
 
-    const int orderInterval = 60;
+    const int orderInterval = 30;
     if (
         g_frame - offensiveLastOrderFrame < orderInterval)
         return true; // 还在节流窗口里，但阶段判定已经做完
@@ -10304,7 +10307,7 @@ static void ManageOffensiveArmy(UsrAI *ai)
     CollectEnemyArrowTowers(escortTowers, escortAnchorDR, escortAnchorUR);
 
   const int targetSN = FindOffensiveTargetSN();
-  const int orderInterval = 60;
+  const int orderInterval = 30;
   if (
       g_frame - offensiveLastOrderFrame < orderInterval)
     return;
@@ -10664,10 +10667,14 @@ static void AssignArrowTowerTargets(UsrAI *ai)
     {
         if (building.Type != BUILDING_ARROWTOWER)
             continue;
-        if (
-            g_frame - towerLastOrderFrame[building.SN] <
-                USR_TOWER_ORDER_INTERVAL)
-            continue;
+        // 【原先这里有一道 USR_TOWER_ORDER_INTERVAL(20 帧) 的节流，已去掉】
+        // 它的作用只是「别每帧重算索敌」，而本函数【自己就有正确的守卫】——
+        // 下面 `if (building.Project == targetSN) continue;` 明确写着「目标没变就
+        // 什么都不做」（对同一目标重复 HumanAction 会中止并重建关系、把攻击进度
+        // 清零）。所以重发这件事本来就不会发生，那道节流纯属多余。
+        // 去掉后的代价只是每帧多算一次 FindArrowTowerTarget（扫射程内的敌人，
+        // 每座塔几十次比较），可忽略；好处是敌军目标一出现/一离开射程，
+        // 塔就【当帧】换目标，而不是最多晚 20 帧。
 
         const int targetSN = FindArrowTowerTarget(building);
         if (targetSN == -1)
@@ -10678,7 +10685,7 @@ static void AssignArrowTowerTargets(UsrAI *ai)
         // 【原先在这里提前 return 的那条】原实现是「当前目标还在射程内就 continue」，
         // 也就是塔一旦锁定就永不换目标。那样「敌军的目的是本塔时换打别人」这条
         // 索敌策略根本没有机会生效 —— 塔会一直打那个已经在拆塔的兵。
-        // 现在改成每次（按 USR_TOWER_ORDER_INTERVAL 节流）都用 FindArrowTowerTarget
+        // 现在改成【每帧】都用 FindArrowTowerTarget
         // 重算一遍期望目标，只在它确实变了时才重新下达。
         if (building.Project == targetSN)
             continue;
