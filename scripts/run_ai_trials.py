@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -131,6 +132,19 @@ def run_trial(
     stderr_path = output_dir / f"{stem}.stderr.log"
     result_path.unlink(missing_ok=True)
 
+    # Game logs default to ./GameLog.log and ./ai_debug.log in the CWD, i.e. the
+    # project root -- every run would overwrite the previous one and only the
+    # LAST run of a sweep would survive, losing the evidence needed to explain
+    # any earlier win/loss. Both paths honor an env override, so point them at
+    # the per-run directory instead.
+    ai_log_path = output_dir / f"{stem}.ai.log"
+    game_log_path = output_dir / f"{stem}.game.log"
+    ai_log_path.unlink(missing_ok=True)
+    game_log_path.unlink(missing_ok=True)
+    env = dict(os.environ)
+    env["AOE_AI_LOG"] = str(ai_log_path.resolve())
+    env["AOE_GAME_LOG"] = str(game_log_path.resolve())
+
     command = [
         str(executable.resolve()),
         "--exam",
@@ -159,6 +173,7 @@ def run_trial(
                 stderr=stderr_stream,
                 timeout=timeout_seconds,
                 check=False,
+                env=env,
             )
             exit_code = completed.returncode
     except subprocess.TimeoutExpired:
