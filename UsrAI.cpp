@@ -9287,8 +9287,10 @@ static bool IsMeleeAttackerSort(int sort)
 // 而它一旦接管就直接 return。挨打撤退是更紧迫的动作，排在它后面就永远执行不到。
 //
 // 【没有「只在敌基地附近」的判断】调用点已经在 ManageOffensiveArmy 的几道门
-// 之后（28000 帧 / 已升时代 / 车轮科技 / 兵力 ≥8 / 已侦察到敌方建筑），
+// 之后（28000 帧 / 已升时代 / 车轮科技 / 已侦察到敌方建筑），
 // 而那些门就是「正在攻打敌方基地」的定义 —— 不必在这里再写一遍。
+// （原先这里还列了一条「兵力 ≥8」，该门控已按需求停用，见 ManageOffensiveArmy
+//   里那段说明。）
 static void KiteRangedBackFromMelee(UsrAI *ai)
 {
     if (g_frame - lastKiteFrame < USR_MELEE_KITE_INTERVAL)
@@ -9521,19 +9523,27 @@ static void ManageOffensiveArmy(UsrAI *ai)
   if (info.civilizationStage == CIVILIZATION_TOOLAGE || !wheelTechReady)
     return;
 
-  // 兵力不足时不进攻，避免送死。
+  // 【已停用：兵力门控「不足 8 个不进攻」（2026-09-28 按需求停用）】
+  //
+  // 原意是「兵力不足时不进攻，避免送死」。停用后兵力再少也允许压上去。
+  //
+  // 【为什么连计数一起注释掉】只注释那个 if 的话，offensiveArmyCount 就成了
+  // 「设了但没读」的局部变量，触发 -Wunused-but-set-variable —— 所以整段一起
+  // 注释。它没有被任何其它地方引用（日志用的是 [AI] 行里的 carcher=/bow= 等）。
   //
   // 【原先这里恒不成立】原计数只数近战步兵与普通/复合弓兵，
   // 而本 AI 的兵力全是战车弓兵（AT_CHARIOT_ARCHER）与少量战车 —— 那几种兵
   // 一个都不产，于是计数恒为 5（只有 5 个普通弓兵），`< 8` 永远成立，
   // 整个进攻分支等于被永久关死。改成数实际会出击的兵种。
-  const int offensiveArmyCount =
-      CountArmyBySort(AT_CHARIOT_ARCHER) + CountArmyBySort(AT_CHARIOT) +
-      CountArmyBySort(AT_BOWMAN) + CountArmyBySort(AT_CLUBMAN) +
-      CountArmyBySort(AT_BROADSWORDSMAN) + CountArmyBySort(AT_COMPOSITE_BOWMAN) +
-      CountArmyBySort(AT_HOPLITE);
-  if (offensiveArmyCount < 8)
-    return;
+  //
+  // 【恢复】把下面那五行解开即可；想换阈值就改 8 这个字面量。
+  // const int offensiveArmyCount =
+  //     CountArmyBySort(AT_CHARIOT_ARCHER) + CountArmyBySort(AT_CHARIOT) +
+  //     CountArmyBySort(AT_BOWMAN) + CountArmyBySort(AT_CLUBMAN) +
+  //     CountArmyBySort(AT_BROADSWORDSMAN) + CountArmyBySort(AT_COMPOSITE_BOWMAN) +
+  //     CountArmyBySort(AT_HOPLITE);
+  // if (offensiveArmyCount < 8)
+  //   return;
 
   UpdateEnemyBaseDiscovery();
   if (!enemyBaseDiscovered)
