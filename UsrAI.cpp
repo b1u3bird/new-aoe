@@ -8052,6 +8052,12 @@ static void ManageFarmerEscortBand(UsrAI *ai, const tagArmy &priest)
 // 【为什么按距锚点排序】沿祭司的必经之路依次清，而不是各自就近 —— 靠前的塔先
 // 被灌满人、先被打掉，祭司往里走时面对的塔是越来越少，而不是越走越多。
 //
+// 【注意：这里与军队那条路的顺序【相反】，尚未统一】本函数按距锚点【升序】
+// （由内向外），而 FindOffensiveTargetSN() 的第 0 条现已按需求改为【最外围优先】
+// （由外向内）。两条排序目前不冲突，因为本机制已由 USR_FARMER_ESCORT_ENABLED
+// 停用、不在跑；若将来重新启用护送，应先决定用哪一种，别让两支力量一个从里
+// 往外、一个从外往里。
+//
 // 农民与军队两条路共用这一个列表：两者必须看到同一份「还剩哪些塔」，
 // 否则会出现「农民以为清完了、士兵还在打另一座」这种对不上的状态。
 static void CollectEnemyArrowTowers(vector<const tagBuilding *> &towers,
@@ -9193,7 +9199,8 @@ static void UpdateEnemyBaseDiscovery()
 // SN：优先敌方箭塔（逐座集中拆除），其次是市镇中心；基地摧毁后转为攻城武器厂
 // 附近的防守兵（护送祭司）。
 static int FindOffensiveTargetSN() {
-  // 0. 【最高优先级】敌方箭塔 —— 视野里没有敌兵时，全军集中拆【一座】。
+  // 0. 【最高优先级】敌方箭塔 —— 视野里没有敌兵时，全军集中拆【一座】，
+  //    且优先拆【最外围】的那一座（由外向内逐座清）。
   //
   // 【为什么必须排在市镇中心之前】本 AI 的获胜路径是祭司转化敌方攻城武器厂，而
   // CanPriestApproachSiege() 的第 ④ 条要求「一座活着的敌方箭塔都没有」
@@ -9202,36 +9209,59 @@ static int FindOffensiveTargetSN() {
   // 实测这局敌方【没有市镇中心】，只有箭塔与攻城武器厂，所以原先排在第 ① 条的
   // 「市镇中心」根本不成立，全军会落到第 ② 条 —— 而那条正是下面这个 bug 的来源。
   //
+  // 【为什么是「最外围」而不是「最靠近基地」】按需求：先清最外围，由外向内推。
+  // 反过来（先拆贴着基地的那座）要先穿过外围塔的火力再打，且外围塔会从背后继续
+  // 打我们；从外往里推则每一步都在自己刚清干净的地面上。
+  //
   // 【为什么不能靠列表顺序挑一座】info.enemy_buildings 每帧都被 GlobalVariate 的
   // WLHHunYao 洗牌（GlobalVariate.cpp:1086），「第一个匹配的」每帧都在变。全军
   // 目标一跳变就要 ClearArmyTargetLock + 重发 HumanAction，而重发会【重建攻击
   // 关系、把已经打出去的伤害进度清零】（见 :7976 与 :9256 两处警告）—— 表现就是
   // 「场上还有箭塔、军队却在几座塔之间来回走，一座都拆不掉」。
   //
-  // 所以这里用与洗牌无关的确定性判据：按【距敌方锚点升序】排，同距再按 SN 升序。
-  // 沿祭司必经之路逐座清；一座拆掉（Blood<=0）后自动落到下一座，天然形成
-  // 「逐座集中拆除」。锚点取不到时退化成纯 SN 升序，仍然确定。
+  // 【为什么圆心用「已知敌方建筑的质心」而不是 EstimateEnemySiegeAnchor】
+  //   · 质心是【求和】，与 info.enemy_buildings 的遍历顺序无关 —— 正合上面那条
+  //     「不能依赖洗牌」的要求；
+  //   · EstimateEnemySiegeAnchor 在真攻城厂尚未被侦察到时，返回的是「SN 最小的
+  //     那座敌建筑」（见 UpdateEnemyBaseDiscovery）。那个位置本身可能就是一座
+  //     【外围】箭塔 —— 拿它当圆心，会把「最外围」判到基地对面去，军队反而要
+  //     穿过整个基地。质心没有这个偏差。
+  //
+  // 【判据】取距质心【最远】的活箭塔，同距再按 SN 升序 —— 与洗牌无关，确定。
+  // 一座拆掉（Blood<=0）后自动落到下一座，天然形成「由外向内逐座集中拆除」。
+  // 锚点类信息一概不需要，所以不存在「估算失败退化成乱序」的退化路径。
   {
-    int towerAnchorDR = 0;
-    int towerAnchorUR = 0;
-    const bool haveTowerAnchor = EstimateEnemySiegeAnchor(towerAnchorDR, towerAnchorUR);
-    int towerBestSN = -1;
-    int towerBestDis2 = 0;
+    int sumDR = 0;
+    int sumUR = 0;
+    int aliveEnemyBuildings = 0;
     for (const tagBuilding &building : info.enemy_buildings) {
-      if (building.Blood <= 0 || building.Type != BUILDING_ARROWTOWER)
+      if (building.Blood <= 0)
         continue;
-      const int dis2 = haveTowerAnchor
-                           ? BlockDis2(building.BlockDR, building.BlockUR,
-                                       towerAnchorDR, towerAnchorUR)
-                           : 0;
-      if (towerBestSN == -1 || dis2 < towerBestDis2 ||
-          (dis2 == towerBestDis2 && building.SN < towerBestSN)) {
-        towerBestSN = building.SN;
-        towerBestDis2 = dis2;
-      }
+      sumDR += building.BlockDR;
+      sumUR += building.BlockUR;
+      ++aliveEnemyBuildings;
     }
-    if (towerBestSN != -1)
-      return towerBestSN;
+    if (aliveEnemyBuildings > 0) {
+      // 整数除法取整：仍然确定（同样的输入必然得同样的圆心）。
+      const int baseDR = sumDR / aliveEnemyBuildings;
+      const int baseUR = sumUR / aliveEnemyBuildings;
+      int towerBestSN = -1;
+      int towerBestDis2 = 0;
+      for (const tagBuilding &building : info.enemy_buildings) {
+        if (building.Blood <= 0 || building.Type != BUILDING_ARROWTOWER)
+          continue;
+        const int dis2 =
+            BlockDis2(building.BlockDR, building.BlockUR, baseDR, baseUR);
+        // 最远者胜（`>`，不是 `<`）；同距取 SN 小的那个。
+        if (towerBestSN == -1 || dis2 > towerBestDis2 ||
+            (dis2 == towerBestDis2 && building.SN < towerBestSN)) {
+          towerBestSN = building.SN;
+          towerBestDis2 = dis2;
+        }
+      }
+      if (towerBestSN != -1)
+        return towerBestSN;
+    }
   }
   // 1. 敌方市镇中心（推平基地）。
   for (const tagBuilding &building : info.enemy_buildings) {
@@ -10157,7 +10187,7 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
 //
 // 【代价：拆塔的担子换人挑了】关掉之后农民不再拆塔，改由【军队】承担 ——
 // 军队的进攻目标由 FindOffensiveTargetSN() 决定，而它的第 0 条正是「视野里
-// 没有敌兵时，全军集中拆距敌方锚点最近的那一座箭塔」，一座拆完自动换下一座。
+// 没有敌兵时，全军集中拆【最外围】的那一座敌方箭塔」，一座拆完自动换下一座。
 // 所以获胜路径仍然成立（CanPriestApproachSiege 的第 ④ 条 SiegeTowersCleared
 // 只要求「一座活着的敌方箭塔都没有」，军队逐座拆完即可满足），代价是两处：
 //   · 节奏比农民那套慢，而且军队拆塔时会挨箭塔的反击 —— 塔的目标取自 Defend
