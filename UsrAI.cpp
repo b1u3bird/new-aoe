@@ -70,8 +70,13 @@ static const int USR_TECH_ORDER_TIMEOUT = 60;
 static const int USR_TECH_FOOD_RESERVE = 60;
 // 调试面板状态输出间隔，避免逐帧刷屏。
 ;
+// 【已废弃：已无代码引用】祭司移动原先靠这个 20 帧的间隔限流，现已改为在
+// ShouldReissuePriestMove 里用「目标记录 + 2 格死区 + 卡住判据」把关 ——
+// 那 20 帧的等待会把祭司挨打时的撤退反应拖慢（实测「祭司死得太早」），
+// 而逐格比较又会让撤退点的漂移每帧都判成「目标变了」。死区取代了间隔。
+// 保留这一行只为记录历史取值。
 // 祭司转换或移动指令的最小发送间隔，单位为游戏帧。
-static const int USR_PRIEST_ORDER_INTERVAL = 20;
+// static const int USR_PRIEST_ORDER_INTERVAL = 20;
 // 判定祭司「卡住」的帧数：目标未变、且祭司自上次下发移动指令后一直没挪窝，
 // 超过这么多帧才重发一次（让它重新寻路）。
 //
@@ -770,7 +775,28 @@ static const int USR_ARROWTOWER_BUILD_MIN_MARGIN = 3;
 // 表示尚未发生过相关事件的哨兵帧值。
 static const int USR_INVALID_FRAME = -1000000000;
 
-// 【总开关：AI 内部所有「重复下发同一类指令」的按帧节流】2026-09-28 按要求全部停用。
+// 【总开关：AI 内部所有「重复下发同一类指令」的按帧节流】——【已退役】
+//
+// 2026-09-28 曾按要求把它做成一个总开关并「全部停用」，但实测证明【一刀切两头都错】：
+//   · 全关：AI 对每个单位每帧重新下发指令 → 每次 suspendRelation 清空路径 →
+//     移动类单位永远走不成线（实测：整支军队每帧被下一遍 HumanMove 到地图中心、
+//     集结永远完不成 → armyRalliedAtCenter 永不成立 → 总攻永不启动）；同时每条被
+//     执行到的指令各写两行日志，判题侧会 OOM/SIGKILL。
+//   · 全开：其中确有几处是【有害】的 —— 例如祭司撤退那 20 帧的间隔把它挨打时的
+//     反应拖慢，实测表现就是「祭司死得太早」。
+// 所以改成【逐点管理】：谁该保留间隔，由那一处自己的状态守卫决定，代码里不再有
+// 总开关。各处的取舍与理由都写在各自的位置上：
+//   · 【已去掉间隔】农民派工的 IDLE 路径（IDLE 无关系可打断，只剩僵尸那条保留）、
+//     修复建筑（守卫：按 WorkObjectSN 数出的班底满了就跳过）、恢复工地（守卫：
+//     该工地已有建造者就返回）、研发通道（改回执驱动 + 资源预检）、
+//     祭司移动（守卫：目标带 2 格死区的记录比较）、集结（守卫：到中心的距离在缩短
+//     就不重发）；
+//   · 【保留间隔】站桩/进攻、风筝、猎人重定向、箭塔索敌、禁区撤离（这些要么是
+//     「重发会重置关系」的正确性要求，要么是移动类必须有有界重试间隔）；
+//   · 【保留间隔，但理由是性能】TryBuild —— 它每帧被 7 个建筑类型各调一次，每次
+//     都要扫农民与候选点，去掉会显著增加 AI 耗时。
+//
+// 下面这段是当年的原说明，保留作参照：
 //
 // 停用后每一处节流判据都被短路（各处的判据都写成了 `USR_THROTTLES_ENABLED && …`），
 // AI 于是【每次被调用都重新评估、并重新下发】。
@@ -827,8 +853,9 @@ static const int USR_INVALID_FRAME = -1000000000;
 // 都可能有被它掩盖的守卫缺陷（① 就是活生生的例子）。已完成并保留的取消有四处：
 // 农民派工的 IDLE 路径 / 修复建筑 / 恢复工地（守卫现成：IDLE 判定、crew 满员跳过、
 // WorkObjectSN 已在做）与研发通道（改回执驱动 + 资源预检）。
-// 【恢复全部节流】把下面改回 true 即可。
-static const bool USR_THROTTLES_ENABLED = false;
+// 【常量已退役】代码里已无任何引用（各处的判据都改回自己那份）。保留这一行只
+// 记录它存在过，以及上面那段「为什么不能一刀切」的结论。
+// static const bool USR_THROTTLES_ENABLED = false;
 // 建筑研发「已结束」判定的防抖窗口：观察到 Project 离开研发项后连续空闲这么多帧，
 // 才认定研发真的完成。研发被中断（suspendRelation）时 Project 会短暂回到 0，
 // 窗口太短会把中断误判成完成 —— 实测就是因此让 wheelTechReady 提前变真，
@@ -3343,7 +3370,7 @@ static void EvacuateFarmersFromEnemyKeepout(UsrAI *ai)
         const bool hadThreat = (lastIt != farmerThreatLastFrame.end());
         const int prevThreatFrame = hadThreat ? lastIt->second : USR_INVALID_FRAME;
         const bool needOrder =
-            !USR_THROTTLES_ENABLED || !hadThreat ||
+            !hadThreat ||
             (g_frame - prevThreatFrame >= USR_FARMER_KEEPOUT_ORDER_INTERVAL);
         // 标记每帧刷新（不只是下发那一刻）—— 这样「他还在禁区里」对
         // TryAssignIdleFarmer 的滞后判定始终成立，不会有空隙被派回经济。
@@ -3783,6 +3810,10 @@ static pair<int, int> GetEnemyDirection()
 // 没有建筑时退到敌方部队。每帧调用一次。
 // 只在真的看到敌人时才覆盖 —— 「敌人从哪个方向来」这个信息在敌人离开视野后
 // 仍然有意义，所以不做超时清除。
+// 集结的进度记录：SN → 上次下发集结指令时该单位到地图中心的距离平方。
+// 【用途】进程守卫用：距离在缩短就说明「在走」，不必重发（见 ManageOffensiveArmy
+//   集结段里那段说明）。到达后 erase。
+static map<int, int> armyRallyFromDis2;
 // 军队「已经在中间集结过」的 latch。见 ManageOffensiveArmy 的集结段。
 // 【为什么是 latch 而不是实时判据】实时判据（每个单位都在中心附近）在军队被打散、
 // 有单位阵亡时可能永远不成立，那样总攻就再也不会启动 —— 那是比"没有集结"更糟的
@@ -4112,7 +4143,7 @@ static bool TryAssignIdleFarmer(UsrAI *ai)
         {
             map<int, int>::const_iterator orderIt =
                 farmerLastOrderFrame.find(farmer.SN);
-            if (USR_THROTTLES_ENABLED &&
+            if (
                 orderIt != farmerLastOrderFrame.end() &&
                 g_frame - orderIt->second < USR_ECONOMY_ORDER_INTERVAL)
                 continue;
@@ -4276,7 +4307,7 @@ static bool TryBuild(UsrAI *ai, int buildingType)
     buildFailCodes[typeIdx] = 1; // 上一个建造指令还没结算
     return false;
   }
-  if (USR_THROTTLES_ENABLED &&
+  if (
       g_frame - lastBuildOrderFrame < USR_BUILD_ORDER_INTERVAL) {
     buildFailCodes[typeIdx] = 2; // 建造冷却中
     return false;
@@ -6242,9 +6273,21 @@ static bool ShouldReissuePriestMove(const tagArmy *priest, int tx, int ty,
     *wasStuck = false;
   if (priest == nullptr)
     return false;
-  if (priestEmergencyTarget.first != tx || priestEmergencyTarget.second != ty)
-    return !USR_THROTTLES_ENABLED ||
-           g_frame - priestEmergencyTargetFrame >= USR_PRIEST_ORDER_INTERVAL;
+  // 【判「目标变了」带 2 格死区，并且不再有帧间隔】
+  //
+  // 原先这里既逐格比较、又要求间隔 ≥ USR_PRIEST_ORDER_INTERVAL(20 帧)，两个毛病：
+  //   · 逐格比较：撤退点是按祭司【当前位置】重算出来的，会随它移动小幅漂移，
+  //     于是每帧都判「变了」—— 一旦没有间隔就是逐帧重发（实测游戏日志里祭司每
+  //     40ms 被下一遍 HumanMove 到同一坐标、路径每帧被 suspendRelation 清空、
+  //     永远走不到）；
+  //   · 那 20 帧的等待又把【真正的撤退反应】拖慢最多 20 帧 —— 祭司 100 血、
+  //     近战与远程防御都是 0，挨打时这 20 帧要命（实测反馈「祭司死得太早」）。
+  // 死区一次解决两边：漂移（≤2 格）被滤掉，于是不需要帧间隔 ——
+  //   真正的变化（威胁的方向/位置变了）【立刻】重发；漂移则落到下面那条
+  //   「目标没变 → 只在卡住时才重发」的判据上，不会逐帧刷。
+  if (BlockDis2(priestEmergencyTarget.first, priestEmergencyTarget.second, tx,
+                ty) > 4)
+    return true;
   // 目标没变：判据是「这段时间有没有在靠近」，而不是「位置有没有变」。
   //
   // 【为什么不能用位置】原判据是「当前位置 == 下发时的位置」，也就是只有
@@ -7379,8 +7422,10 @@ static void ManagePriest(UsrAI *ai)
             int awayUR = 0;
             if (PriestInEnemyBaseKeepout(*priest, awayDR, awayUR))
             {
-                // 节流重发：每 USR_PRIEST_ORDER_INTERVAL 帧最多一次，
-                // 否则每帧重发会不断 suspendRelation + 重新寻路，反而走不动。
+                // 重发由 ShouldReissuePriestMove 把关：目标没变（2 格死区内）时只在
+                // 「超过 STUCK_FRAMES 且一直没靠近」才重发，目标真变了则立刻重发 ——
+                // 所以这里不需要再叠一层帧数节流（原先那 20 帧的间隔既拖慢撤退反应，
+                // 又掩盖过目标记录的缺陷，已去掉）。
                 if (ShouldReissuePriestMove(priest, awayDR, awayUR))
                 {
                     priestMoveOrderId = ai->HumanMove(
@@ -9458,7 +9503,7 @@ static bool ManageStandoff(UsrAI *ai)
         standoffEngagedSince = g_frame;
 
     const int orderInterval = 60;
-    if (USR_THROTTLES_ENABLED &&
+    if (
         g_frame - offensiveLastOrderFrame < orderInterval)
         return true; // 还在节流窗口里，但阶段判定已经做完
     offensiveLastOrderFrame = g_frame;
@@ -9896,7 +9941,7 @@ static bool IsMeleeAttackerSort(int sort)
 //   里那段说明。）
 static void KiteRangedBackFromMelee(UsrAI *ai)
 {
-    if (USR_THROTTLES_ENABLED &&
+    if (
         g_frame - lastKiteFrame < USR_MELEE_KITE_INTERVAL)
         return;
 
@@ -10096,8 +10141,11 @@ static void ManageOffensiveArmy(UsrAI *ai)
   // 不再依赖两个帧号的差。
   if (IsThirdWaveCleared() && !armyRalliedAtCenter)
   {
-    if (!USR_THROTTLES_ENABLED ||
-        lastArmyRallyFrame == USR_INVALID_FRAME ||
+    // 【本处的间隔【不】随节流总开关关闭】它属于「移动类指令必须有有界重试间隔」
+    // 的最小实现：没有它，卡住的单位会被每帧重发（每次清路径 → 永远走不动）。
+    // 上面的进度守卫已经让「正在走的单位」不再被重发，剩下需要限流的只有卡住的那
+    // 部分，所以这里保留原间隔即可 —— 这也是为什么这一处不去读 USR_THROTTLES_ENABLED。
+    if (lastArmyRallyFrame == USR_INVALID_FRAME ||
         g_frame - lastArmyRallyFrame >= USR_ARMY_RALLY_ORDER_INTERVAL)
     {
       lastArmyRallyFrame = g_frame;
@@ -10108,11 +10156,33 @@ static void ManageOffensiveArmy(UsrAI *ai)
       {
         if (!IsOffensiveArmy(army))
           continue;   // 祭司与侦察兵各有自己的调度
+        const int dis2 = BlockDis2(army.BlockDR, army.BlockUR, cx, cy);
         // 已经在中心附近 → 不动（重复下发 HumanMove 会清路径）
-        if (BlockDis2(army.BlockDR, army.BlockUR, cx, cy) <=
-            USR_ARMY_RALLY_ARRIVED_DIS2)
+        if (dis2 <= USR_ARMY_RALLY_ARRIVED_DIS2)
+        {
+          armyRallyFromDis2.erase(army.SN);  // 到位 → 清掉进度记录
           continue;
+        }
         anyOutOfPlace = true;
+        // 【进度守卫：正在靠近就不重发】
+        //
+        // 集结的目标是个【固定点】（地图中心），所以「到中心的距离有没有缩短」就
+        // 足以区分「在走」与「卡住」，不需要额外记目标。这道守卫解决的问题是实测
+        // 出来的：节流总开关关掉时（USR_THROTTLES_ENABLED=false），本块每帧执行
+        // 一遍，整支军队于是每帧被下一次 HumanMove 到同一坐标、每次都经
+        // suspendRelation 清空路径 —— 军队永远走不成线、到不了中心，连带
+        // armyRalliedAtCenter 这个 latch 永不成立、总攻永不启动。游戏日志里表现
+        // 为同一坐标每 40ms 刷一大片 HumanMove（实测：19:24:16→19:24:20 两帧里
+        // 十几个单位）。
+        // 【卡住的仍要重发】距离没有缩短（或还没记录）时照发，由外层那个
+        // USR_ARMY_RALLY_ORDER_INTERVAL 限流 —— 注意那个间隔【不随节流开关关闭】
+        // （它故意没被 `!USR_THROTTLES_ENABLED ||` 短路，理由见开关常量处的说明）：
+        // 移动类指令必须有一个有界的重试间隔，否则卡住的单位会被每帧重发。
+        const map<int, int>::const_iterator rallyIt =
+            armyRallyFromDis2.find(army.SN);
+        if (rallyIt != armyRallyFromDis2.end() && dis2 < rallyIt->second)
+          continue;
+        armyRallyFromDis2[army.SN] = dis2;
         ai->HumanMove(army.SN, (cx + 0.5) * double(BLOCKSIDELENGTH),
                       (cy + 0.5) * double(BLOCKSIDELENGTH));
       }
@@ -10235,7 +10305,7 @@ static void ManageOffensiveArmy(UsrAI *ai)
 
   const int targetSN = FindOffensiveTargetSN();
   const int orderInterval = 60;
-  if (USR_THROTTLES_ENABLED &&
+  if (
       g_frame - offensiveLastOrderFrame < orderInterval)
     return;
   offensiveLastOrderFrame = g_frame;
@@ -10335,7 +10405,7 @@ static void KeepHuntersOnLiveGazelles(UsrAI *ai)
 
         map<int, int>::const_iterator lastIt =
             hunterRedirectFrame.find(farmer.SN);
-        if (USR_THROTTLES_ENABLED &&
+        if (
             lastIt != hunterRedirectFrame.end() &&
             g_frame - lastIt->second < USR_HUNT_REDIRECT_INTERVAL)
             continue;
@@ -10594,7 +10664,7 @@ static void AssignArrowTowerTargets(UsrAI *ai)
     {
         if (building.Type != BUILDING_ARROWTOWER)
             continue;
-        if (USR_THROTTLES_ENABLED &&
+        if (
             g_frame - towerLastOrderFrame[building.SN] <
                 USR_TOWER_ORDER_INTERVAL)
             continue;
