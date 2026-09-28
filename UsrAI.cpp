@@ -674,6 +674,27 @@ static const int USR_DEPOT_MAX_HOME_DISTANCE = 65;
 // 候选，ReturnBuildingForResource(RESOURCE_BUSH) == BUILDING_GRANARY）。
 // 所以把整条路一起停掉会让箭塔永远造不出来。本开关【只停 STOCK】。
 static const bool USR_DEPOT_STOCK_ENABLED = false;
+// 【上级开关：整个「为资源建交付建筑」的功能】2026-09-28 按要求全部停用。
+//
+// 它把上面那个 USR_DEPOT_STOCK_ENABLED 一起盖住。那个开关现在只在恢复时才有
+// 意义：把本开关改回 true 并保持 STOCK 为 false，就只恢复谷仓那条路。
+//
+// 【必须知道的完整后果：停掉它会断掉整条军事链】谷仓不只是「浆果丛的交付点」，
+// 它还是两处引擎前置的起点：
+//   · Development.cpp:635 —— 市场(BUILDING_MARKET)的前置是谷仓；
+//   · Development.cpp:583 —— 箭塔的建造科技 BUILDING_GRANARY_ARROWTOWER 在谷仓研发。
+// 于是（AI 侧的追踪函数一开头就是 `if (wheelTechReady || market == nullptr)
+// return;`，见 UsrAI.cpp:4397）：
+//     谷仓 → 市场 → 车轮科技 → wheelTechReady → 战车弓兵
+//                                        ↘ ManageOffensiveArmy 的 !wheelTechReady 门
+//     谷仓 → 箭塔科技 → 箭塔
+//     市场 → 农田（Development.cpp:688）
+// 所以没有谷仓 ⇒【一个战车弓兵都造不出来、ManageOffensiveArmy 永远在
+// `!wheelTechReady` 处返回 → 永不进攻】，并且没有箭塔、没有农田、没有仓库。
+// AI 只会一直采集到 GAME_LOSE_SEC（30 分钟）判负。
+// 【这是明确接受的取舍，不是 bug】实测若看到「不造兵、不进攻、不建塔」，先回来
+// 看这个开关，不要当故障查。恢复：把它改回 true。
+static const bool USR_DEPOT_ENABLED = false;
 // 出兵建筑朝前线方向偏移的距离（格）。
 // 文档《快速升级和取得胜利》第 75 行：「建设靶场的时候也要考虑尽量往地图中间
 // 建，兵造出来很快就能加入战斗」。取 10：比箭塔近圈（6 格）远、比远圈（12 格）
@@ -5269,7 +5290,11 @@ static void ManageEconomyAndProduction(UsrAI *ai)
     // 而木材正是被农场（75 木/座）吃光的。
     // 放在这里的位置考虑：仍在市场/兵营/靶场/马厩之后（它们有前置链，
     // 且升时代需要它们），但抢在农场前面。
-    TryBuildReturnDepot(ai);
+    // 【默认关闭，见 USR_DEPOT_ENABLED】为资源建交付建筑（仓库 / 谷仓）。
+    // 注意：关掉它不只是「不建仓库」—— 谷仓是市场与箭塔科技的引擎前置，
+    // 所以会连市场、车轮科技、战车弓兵、箭塔、农田一起断掉，详见那个常量的说明。
+    if (USR_DEPOT_ENABLED)
+        TryBuildReturnDepot(ai);
 
     // 农场只在马厩/靶场建成后建：否则木头会被农场（75木）持续消耗，
     // 永远攒不够马厩/靶场（各150木），导致时代无法升级。
