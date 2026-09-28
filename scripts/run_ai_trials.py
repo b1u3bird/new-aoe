@@ -222,6 +222,64 @@ def summarize(results: list[TrialResult]) -> dict[str, Any]:
     }
 
 
+def print_result_matrix(results: list[TrialResult], rotations: list[int]) -> None:
+    """Print a compact map x rotation win/loss matrix, then the loser list.
+
+    Cell values: W = every run on that cell won, L = every run lost,
+    "aWbL" = mixed (only possible with --trials > 1), ? = no usable result
+    (timeout / crash / empty result log), - = column not run.
+    """
+    grouped: dict[tuple[str, int], list[TrialResult]] = {}
+    for result in results:
+        grouped.setdefault((result.map_file, result.rotation), []).append(result)
+
+    # Keep the user's map order; results were produced in that order.
+    map_files: list[str] = []
+    for result in results:
+        if result.map_file not in map_files:
+            map_files.append(result.map_file)
+
+    width = max([len(map_file) for map_file in map_files] + [3]) + 2
+    print("map x rotation  (W=win  L=lose  ?=no result):")
+    print("".ljust(width) + "".join(f"r{rotation}".rjust(8) for rotation in rotations))
+    for map_file in map_files:
+        cells: list[str] = []
+        for rotation in rotations:
+            entries = grouped.get((map_file, rotation), [])
+            if not entries:
+                cells.append("-")
+            elif any(entry.win is None for entry in entries):
+                cells.append("?")
+            else:
+                wins = sum(1 for entry in entries if entry.win)
+                if wins == len(entries):
+                    cells.append("W")
+                elif wins == 0:
+                    cells.append("L")
+                else:
+                    cells.append(f"{wins}W{len(entries) - wins}L")
+        print(map_file.ljust(width) + "".join(cell.rjust(8) for cell in cells))
+
+    losers = [result for result in results if result.win is not True]
+    if not losers:
+        print("losers: none")
+        return
+    print(f"losers ({len(losers)}):")
+    for result in losers:
+        if result.message:
+            reason = result.message
+        elif result.timed_out:
+            reason = "timeout"
+        elif result.error:
+            reason = result.error
+        else:
+            reason = "no result"
+        print(
+            f"  {result.map_file} rotate={result.rotation} trial={result.trial}"
+            f" -> {reason}"
+        )
+
+
 def main() -> int:
     args = parse_args()
     if args.trials < 1:
@@ -264,6 +322,10 @@ def main() -> int:
                     f"timeout={result.timed_out}",
                     flush=True,
                 )
+
+    # Printed before the JSON blob so the matrix + loser list end up right after
+    # the per-run lines instead of below 30 lines of aggregate JSON.
+    print_result_matrix(results, args.rotations)
 
     summary = summarize(results)
     report = {
