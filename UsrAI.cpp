@@ -653,6 +653,27 @@ static const int USR_HUNT_DEPOT_MIN_DIS2 = 36;
 // 的交付建筑，农民走得远一些（但不会再横穿到敌方那侧）。真出现「农民跑很远去采
 // 近处明明有的资源」，先回来看这个值是不是划得太紧。
 static const int USR_DEPOT_MAX_HOME_DISTANCE = 65;
+// 【开关：是否为伐木/采矿建【仓库】（BUILDING_STOCK）】2026-09-28 按要求停用。
+//
+// 【为什么可以停：市镇中心本来就是通用交付点】
+// 引擎挑交付建筑的是 Core_List::findResourceBuiding（Core_List.cpp:738-757），
+// 判据是
+//     (judeBuild->getNum() == BUILDING_CENTER && flag) || judeBuild->getNum() == type
+// 也就是说【市镇中心一直是被接受的交付建筑】，`flag` 只对帆船
+// （FARMERTYPE_SAILING）为假、陆上农民恒为真。Resource::get_ReturnBuildingType()
+// 那张表（HUMAN_WOOD → BUILDING_STOCK）只决定「优先送哪一类」，并不排除中心。
+// 所以木头/石头/黄金/羚羊尸体不送仓库也照样能交付 —— 送市镇中心即可。
+// 而家门口 30 格内就有 25,950 木（四张图实测 9,525~28,875，见本常量上方的表），
+// 整局需求约 2,500 —— 完全不需要为伐木铺仓库。
+//
+// 【为什么必须【保留】谷仓（BUILDING_GRANARY）的那条路】
+// 见 ManageEconomyAndProduction 里「箭塔科技」那一段：箭塔必须先完成谷仓的
+// 「研发:建造箭塔」(BUILDING_GRANARY_ARROWTOWER) 才能建造，否则 Core 以
+// ACTION_INVALID_HUMANBUILD_LOCK 拒绝；而全文件【没有任何地方
+// TryBuild(BUILDING_GRANARY)】—— 建谷仓的唯一路径就是本函数（浆果丛 / 农田那两条
+// 候选，ReturnBuildingForResource(RESOURCE_BUSH) == BUILDING_GRANARY）。
+// 所以把整条路一起停掉会让箭塔永远造不出来。本开关【只停 STOCK】。
+static const bool USR_DEPOT_STOCK_ENABLED = false;
 // 出兵建筑朝前线方向偏移的距离（格）。
 // 文档《快速升级和取得胜利》第 75 行：「建设靶场的时候也要考虑尽量往地图中间
 // 建，兵造出来很快就能加入战斗」。取 10：比箭塔近圈（6 格）远、比远圈（12 格）
@@ -4094,6 +4115,10 @@ static void TryBuildReturnDepot(UsrAI *ai)
     int huntUR = 0;
     int huntDis2 = 0;
     RebuildGazelleClusters();
+    // 【仓库候选已停用，见 USR_DEPOT_STOCK_ENABLED】猎物群这条锚的是
+    // BUILDING_STOCK（羚羊尸体走 HUMAN_STOCKFOOD → 仓库），一并停掉：
+    // 尸体采集改送市镇中心（引擎允许），不必在猎场旁边铺仓库。
+    if (USR_DEPOT_STOCK_ENABLED)
     {
         for (map<int, GazelleCluster>::const_iterator it =
                  gazelleClusters.begin();
@@ -4154,6 +4179,12 @@ static void TryBuildReturnDepot(UsrAI *ai)
             // 立刻变「近」、继续往那儿派人 —— 自我强化的假象，也是野外那些多余
             // 仓库的来源之一。详见 ReturnBuildingForResource 的引擎真值表。
             const int returnBuilding = ReturnBuildingForResource(resource.Type);
+            // 【仓库候选已停用，见 USR_DEPOT_STOCK_ENABLED】树/石/金/鱼都走
+            // BUILDING_STOCK，一律跳过；只留下浆果丛（→ BUILDING_GRANARY）——
+            // 谷仓是我方箭塔科技的前置，那条路不能停。
+            // 跳过的后果：这些资源不再有自己的交付点，农民改送市镇中心。
+            if (!USR_DEPOT_STOCK_ENABLED && returnBuilding == BUILDING_STOCK)
+                continue;
             const int dis2 = FindNearestReturnBuildingDistance(
                 returnBuilding, resource.BlockDR, resource.BlockUR);
             if (dis2 > worstReturnDis2)
