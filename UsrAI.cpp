@@ -894,6 +894,14 @@ static int lastPriestOrderFrame = USR_INVALID_FRAME;
 // 主力开始总攻后的祭司跟随门控状态。
 static bool offensiveAttackStarted = false;
 static int offensiveAttackStartFrame = USR_INVALID_FRAME;
+// 上一次下发「进攻 / 站桩」指令的帧。ManageStandoff 与 ManageOffensiveArmy 共用，
+// 两处判据都是 `g_frame - offensiveLastOrderFrame < 60`。
+//
+// 【为什么声明在这个位置、不放函数区】它必须能在新对局重置块里被清掉 —— 帧号随
+// 新对局回退后那个差是【负数】、条件恒成立，两条分支会每帧 return，新对局里军队
+// 一次进攻指令都不下发（与 lastArmyRallyFrame 是同一个坑，见重置块里的说明）。
+// 重置块在文件靠前处，所以声明也得在它之前。
+static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 // 上一次下发「向地图中间集结」指令的帧。见 ManageOffensiveArmy 开头那一段。
 static int lastArmyRallyFrame = USR_INVALID_FRAME;
 // 祭司最近一次确认安全的起始游戏帧。
@@ -2561,6 +2569,14 @@ static void ProcessPendingGatherOrders()
         // 否则新局的 30000 帧会减去上一局的帧号、算出负数，条件永不成立，
         // 集结一次都不下发。
         lastArmyRallyFrame = USR_INVALID_FRAME;
+        // 【同一个坑，总攻 / 站桩的节流时间戳】ManageStandoff 与
+        // ManageOffensiveArmy 都用 `g_frame - offensiveLastOrderFrame < 60` 做
+        // 节流，差是负数时条件恒成立 → 两条分支每帧都 return → 新对局里军队
+        // 【一次进攻指令都不下发】，要等帧号重新爬过上一局那条时间线才恢复。
+        // 这两个门控状态一并清掉。
+        offensiveLastOrderFrame = USR_INVALID_FRAME;
+        offensiveAttackStarted = false;
+        offensiveAttackStartFrame = USR_INVALID_FRAME;
         standoffRetreatUntil.clear();
         standoffRetreatFromDis2.clear();
         badBuildSpot.clear();
@@ -8365,7 +8381,6 @@ static bool IsExplorationFrontierBlock(int blockDR, int blockUR)
     return false;
 }
 
-static int offensiveLastOrderFrame = USR_INVALID_FRAME;
 // 每次后撤几格。
 static const int USR_MELEE_KITE_BLOCKS = 2;
 // 被近战贴上后撤到「离敌方锚点」多少格。取 30（比站桩环 USR_STANDOFF_RADIUS
@@ -9030,25 +9045,84 @@ static bool ManageStandoff(UsrAI *ai)
 static void UpdateEnemyBaseDiscovery()
 {
     // 侦察骑兵探路后即可发现敌方基地；进攻时机由科技完成度控制。
-
+    //
+    // 【为什么不能取「列表里第一个活着的建筑」】info.enemy_buildings 每帧都被
+    // GlobalVariate 的 WLHHunYao 洗牌（GlobalVariate.cpp:1086），「第一个」每帧
+    // 都在变。本函数又每帧被 ManageOffensiveArmy 调用一次，enemyBaseSN 于是每帧
+    // 被改写成一座【随机的】敌方建筑 —— 而 FindOffensiveTargetSN() 的第 ② 条正是
+    // 拿它当进攻目标。实测表现：场上还有箭塔，全军却在几座塔之间每 60 帧换一次
+    // 目标，每次换目标都重建攻击关系、把已打出的伤害进度清零
+    // （见 :7976 的警告），于是哪座塔都拆不掉。
+    //
+    // 改成按【最小的 SN】取：SN 是稳定唯一键，与洗牌顺序无关，每帧结果一致。
+    // 「任意存活敌方建筑都算发现敌方基地」这条口径不变，仍然不要求是市镇中心。
+    int pickSN = -1;
+    int pickDR = 0;
+    int pickUR = 0;
     for (const tagBuilding &building : info.enemy_buildings)
     {
-        // 任意存活敌方建筑都代表敌方基地已被侦察到，不要求必须是市镇中心。
-        if (building.Blood > 0)
+        if (building.Blood <= 0)
+            continue;
+        if (pickSN == -1 || building.SN < pickSN)
         {
-            enemyBaseDiscovered = true;
-            enemyBaseSN = building.SN;
-            enemyBaseBlockDR = building.BlockDR;
-            enemyBaseBlockUR = building.BlockUR;
-            enemyBaseLastSeenFrame = g_frame;
-            return;
+            pickSN = building.SN;
+            pickDR = building.BlockDR;
+            pickUR = building.BlockUR;
         }
     }
+    if (pickSN == -1)
+        return;   // 视野里没有敌方建筑，保持上一次的记录
+    enemyBaseDiscovered = true;
+    enemyBaseSN = pickSN;
+    enemyBaseBlockDR = pickDR;
+    enemyBaseBlockUR = pickUR;
+    enemyBaseLastSeenFrame = g_frame;
 }
 
 // 进攻目标
-// SN：优先敌方市镇中心，基地摧毁后转为攻城武器厂附近的防守兵（护送祭司）。
+// SN：优先敌方箭塔（逐座集中拆除），其次是市镇中心；基地摧毁后转为攻城武器厂
+// 附近的防守兵（护送祭司）。
 static int FindOffensiveTargetSN() {
+  // 0. 【最高优先级】敌方箭塔 —— 视野里没有敌兵时，全军集中拆【一座】。
+  //
+  // 【为什么必须排在市镇中心之前】本 AI 的获胜路径是祭司转化敌方攻城武器厂，而
+  // CanPriestApproachSiege() 的第 ④ 条要求「一座活着的敌方箭塔都没有」
+  // （SiegeTowersCleared：被牵制的塔照样开火，祭司 100 血 0 防扛不住几轮）。
+  // 只要还剩一座已知的活塔，祭司就永远不出门 —— 拆塔是获胜的必经之路。
+  // 实测这局敌方【没有市镇中心】，只有箭塔与攻城武器厂，所以原先排在第 ① 条的
+  // 「市镇中心」根本不成立，全军会落到第 ② 条 —— 而那条正是下面这个 bug 的来源。
+  //
+  // 【为什么不能靠列表顺序挑一座】info.enemy_buildings 每帧都被 GlobalVariate 的
+  // WLHHunYao 洗牌（GlobalVariate.cpp:1086），「第一个匹配的」每帧都在变。全军
+  // 目标一跳变就要 ClearArmyTargetLock + 重发 HumanAction，而重发会【重建攻击
+  // 关系、把已经打出去的伤害进度清零】（见 :7976 与 :9256 两处警告）—— 表现就是
+  // 「场上还有箭塔、军队却在几座塔之间来回走，一座都拆不掉」。
+  //
+  // 所以这里用与洗牌无关的确定性判据：按【距敌方锚点升序】排，同距再按 SN 升序。
+  // 沿祭司必经之路逐座清；一座拆掉（Blood<=0）后自动落到下一座，天然形成
+  // 「逐座集中拆除」。锚点取不到时退化成纯 SN 升序，仍然确定。
+  {
+    int towerAnchorDR = 0;
+    int towerAnchorUR = 0;
+    const bool haveTowerAnchor = EstimateEnemySiegeAnchor(towerAnchorDR, towerAnchorUR);
+    int towerBestSN = -1;
+    int towerBestDis2 = 0;
+    for (const tagBuilding &building : info.enemy_buildings) {
+      if (building.Blood <= 0 || building.Type != BUILDING_ARROWTOWER)
+        continue;
+      const int dis2 = haveTowerAnchor
+                           ? BlockDis2(building.BlockDR, building.BlockUR,
+                                       towerAnchorDR, towerAnchorUR)
+                           : 0;
+      if (towerBestSN == -1 || dis2 < towerBestDis2 ||
+          (dis2 == towerBestDis2 && building.SN < towerBestSN)) {
+        towerBestSN = building.SN;
+        towerBestDis2 = dis2;
+      }
+    }
+    if (towerBestSN != -1)
+      return towerBestSN;
+  }
   // 1. 敌方市镇中心（推平基地）。
   for (const tagBuilding &building : info.enemy_buildings) {
     if (building.Blood > 0 && building.Type == BUILDING_CENTER)
@@ -9952,7 +10026,28 @@ static void SacrificeExcessFarmers(UsrAI *ai) {
 }
 
 // 【开关一：农民护送祭司】撤出经济 → 集结到敌方基地外 → 拆敌塔。
-static const bool USR_FARMER_ESCORT_ENABLED = true;
+//
+// 【当前取值：关闭（按需求取消护送机制）】关掉之后农民全部留在采集队里 ——
+// 不再撤出经济、也不再去拆敌塔。带「已征召」判据的那些入口补丁
+// （CalculateFarmerTargets / FindBuilderFarmerSN / TryAssignIdleFarmer /
+// TryResumeIncompleteBuilding / FindRepairFarmerSN / AssignFarmerSelfDefense /
+// KeepHuntersOnLiveGazelles / SacrificeExcessFarmers 等 10 处）读的是
+// IsFarmerEscorting()，而它查的 farmerEscortDuty 只由 RecruitFarmersForEscort
+// 写入；本开关关掉后那张表恒为空，补丁自然全部失效，不需要跟着改。
+//
+// 【代价：拆塔的担子换人挑了】关掉之后农民不再拆塔，改由【军队】承担 ——
+// 军队的进攻目标由 FindOffensiveTargetSN() 决定，而它的第 0 条正是「视野里
+// 没有敌兵时，全军集中拆距敌方锚点最近的那一座箭塔」，一座拆完自动换下一座。
+// 所以获胜路径仍然成立（CanPriestApproachSiege 的第 ④ 条 SiegeTowersCleared
+// 只要求「一座活着的敌方箭塔都没有」，军队逐座拆完即可满足），代价是两处：
+//   · 节奏比农民那套慢，而且军队拆塔时会挨箭塔的反击 —— 塔的目标取自 Defend
+//     集合，那个集合只收我方军队（enemyai.cpp:238-241）；农民拆塔是单方面输出，
+//     不会挨打，军队不是；
+//   · 少了一条兜底。原先 USR_FARMER_TOWER_FALLBACK_FRAME 那条「时间到了就让
+//     农民去拆」是用来对付「某些塔没被侦察到、参谋永远凑不齐」的，现在没有替代。
+// 因此若实测出现「祭司长期不进厂」，先查 SiegeTowersCleared 的返回（[SIEGE]
+// 行的 towersCleared=），而不是先怀疑祭司的走位。
+static const bool USR_FARMER_ESCORT_ENABLED = false;
 // 【开关二：人口满时自毁农民腾人口】
 //
 // 【为什么和护送拆成两个开关】原来它们共用一个常量，于是「只要其中一个出
