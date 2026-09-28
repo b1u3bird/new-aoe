@@ -1311,14 +1311,14 @@ static int clubmanResultFrame = USR_INVALID_FRAME;
 //   · 做对照实验：确认某次结果差异不是「日志 I/O 带来的时序扰动」造成的
 //     （这一点在本项目里不是空想：AI 会被丢帧，而丢帧比例受机器负载影响）。
 //
-// 【取值】默认 true = 保持原有行为。要安静就把这里改成 false。
+// 【取值】当前 false = 全关（按要求「先关闭」）。改回 true 即恢复全部日志。
 //
 // 【与 AOE_AI_LOG 环境变量的区别】那个管的是「写到哪个文件」（并行评测时每个实例
 // 一份日志），本开关管的是「写不写」—— 两件事，互不影响。
 //
 // 【提醒】关掉之后【所有】调试信息都没了，包括评测脚本依赖的 [AI] 行
 // （scripts/run_ai_trials.py 留下的 .ai.log 会是空的）。做评测时别关。
-static const bool USR_AI_LOG_ENABLED = true;
+static const bool USR_AI_LOG_ENABLED = false;
 
 // 调试日志：写入 ai_debug.log，用于离线分析 AI 决策与游戏状态。
 static void AiDebugLog(const char *msg) {
