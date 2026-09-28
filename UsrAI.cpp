@@ -290,8 +290,12 @@ static const int USR_PRIEST_EXPLORE_UNTIL_FRAME = 5000;
 // 按需求改成以敌方基地为参照的 USR_PRIEST_ENEMY_BASE_KEEPOUT，见文件上方。
 // 第一个侦察骑兵的生产时间点。它执行「视野内出现敌人即撤回市镇中心」的
 // 保命策略，不承担基地侦测（角色判定见 DispatchScouts）。
-// 原为 33000，按要求提前到 30000（= 祭司进入「保存实力」阶段的时间点）。
-static const int USR_SCOUT_FIRST_FRAME = 30000;
+//
+// 【改动历史】原为 33000 → 按要求提前到 30000（= 祭司进入「保存实力」的时间点）
+// → 2026-09-28 按要求再提前到 25000，与军队集结（USR_ARMY_RALLY_FRAME）同帧。
+// 【注意它现在早于祭司保存实力】USR_PRIEST_PASSIVE_FRAME 仍为 30000，也就是说
+// 侦察兵出厂后 5000 帧，祭司才进入保存实力阶段 —— 这次提前带来的已知错位。
+static const int USR_SCOUT_FIRST_FRAME = 25000;
 // 侦察骑兵的【总数】。用于在人口上限里给它们始终预留位置 ——
 // 必须按总数预留、而不是等它该出场时才留：实测人口在 f=30000 之前就已经
 // 顶到 50/50，那时再留已经来不及，「侦察兵一个都造不出来」就是这么来的。
@@ -320,23 +324,42 @@ static const int USR_FARMER_LATE_TARGET = 5;
 // 专职侦测敌方基地的侦察骑兵的生产时间点。
 // 在 USR_SCOUT_FIRST_FRAME 之后产出的侦察兵执行「视野内出现敌人即撤回市镇中心」
 // 的保命策略，不承担基地侦测；这一帧之后再补 1 个专门负责侦测敌方基地的。
-// 原为 36000，按要求提前到 33000。
-static const int USR_SCOUT_RECON_FRAME = 33000;
+//
+// 【改动历史】原为 36000 → 按要求提前到 33000 → 2026-09-28 按要求提前到 28000
+// （与总攻 USR_OFFENSIVE_FRAME 同帧，保持下面那条「专职侦测兵开始工作 = 军队
+// 具备出击条件」的关系）。
+// 【为什么不能比总攻晚】ManageOffensiveArmy 里有一道
+// `if (!enemyBaseDiscovered) return;` —— 基地没被发现时总攻根本不启动，而专职
+// 侦测兵是发现敌方基地的主要手段。它若留在 33000，28000 这个总攻时间点就只是
+// 摆设（军队会一直等到基地被发现为止）。
+static const int USR_SCOUT_RECON_FRAME = 28000;
 // 开始允许军队主动进攻敌方建筑的帧号。
 // 此前军队只做接敌自卫（AssignFieldSelfDefense：看到谁打谁，从不主动推进）；
 // 过了这一帧之后，已经侦察到的敌方建筑会被列为攻击目标。
 // 与 USR_SCOUT_RECON_FRAME 同帧是有意的：专职侦测兵开始工作时，
 // 军队也刚好具备出击的条件。
-static const int USR_OFFENSIVE_FRAME = 33000;
-// 军队开始向【地图中间】集结的帧号。取 30000 —— 与侦察骑兵出厂
-// （USR_SCOUT_FIRST_FRAME）、祭司「保存实力」（USR_PRIEST_PASSIVE_FRAME）同帧，
-// 三者都是「后期开始」的信号。
+//
+// 【改动历史】原为 33000，2026-09-28 按要求提前到 28000 —— 集结窗口随之整体
+// 前移（见 USR_ARMY_RALLY_FRAME）。
+// 【提前它的实际效果有上限】上面那道 `!enemyBaseDiscovered` 门控：敌方基地在
+// 28000 之前没被侦察到的话，军队仍要等到发现它的那一帧才动。判据看 [AI] 行的
+// baseKnown=。
+static const int USR_OFFENSIVE_FRAME = 28000;
+// 军队开始向【地图中间】集结的帧号。取 25000 —— 2026-09-28 总攻提前到 28000 后
+// 一并前移，保持原来的 3000 帧集结窗口（25000~28000）。原先取 30000，与侦察骑兵
+// 出厂（USR_SCOUT_FIRST_FRAME）、祭司「保存实力」（USR_PRIEST_PASSIVE_FRAME）同帧。
+//
+// 【必须严格早于 USR_OFFENSIVE_FRAME】集结分支的判据是
+// `g_frame >= USR_ARMY_RALLY_FRAME && g_frame < USR_OFFENSIVE_FRAME` ——
+// 一旦反超（集结帧 ≥ 总攻帧），这个区间恒为空，集结永远不会执行、而且不报错。
+// 【已知错位】它现在不再与 USR_PRIEST_PASSIVE_FRAME(30000) 同帧：军队 28000 就
+// 压上去了，祭司要到 30000 才进入保存实力，中间 2000 帧祭司仍在探图状态。
 //
 // 【为什么要有集结这一步】USR_OFFENSIVE_FRAME 一到，ManageOffensiveArmy 会让
 // 全军直奔目标建筑。而部队是零散生产出来的、散在基地各处，一起出发会拉成一条
 // 长线，先到的被守军逐个吃掉。先在地图中心（双方基地之间的中点，四张图的敌方
 // 基地都在我方市镇中心的对角线上）把队伍收拢，到点再整体压上。
-static const int USR_ARMY_RALLY_FRAME = 30000;
+static const int USR_ARMY_RALLY_FRAME = 25000;
 // 集结指令的下发间隔。取 120：基地到地图中心约 60~70 格，按 HUMAN_SPEED
 // 2.236 走完约 1000 帧；这个间隔够走一段，又不至于频繁重发（每次 HumanMove
 // 都会经 suspendRelation 清一次路径）。
@@ -380,8 +403,9 @@ static const int USR_FARMER_SELF_DEFENSE_FRAME = 30000;
 // 农民投入的帧号。取 35000 = USR_FARMER_LATE_FRAME —— 那一帧之后农民上限
 // 本就压到 5、经济进入收缩期，把采集力一次性交给前线，与「此时经济已成型、
 // 军队才是胜负手」的既有判断一致。
-// 【与军队总攻(USR_OFFENSIVE_FRAME = 33000)差 2000 帧是有意的】：军队先出发
+// 【与军队总攻(USR_OFFENSIVE_FRAME = 28000)相差 7000 帧是有意的】：军队先出发
 // 去清守军，农民后走，避免在完全没有掩护的情况下先撞上敌方军队。
+// （这个机制目前已由 USR_FARMER_ESCORT_ENABLED=false 停用，消息仅供参考。）
 static const int USR_FARMER_ESCORT_FRAME = 35000;
 
 // 祭司【跟随军队出征】到前线驻留带的帧号。取 35000 = USR_FARMER_ESCORT_FRAME，
@@ -389,7 +413,7 @@ static const int USR_FARMER_ESCORT_FRAME = 35000;
 // 祭司 2.03 px/帧），才能同时到位；任何一方先走都会让另一方在敌方基地门口
 // 单独暴露几百帧。
 //
-// 【为什么不直接改 USR_OFFENSIVE_FRAME(33000)】那个常量还被 ManageOffensiveArmy
+// 【为什么不直接改 USR_OFFENSIVE_FRAME(28000)】那个常量还被 ManageOffensiveArmy
 // 用作军队总攻的时机，一起改会把军队也推迟 2000 帧 —— 而需求只要求祭司与农民
 // 同步，军队仍应提前出发去清守军（这正是上面那条「差 2000 帧是有意的」）。
 static const int USR_PRIEST_FRONT_POST_FRAME = 35000;
@@ -6014,10 +6038,10 @@ static void ManagePriest(UsrAI *ai)
     // （keepout 是"朝我方中心退"，而中心在 100+ 格外的另一头）。
     //
     // 【只在军队出征时生效】判据是「已侦察到敌方基地 + 过了
-    // USR_PRIEST_FRONT_POST_FRAME(38000)」。否则开局就把祭司往敌方基地拉，
+    // USR_PRIEST_FRONT_POST_FRAME(35000)」。否则开局就把祭司往敌方基地拉，
     // 等于让它一个人横穿半张地图。
     //
-    // 【这一帧为什么与农民护送同帧、而不是沿用军队总攻的 33000】需求是
+    // 【这一帧为什么与农民护送同帧、而不是沿用军队总攻的 28000】需求是
     // 「农民和祭司一起上战场」：两者同帧动身才能同时到位（移速相近、路程相同）。
     // 祭司单独提前 5000 帧出发，就会在农民还在赶路的那段时间里独自站在
     // 敌方基地外的环上 —— 没有掩护，而它只有 100 血、防御为 0。
@@ -7162,7 +7186,7 @@ static void DispatchScouts(UsrAI *ai)
         //
         // 【为什么改成按帧号】保命型的「勾引 + 撤回」是为【波次防御】服务的
         // （FAT=6000 / SAT=13500 / TAT=21000，第三波在 21000 就结束了），
-        // 而 USR_SCOUT_RECON_FRAME(33000) 在那之后 —— 过了这个点，波次防御已经
+        // 而 USR_SCOUT_RECON_FRAME(28000) 在那之后 —— 过了这个点，波次防御已经
         // 用不上它了，让它转去侦测敌方基地收益更大。
         //
         // 【按需求取消保命型】现在所有侦察兵一视同仁按侦测型行事，见
@@ -9263,7 +9287,7 @@ static bool IsMeleeAttackerSort(int sort)
 // 而它一旦接管就直接 return。挨打撤退是更紧迫的动作，排在它后面就永远执行不到。
 //
 // 【没有「只在敌基地附近」的判断】调用点已经在 ManageOffensiveArmy 的几道门
-// 之后（33000 帧 / 已升时代 / 车轮科技 / 兵力 ≥8 / 已侦察到敌方建筑），
+// 之后（28000 帧 / 已升时代 / 车轮科技 / 兵力 ≥8 / 已侦察到敌方建筑），
 // 而那些门就是「正在攻打敌方基地」的定义 —— 不必在这里再写一遍。
 static void KiteRangedBackFromMelee(UsrAI *ai)
 {
@@ -9446,11 +9470,11 @@ static int PickEscortTowerForArmy(const tagArmy &army,
 
 static void ManageOffensiveArmy(UsrAI *ai)
 {
-  // 【集结阶段：USR_ARMY_RALLY_FRAME(30000) 之后，先全军到地图中间收拢】
+  // 【集结阶段：USR_ARMY_RALLY_FRAME(25000) 之后，先全军到地图中间收拢】
   //
   // 地图中心是双方基地之间的中点（四张图的敌方基地都在我方市镇中心的对角线上，
   // 见 EstimateEnemySiegeAnchor 的实测数据）。先在那儿把队伍收齐，等
-  // USR_OFFENSIVE_FRAME(33000) 再整体压上去 —— 部队是零散生产出来的、平时散在
+  // USR_OFFENSIVE_FRAME(28000) 再整体压上去 —— 部队是零散生产出来的、平时散在
   // 基地各处，直接出发会拉成一条长线，先到的被守军逐个吃掉。
   //
   // 【为什么放在这里、不放进下面的进攻分支】下面第一行就是
@@ -9480,7 +9504,7 @@ static void ManageOffensiveArmy(UsrAI *ai)
     return;
   }
 
-  // 进攻时机：过了 USR_OFFENSIVE_FRAME（33000）之后。此前军队只做接敌自卫
+  // 进攻时机：过了 USR_OFFENSIVE_FRAME（28000）之后。此前军队只做接敌自卫
   // —— AssignFieldSelfDefense 是「看到谁打谁」，从不主动推进。
   if (g_frame < USR_OFFENSIVE_FRAME)
     return;
