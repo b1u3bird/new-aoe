@@ -736,17 +736,27 @@ static const int USR_INVALID_FRAME = -1000000000;
 // 之后 AI 一直发战车弓兵订单而 Core 一直以 ACTION_INVALID_BUILDACT_LOCK 拒绝，
 // 整局产不出一个战车弓兵。
 static const int USR_MARKET_IDLE_FRAMES = 300;
-// 市场研发指令的确认窗口：发出后这么多帧内市场 Project 仍未进入研发，
-// 就判定这条研发不可用（被 Core 以 ACTION_INVALID_BUILDACT_LOCK 拒绝）。
-// 不能用 ins_ret 回执来判定 —— 它只保留最近 100 条（tagGame::update），
-// 而一次研发要跑上千帧，指令的回执早被后续指令挤掉。依赖回执会让状态机
-// 永久卡在「等回执」上：实测表现为车轮研发结束后市场全程空闲，
-// 木材链与农田链再也没被下发过一次。
-static const int USR_MARKET_ORDER_TIMEOUT = 120;
-// 市场研发失败后的冷却帧数。失败往往只是暂时的（资源不足、或研发链这一级
-// 时代未到），所以只冷却一段时间再重试，绝不永久跳过 —— 永久标记会让车轮与
-// 木材加工在食物攒够之后依然永远发不出去：实测早期食物只有 20~85 时被 Core
-// 拒掉，等食物涨到 155，市场已经把它们记成「不可研发」，整局再没试过。
+// 市场研发指令「回执」的兜底超时（帧）：下单后这么久还没在 info.ins_ret 里看到
+// 该 orderId 的结果，就按「被拒」处理并重试。
+//
+// 【回执只用来判「这条下单被接受了吗」，不用来判「研发完成了吗」】
+// 这个区分很关键，也是这里踩过坑的地方：
+//   · 判「被接受」—— 下单后 1~2 帧内查一次即可。回执正常 1 帧内到
+//     （Core.cpp:1515-1516 对成功与失败都写），而 info.ins_ret 只保留最近 100 条
+//     （tagGame::update），1~2 帧内远不会被挤掉。
+//   · 判「研发完成」——【不能】用回执：一次研发要跑上千帧，那条回执早被后续指令
+//     挤出了 100 条的窗口。实测这么干会让状态机永久卡在「等回执」上，表现为
+//     车轮研发结束后市场全程空闲、木材链与农田链再也没被下发过一次。
+//     完成仍然靠观察市场的 Project（见 USR_MARKET_IDLE_FRAMES）。
+// 取 30：回执正常 1 帧到，留一个远大于 1、又远小于任何研发时长的余量。
+static const int USR_MARKET_ORDER_TIMEOUT = 30;
+// 市场研发失败后的冷却帧数。【现在只对「未解锁/时代未到」这一类生效】——
+// 资源不足(ACTION_INVALID_RESOURCE)不再冷却了：那种失败只需等资源，而资源预检
+// 会在资源到位的同一次调用里下单，白等 600 帧纯属浪费（实测 16 局里 95% 的
+// 订单都栽在这上面）。
+// 冷却本身仍然必要、且绝不能改成永久跳过 —— 永久标记会让车轮与木材加工在食物
+// 攒够之后依然永远发不出去：实测早期食物只有 20~85 时被 Core 拒掉，等食物涨到
+// 155，市场已经把它们记成「不可研发」，整局再没试过。
 static const int USR_MARKET_RETRY_COOLDOWN = 600;
 // 人口硬上限（Development.h:134 的 humanNum_Top）。
 // info.Human_MaxNum 导出的是 min(房屋数 × HOUSE_HUMAN_NUM, 该值)，
@@ -4524,37 +4534,65 @@ static void ManageMarketResearch(UsrAI *ai, const tagBuilding *market)
 {
   if (market == nullptr)
     return;
-  if (market->Project != ACT_NULL)
-  {
-    // 研发正在进行 —— 刚下发的那条被 Core 接受了，清掉待确认状态。
-    marketOrderId = -1;
-    marketOrderSlot = -1;
-    return;
-  }
-  // 市场空闲：上一条若还没让市场忙起来，等够确认窗口就判定这次没成
-  // （时代未到 / 资源不足 / 链已走完）。只让它冷却一段时间，不永久跳过。
-  // 判据是「市场有没有真的进入研发」而不是回执 —— 理由见 USR_MARKET_ORDER_TIMEOUT。
+
+  // 【在途订单：读引擎回执，不再靠「市场忙没忙起来」+ 确认窗口去猜】
+  // 回执对成功与失败都会写（Core.cpp:1515-1516 的 insertInsRet，另有 3 处提前
+  // 返回也写），正常 1 帧内到，而且带着错误码 —— 比原来的 120 帧确认窗口又快又准。
   if (marketOrderId != -1)
   {
-    if (g_frame - marketOrderFrame < USR_MARKET_ORDER_TIMEOUT)
-      return;
-    // 【诊断】判定这次下发失败（市场没进研发）。它会让该槽位冷却
-    // USR_MARKET_RETRY_COOLDOWN，于是【排在第一位的木材加工一旦失败，
-    // 接下来 600 帧里车轮就会顶上来】—— 这一行是还原研发顺序的关键。
+    const map<int, int>::const_iterator result = info.ins_ret.find(marketOrderId);
+    if (result == info.ins_ret.end())
     {
-      char buf[192];
-      snprintf(buf, sizeof(buf), "[MARKET] f=%d timeout slot=%d action=%d",
-               g_frame, marketOrderSlot,
-               (marketOrderSlot >= 0 && marketOrderSlot < 3)
-                   ? kMarketResearch[marketOrderSlot]
-                   : -1);
-      AiDebugLog(buf);
+      if (g_frame - marketOrderFrame < USR_MARKET_ORDER_TIMEOUT)
+        return; // 还在途（正常情况下 1 帧内到，这里只是兜底）
+      // 回执始终没来 → 当被拒处理，但【不冷却】：下一帧重试即可。
+      {
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+                 "[MARKET] f=%d noRet slot=%d action=%d", g_frame,
+                 marketOrderSlot,
+                 (marketOrderSlot >= 0 && marketOrderSlot < kMarketResearchCount)
+                     ? kMarketResearch[marketOrderSlot]
+                     : -1);
+        AiDebugLog(buf);
+      }
+      marketOrderId = -1;
+      marketOrderSlot = -1;
     }
-    if (marketOrderSlot >= 0 && marketOrderSlot < 3)
-      marketCooldownUntil[marketOrderSlot] = g_frame + USR_MARKET_RETRY_COOLDOWN;
-    marketOrderId = -1;
-    marketOrderSlot = -1;
+    else
+    {
+      const int ret = result->second;
+      // 【只有「未解锁」才值得等】ACTION_INVALID_BUILDACT_LOCK(12) 是时代/前置
+      // 未到（工具时代研发木材二级就属于这类），给它长冷却；其余一律不冷却 ——
+      // 尤其是 ACTION_INVALID_RESOURCE(20)：资源不足只需等资源，而下面新增的
+      // 资源预检会在资源到位的【同一次调用】里下单，不必再白等 600 帧。
+      //
+      // 【这一条是「取消节流」的核心】原实现无条件下单、被拒后靠
+      // USR_MARKET_RETRY_COOLDOWN(600) 冷静一轮：实测 16 局里 95% 的订单都是
+      // 这样白刷的（112 次下单 / 106 次被拒），而「木材加工」首次真正启动的帧号
+      // 在 2830~14892 之间乱摆 —— 那条链直接决定车轮科技、进而决定战车弓兵与
+      // 获胜时间。现在失败不再吃冷却，资源一到就下单。
+      if (ret != ACTION_SUCCESS && ret != ACTION_INVALID_RESOURCE &&
+          marketOrderSlot >= 0 && marketOrderSlot < kMarketResearchCount)
+        marketCooldownUntil[marketOrderSlot] = g_frame + USR_MARKET_RETRY_COOLDOWN;
+      {
+        char buf[192];
+        snprintf(buf, sizeof(buf),
+                 "[MARKET] f=%d ret=%d slot=%d action=%d", g_frame, ret,
+                 marketOrderSlot,
+                 (marketOrderSlot >= 0 && marketOrderSlot < kMarketResearchCount)
+                     ? kMarketResearch[marketOrderSlot]
+                     : -1);
+        AiDebugLog(buf);
+      }
+      marketOrderId = -1;
+      marketOrderSlot = -1;
+    }
   }
+
+  // 市场正忙 → 本帧不下单。成功与否已由上面的回执判定，这里不再清状态。
+  if (market->Project != ACT_NULL)
+    return;
   for (int i = 0; i < kMarketResearchCount; ++i)
   {
     if (g_frame < marketCooldownUntil[i])
@@ -4579,6 +4617,54 @@ static void ManageMarketResearch(UsrAI *ai, const tagBuilding *market)
     if (kMarketResearch[i] == BUILDING_MARKET_WHEEL_UPGRADE &&
         woodResearchSeenCount < 2)
       continue;
+    // 【资源预检：上面那条「失败不吃冷却」的另一半】
+    // 与其发一条注定被 ACTION_INVALID_RESOURCE 拒掉的指令，不如资源到位才下单。
+    // 同一思路在 ResearchTechQueue 里已经用过（见那里 techFoodCost /
+    // USR_TECH_FOOD_RESERVE 的注释：「与其每 60 帧发一条注定失败的指令，不如等
+    // 资源到位再点」）。
+    // 【这里刻意不加食物余量】市场这三项都在获胜关键路径上（木材加工 → 车轮 →
+    // 战车弓兵），加余量只会把车轮推后。若日后发现军队因科技吃掉食物而断产，
+    // 再加一个比 USR_TECH_FOOD_RESERVE(60) 更小的余量。
+    // 花费取自 config.json：木材加工 120 食/75 木、车轮 150 食/100 木、
+    // 农田链 200 食/50 木（三项都没有黄金花费）。
+    {
+      const int action = kMarketResearch[i];
+      int needFood = 0;
+      int needWood = 0;
+      if (action == BUILDING_MARKET_WOOD_UPGRADE)
+      {
+        needFood = 120;
+        needWood = 75;
+      }
+      else if (action == BUILDING_MARKET_WHEEL_UPGRADE)
+      {
+        needFood = 150;
+        needWood = 100;
+      }
+      else if (action == BUILDING_MARKET_FARM_UPGRADE)
+      {
+        needFood = 200;
+        needWood = 50;
+      }
+      if (info.Meat < needFood || info.Wood < needWood)
+      {
+        // 诊断：把「为什么没研」变成一眼可见（原来这里是完全静默的，只能靠
+        // [MARKET] timeout 那一侧反推）。500 帧一条，避免刷屏。
+        static int lastMarketBlockedFrame = USR_INVALID_FRAME;
+        if (lastMarketBlockedFrame == USR_INVALID_FRAME ||
+            g_frame - lastMarketBlockedFrame >= 500)
+        {
+          lastMarketBlockedFrame = g_frame;
+          char buf[224];
+          snprintf(buf, sizeof(buf),
+                   "[MARKET] f=%d blocked=resource slot=%d need=(%d,%d) "
+                   "have=(%d,%d)",
+                   g_frame, i, needFood, needWood, (int)info.Meat, info.Wood);
+          AiDebugLog(buf);
+        }
+        continue;
+      }
+    }
     marketOrderId = ai->BuildingAction(market->SN, kMarketResearch[i]);
     marketOrderSlot = i;
     marketOrderFrame = g_frame;
